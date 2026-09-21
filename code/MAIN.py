@@ -71,6 +71,7 @@ def get_periodic_mesh():
 def solve_influence_function(K, F, B, element_nodes, element_partition_ids):
     displacements = solve_for_displacements(K, F)
     average_strain = get_partition_average_strain(displacements, B, element_nodes, element_partition_ids)
+    return average_strain
 
 corner_natural_coordinates = np.array([[-1, -1, -1], [1, -1, -1], [-1, 1, -1], [1, 1, -1],
                                        [-1, -1,  1], [1, -1,  1], [-1, 1,  1], [1, 1,  1]])
@@ -169,16 +170,30 @@ def get_F_eigenstrain(B, L_per_element, element_nodes, element_partition_ids):
     return F_eigenstrain
 
 def solve_for_displacements(K, loads):
-    pass
+    pinned_dofs = np.arange(3)
+    free_dofs = np.setdiff1d(np.arange(K.shape[0]), pinned_dofs)
+    displacements = np.zeros_like(loads)
+    displacements[free_dofs] = np.linalg.solve(K[np.ix_(free_dofs, free_dofs)], loads[free_dofs])
+    return displacements
 
 def get_partition_average_strain(displacements, B, element_nodes, element_partition_ids):
-    pass
+    element_dofs = get_element_dofs(element_nodes)
+    partition_count = partition_number_per_side**3
+    partition_volume = elements_per_partition_side**3 * element_side_length**3
+    average_strain = np.zeros((6 * partition_count, displacements.shape[1]))
+    for element_id in range(len(element_nodes)):
+        element_displacements = displacements[element_dofs[element_id]]
+        first_row = 6 * element_partition_ids[element_id]
+        for gauss_index in range(8):
+            average_strain[first_row:first_row + 6] += gauss_point_volume_weight * B[gauss_index] @ element_displacements
+    return average_strain / partition_volume
 
 def get_influence_functions(B, L_per_element, element_nodes, element_partition_ids):
     K = get_K(B, L_per_element, element_nodes)
     F_macrostrain = get_F_macrostrain(B, L_per_element, element_nodes)
     F_eigenstrain = get_F_eigenstrain(B, L_per_element, element_nodes, element_partition_ids)
-    E = solve_influence_function(K, F_macrostrain, B, element_nodes, element_partition_ids)
+    partition_count = partition_number_per_side**3
+    E = np.tile(np.eye(6), (partition_count, 1)) + solve_influence_function(K, F_macrostrain, B, element_nodes, element_partition_ids)
     P = solve_influence_function(K, F_eigenstrain, B, element_nodes, element_partition_ids)
     return E, P
 
