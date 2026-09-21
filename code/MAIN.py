@@ -27,7 +27,7 @@ if element_number_per_side % partition_number_per_side != 0:
     raise ValueError("The number of elements per side must be divisible by the number of partitions per side.")
 
 element_side_length = domain_side_length / element_number_per_side
-gauss_point_volume_weight = element_side_length**3 / 8
+gauss_point_volume_weight = element_side_length ** 3 / 8
 
 matrix_partitions_beside_inclusion = partition_number_per_side * (domain_side_length - inclusion_side_length) / (2 * domain_side_length)
 whole_matrix_partitions_beside_inclusion = round(matrix_partitions_beside_inclusion)
@@ -142,11 +142,31 @@ def get_K(B, L_per_element, element_nodes):
         K[np.ix_(element_dofs[element_id], element_dofs[element_id])] += K_element
     return K
 
+def get_F_element(B, L):
+    F_element = np.zeros((24, 6))
+    for gauss_index in range(8):
+        F_element += gauss_point_volume_weight * B[gauss_index].T @ L
+    return F_element
+
 def get_F_macrostrain(B, L_per_element, element_nodes):
-    pass
+    element_dofs = get_element_dofs(element_nodes)
+    dof_count = 3 * element_number_per_side**3
+    F_macrostrain = np.zeros((dof_count, 6))
+    for element_id in range(len(element_nodes)):
+        F_element = get_F_element(B, L_per_element[element_id])
+        F_macrostrain[element_dofs[element_id]] -= F_element
+    return F_macrostrain
 
 def get_F_eigenstrain(B, L_per_element, element_nodes, element_partition_ids):
-    pass
+    element_dofs = get_element_dofs(element_nodes)
+    dof_count = 3 * element_number_per_side**3
+    partition_count = partition_number_per_side**3
+    F_eigenstrain = np.zeros((dof_count, 6 * partition_count))
+    for element_id in range(len(element_nodes)):
+        F_element = get_F_element(B, L_per_element[element_id])
+        first_column = 6 * element_partition_ids[element_id]
+        F_eigenstrain[np.ix_(element_dofs[element_id], np.arange(first_column, first_column + 6))] += F_element
+    return F_eigenstrain
 
 def solve_for_displacements(K, loads):
     pass
