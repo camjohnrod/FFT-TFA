@@ -27,6 +27,7 @@ if element_number_per_side % partition_number_per_side != 0:
     raise ValueError("The number of elements per side must be divisible by the number of partitions per side.")
 
 element_side_length = domain_side_length / element_number_per_side
+gauss_point_volume_weight = element_side_length**3 / 8
 
 matrix_partitions_beside_inclusion = partition_number_per_side * (domain_side_length - inclusion_side_length) / (2 * domain_side_length)
 whole_matrix_partitions_beside_inclusion = round(matrix_partitions_beside_inclusion)
@@ -119,10 +120,27 @@ def get_L(elastic_modulus, poisson_ratio):
     return L
 
 def get_L_per_element(matrix_L, inclusion_L, element_material_ids):
-    pass
+    L_by_material_id = np.array([matrix_L, inclusion_L])
+    return L_by_material_id[element_material_ids]
+
+def get_element_dofs(element_nodes):
+    node_dofs = 3 * element_nodes[:, :, None] + np.arange(3)
+    return node_dofs.reshape(len(element_nodes), 24)
+
+def get_K_element(B, L):
+    K_element = np.zeros((24, 24))
+    for gauss_index in range(8):
+        K_element += gauss_point_volume_weight * B[gauss_index].T @ L @ B[gauss_index]
+    return K_element
 
 def get_K(B, L_per_element, element_nodes):
-    pass
+    element_dofs = get_element_dofs(element_nodes)
+    dof_count = 3 * element_number_per_side**3
+    K = np.zeros((dof_count, dof_count))
+    for element_id in range(len(element_nodes)):
+        K_element = get_K_element(B, L_per_element[element_id])
+        K[np.ix_(element_dofs[element_id], element_dofs[element_id])] += K_element
+    return K
 
 def get_F_macrostrain(B, L_per_element, element_nodes):
     pass
