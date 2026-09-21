@@ -71,8 +71,42 @@ def solve_influence_function(K, F, B, element_nodes, element_partition_ids):
     displacements = solve_for_displacements(K, F)
     average_strain = get_partition_average_strain(displacements, B, element_nodes, element_partition_ids)
 
+corner_natural_coordinates = np.array([[-1, -1, -1], [1, -1, -1], [-1, 1, -1], [1, 1, -1],
+                                       [-1, -1,  1], [1, -1,  1], [-1, 1,  1], [1, 1,  1]])
+
+def get_shape_function_derivatives(xi, eta, zeta):
+    corner_xi, corner_eta, corner_zeta = corner_natural_coordinates.T
+    xi_bracket   = 1 + corner_xi   * xi
+    eta_bracket  = 1 + corner_eta  * eta
+    zeta_bracket = 1 + corner_zeta * zeta
+    derivative_wrt_xi   = corner_xi   * eta_bracket * zeta_bracket / 8
+    derivative_wrt_eta  = corner_eta  * xi_bracket  * zeta_bracket / 8
+    derivative_wrt_zeta = corner_zeta * xi_bracket  * eta_bracket  / 8
+    return derivative_wrt_xi, derivative_wrt_eta, derivative_wrt_zeta
+
 def get_B():
-    pass
+    gauss_point_coordinates = corner_natural_coordinates / np.sqrt(3)
+    B = np.zeros((8, 6, 24))
+
+    for gauss_index, (xi, eta, zeta) in enumerate(gauss_point_coordinates):
+        derivatives_wrt_xi, derivatives_wrt_eta, derivatives_wrt_zeta = get_shape_function_derivatives(xi, eta, zeta)
+        derivatives_wrt_x = derivatives_wrt_xi   * 2 / element_side_length
+        derivatives_wrt_y = derivatives_wrt_eta  * 2 / element_side_length
+        derivatives_wrt_z = derivatives_wrt_zeta * 2 / element_side_length
+
+        for corner in range(8):
+            column = 3 * corner
+            B[gauss_index, 0, column]     = derivatives_wrt_x[corner]
+            B[gauss_index, 1, column + 1] = derivatives_wrt_y[corner]
+            B[gauss_index, 2, column + 2] = derivatives_wrt_z[corner]
+            B[gauss_index, 3, column]     = derivatives_wrt_y[corner]
+            B[gauss_index, 3, column + 1] = derivatives_wrt_x[corner]
+            B[gauss_index, 4, column + 1] = derivatives_wrt_z[corner]
+            B[gauss_index, 4, column + 2] = derivatives_wrt_y[corner]
+            B[gauss_index, 5, column]     = derivatives_wrt_z[corner]
+            B[gauss_index, 5, column + 2] = derivatives_wrt_x[corner]
+
+    return B
 
 def get_L(elastic_modulus, poisson_ratio):
     lame_lambda   = elastic_modulus * poisson_ratio / ((1 + poisson_ratio) * (1 - 2 * poisson_ratio))
