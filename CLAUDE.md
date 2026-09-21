@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-FFT-TFA is a research-notes repository developing FFT-accelerated Transformation Field Analysis (TFA) for elastoplastic composite homogenization. `code/` holds a single Python/numpy file (`MAIN.py`) that is being built up step by step: only `get_L`, `get_grid_id`, `get_periodic_mesh`, `get_shape_function_derivatives` and `get_B` are implemented so far, and every other function is still a `pass` stub or a short wish-list of calls to stubs. There is no dependency manifest, linter, or test suite. Do not assume a build/lint/test toolchain beyond "Python with numpy" (the local environment has Python 3.12 and numpy 2.x; scipy is not installed); check with the user before adding commands or dependencies here.
+FFT-TFA is a research-notes repository developing FFT-accelerated Transformation Field Analysis (TFA) for elastoplastic composite homogenization. `code/` holds a single Python/numpy file (`MAIN.py`) that is being built up step by step: only `get_L`, `get_grid_id`, `get_periodic_mesh`, `get_shape_function_derivatives`, `get_B`, `get_L_per_element`, `get_element_dofs`, `get_K_element` and `get_K` are implemented so far, and every other function is still a `pass` stub or a short wish-list of calls to stubs. There is no dependency manifest, linter, or test suite. Do not assume a build/lint/test toolchain beyond "Python with numpy" (the local environment has Python 3.12 and numpy 2.x; scipy is not installed); check with the user before adding commands or dependencies here.
 
 Run it with `python3 code/MAIN.py`. While the later stubs return `None`, `main()` runs to the end without error and `E`, `P`, `P0` are all `None`; that is expected, not a bug to chase.
 
