@@ -1,3 +1,4 @@
+import pathlib
 import numpy as np
 import scipy.sparse
 import scipy.sparse.linalg
@@ -207,6 +208,24 @@ def get_influence_functions(B, L_per_element, element_nodes, element_partition_i
     P = solve_influence_function(K, F_eigenstrain, B, element_nodes, element_partition_ids)
     return E, P
 
+cache_folder = pathlib.Path(__file__).parent / "cache"
+
+def load_cache(cache_path, parameters):
+    if not cache_path.exists():
+        print(f"{cache_path.name}: no cache found, computing.")
+        return None
+    cached = np.load(cache_path)
+    for name, value in parameters.items():
+        if not np.array_equal(cached[name], value):
+            print(f"{cache_path.name}: {name} changed, recomputing.")
+            return None
+    print(f"{cache_path.name}: loaded from cache.")
+    return cached
+
+def save_cache(cache_path, parameters, **arrays):
+    cache_folder.mkdir(exist_ok=True)
+    np.savez(cache_path, **arrays, **parameters)
+
 def get_plastic_eigenstrain():
     pass
 
@@ -223,10 +242,34 @@ def main():
     L_matrix = get_L(elastic_modulus_matrix, poisson_ratio_matrix)
     L_inclusion = get_L(elastic_modulus_inclusion, poisson_ratio_inclusion)
     L_per_element = get_L_per_element(L_matrix, L_inclusion, element_material_ids)
-    
-    E, P = get_influence_functions(B, L_per_element, element_nodes, element_partition_ids)
-    reference_L_per_element = get_L_per_element(L_matrix, L_matrix, element_material_ids) # using L_matrix for the reference is a placeholder for now
-    _, P0 = get_influence_functions(B, reference_L_per_element, element_nodes, element_partition_ids)
+    reference_L = L_matrix # using L_matrix for the reference is a placeholder for now
+    reference_L_per_element = get_L_per_element(reference_L, reference_L, element_material_ids)
+
+    E_P_cache_path = cache_folder / "E_P.npz"
+    E_P_parameters = {"domain_side_length": domain_side_length,
+                      "inclusion_side_length": inclusion_side_length,
+                      "element_number_per_side": element_number_per_side,
+                      "partition_number_per_side": partition_number_per_side,
+                      "L_matrix": L_matrix,
+                      "L_inclusion": L_inclusion}
+    cached_E_P = load_cache(E_P_cache_path, E_P_parameters)
+    if cached_E_P is None:
+        E, P = get_influence_functions(B, L_per_element, element_nodes, element_partition_ids)
+        save_cache(E_P_cache_path, E_P_parameters, E=E, P=P)
+    else:
+        E, P = cached_E_P["E"], cached_E_P["P"]
+
+    P0_cache_path = cache_folder / "P0.npz"
+    P0_parameters = {"domain_side_length": domain_side_length,
+                     "element_number_per_side": element_number_per_side,
+                     "partition_number_per_side": partition_number_per_side,
+                     "reference_L": reference_L}
+    cached_P0 = load_cache(P0_cache_path, P0_parameters)
+    if cached_P0 is None:
+        _, P0 = get_influence_functions(B, reference_L_per_element, element_nodes, element_partition_ids)
+        save_cache(P0_cache_path, P0_parameters, P0=P0)
+    else:
+        P0 = cached_P0["P0"]
 
 if __name__ == "__main__":
     main()
