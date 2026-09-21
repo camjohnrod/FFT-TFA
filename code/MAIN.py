@@ -1,4 +1,6 @@
 import numpy as np
+import scipy.sparse
+import scipy.sparse.linalg
 
 
 ## ------- Inputs ------- ##
@@ -137,11 +139,13 @@ def get_K_element(B, L):
 def get_K(B, L_per_element, element_nodes):
     element_dofs = get_element_dofs(element_nodes)
     dof_count = 3 * element_number_per_side**3
-    K = np.zeros((dof_count, dof_count))
+    K_elements = np.zeros((len(element_nodes), 24, 24))
     for element_id in range(len(element_nodes)):
-        K_element = get_K_element(B, L_per_element[element_id])
-        K[np.ix_(element_dofs[element_id], element_dofs[element_id])] += K_element
-    return K
+        K_elements[element_id] = get_K_element(B, L_per_element[element_id])
+    rows = np.repeat(element_dofs, 24, axis=1)
+    columns = np.tile(element_dofs, (1, 24))
+    K = scipy.sparse.coo_matrix((K_elements.ravel(), (rows.ravel(), columns.ravel())), shape=(dof_count, dof_count))
+    return K.tocsr()
 
 def get_F_element(B, L):
     F_element = np.zeros((24, 6))
@@ -172,8 +176,14 @@ def get_F_eigenstrain(B, L_per_element, element_nodes, element_partition_ids):
 def solve_for_displacements(K, loads):
     pinned_dofs = np.arange(3)
     free_dofs = np.setdiff1d(np.arange(K.shape[0]), pinned_dofs)
+    K_free = K[free_dofs][:, free_dofs].tocsc()
+    K_free_factorization = scipy.sparse.linalg.splu(K_free)
+
+    columns_per_solve = 100
     displacements = np.zeros_like(loads)
-    displacements[free_dofs] = np.linalg.solve(K[np.ix_(free_dofs, free_dofs)], loads[free_dofs])
+    for first_column in range(0, loads.shape[1], columns_per_solve):
+        columns = slice(first_column, first_column + columns_per_solve)
+        displacements[free_dofs, columns] = K_free_factorization.solve(loads[free_dofs, columns])
     return displacements
 
 def get_partition_average_strain(displacements, B, element_nodes, element_partition_ids):
