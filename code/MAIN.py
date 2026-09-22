@@ -2,6 +2,7 @@ import pathlib
 import numpy as np
 import scipy.sparse
 import scipy.sparse.linalg
+import matplotlib.pyplot as plt
 
 
 ## ------- Inputs ------- ##
@@ -19,7 +20,7 @@ matrix_yield_stress        = 1e6
 matrix_hardening_modulus   = 10e6
 
 max_uniaxial_strain        = 0.03
-strain_increment_count     = 60
+strain_increment_count     = 30
 
 fixed_point_tolerance      = 1e-6
 fixed_point_max_iterations = 1000
@@ -297,6 +298,7 @@ def standard_richardson_iteration(E, P, macro_strain, L_per_partition,
 
     b = (E @ macro_strain).reshape(partition_count, 6)
     strain = b.copy()
+    residual_history = []
 
     iteration = 0
     while True:
@@ -306,6 +308,7 @@ def standard_richardson_iteration(E, P, macro_strain, L_per_partition,
         strain_next = b + (P @ plastic_strain.reshape(-1)).reshape(partition_count, 6)
         residual = strain_next - strain
         relative_residual = np.linalg.norm(residual) / max(np.linalg.norm(strain_next), strain_norm_floor)
+        residual_history.append(relative_residual)
         strain = strain_next
         iteration += 1
 
@@ -319,7 +322,39 @@ def standard_richardson_iteration(E, P, macro_strain, L_per_partition,
         strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
         yield_stress_per_partition, hardening_modulus_per_partition)
 
-    return strain, stress, plastic_strain, accumulated_plastic_strain
+    return strain, stress, plastic_strain, accumulated_plastic_strain, np.array(residual_history)
+
+def get_macroscopic_stress(stress):
+    return np.mean(stress, axis=0)
+
+def run_uniaxial_strain_path(E, P, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition):
+    partition_count = L_per_partition.shape[0]
+    plastic_strain_history = np.zeros((partition_count, 6))
+    accumulated_plastic_strain_history = np.zeros(partition_count)
+
+    applied_strain_11 = np.linspace(max_uniaxial_strain / strain_increment_count, max_uniaxial_strain,
+                                     strain_increment_count)
+    macroscopic_stress = np.zeros((strain_increment_count, 6))
+    residual_history_per_step = []
+    load_step_boundaries = []
+    cumulative_iteration_count = 0
+
+    for step, strain_11 in enumerate(applied_strain_11):
+        macro_strain = np.array([strain_11, 0, 0, 0, 0, 0])
+        strain, stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = standard_richardson_iteration(
+            E, P, macro_strain, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition,
+            plastic_strain_history, accumulated_plastic_strain_history)
+        macroscopic_stress[step] = get_macroscopic_stress(stress)
+
+        if step > 0:
+            load_step_boundaries.append(cumulative_iteration_count)
+        residual_history_per_step.append(residual_history)
+        cumulative_iteration_count += len(residual_history)
+
+    all_residuals = np.concatenate(residual_history_per_step)
+    load_step_boundaries = np.array(load_step_boundaries)
+
+    return applied_strain_11, macroscopic_stress, all_residuals, load_step_boundaries
 
 def fft_preconditioned_richardson_iteration():
     pass
@@ -368,6 +403,34 @@ def main():
 
     hardening_modulus_by_material_id = np.array([matrix_hardening_modulus, 0])
     hardening_modulus_per_partition = hardening_modulus_by_material_id[partition_material_ids]
+
+    applied_strain_11, macroscopic_stress, all_residuals, load_step_boundaries = run_uniaxial_strain_path(
+        E, P, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition)
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(applied_strain_11, macroscopic_stress[:, 0], color='red', marker='o', markersize=4, linestyle='-',
+              label=r"$\bar{\sigma}_{11}$")
+    plt.plot(applied_strain_11, macroscopic_stress[:, 1], color='blue', marker='o', markersize=4, linestyle='-',
+              label=r"$\bar{\sigma}_{22}$")
+    plt.plot(applied_strain_11, macroscopic_stress[:, 2], color='green', marker='o', markersize=4, linestyle='-',
+              label=r"$\bar{\sigma}_{33}$")
+    plt.xlabel(r"applied strain, $\bar{\varepsilon}_{11}$")
+    plt.ylabel(r"macroscopic stress, $\bar{\sigma}$")
+    plt.legend()
+    stress_strain_plot_path = cache_folder / "stress_strain.png"
+    plt.savefig(stress_strain_plot_path)
+    print(f"stress-strain plot saved to {stress_strain_plot_path}")
+
+    plt.figure(figsize=(10, 3))
+    plt.plot(all_residuals)
+    for boundary in load_step_boundaries:
+        plt.axvline(boundary, color='gray', linestyle='--', linewidth=0.5)
+    plt.yscale('log')
+    plt.xlabel("iteration")
+    plt.ylabel("relative residual")
+    residual_plot_path = cache_folder / "residual_history.png"
+    plt.savefig(residual_plot_path)
+    print(f"residual history plot saved to {residual_plot_path}")
 
 if __name__ == "__main__":
     main()
