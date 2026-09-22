@@ -8,8 +8,8 @@ import scipy.sparse.linalg
 
 domain_side_length         = 1e-3
 inclusion_side_length      = (1/3) * 1e-3 #0.7e-3
-element_number_per_side    = 9
-partition_number_per_side  = 3
+element_number_per_side    = 27
+partition_number_per_side  = 9
 
 elastic_modulus_inclusion  = 10e9
 poisson_ratio_inclusion    = 0.3
@@ -22,6 +22,7 @@ max_uniaxial_strain        = 0.03
 strain_increment_count     = 60
 
 fixed_point_tolerance      = 1e-6
+fixed_point_max_iterations = 1000
 
 ## ------- Calculated Values and Checks ------- ##
 
@@ -70,6 +71,21 @@ def get_periodic_mesh():
                 element_material_ids[element_id] = int(inside_inclusion)
 
     return element_nodes, element_partition_ids, element_material_ids
+
+def get_partition_material_ids():
+    partition_side_length = domain_side_length / partition_number_per_side
+    partition_count = partition_number_per_side**3
+    partition_material_ids = np.zeros(partition_count, dtype=int)
+
+    for k in range(partition_number_per_side):
+        for j in range(partition_number_per_side):
+            for i in range(partition_number_per_side):
+                partition_id = get_grid_id(i, j, k, partition_number_per_side)
+                partition_centre = (np.array([i, j, k]) + 0.5) * partition_side_length
+                inside_inclusion = np.all(np.abs(partition_centre - domain_side_length / 2) < inclusion_side_length / 2)
+                partition_material_ids[partition_id] = int(inside_inclusion)
+
+    return partition_material_ids
 
 def solve_influence_function(K, F, B, element_nodes, element_partition_ids):
     displacements = solve_for_displacements(K, F)
@@ -126,6 +142,10 @@ def get_L(elastic_modulus, poisson_ratio):
 def get_L_per_element(matrix_L, inclusion_L, element_material_ids):
     L_by_material_id = np.array([matrix_L, inclusion_L])
     return L_by_material_id[element_material_ids]
+
+def get_L_per_partition(matrix_L, inclusion_L, partition_material_ids):
+    L_by_material_id = np.array([matrix_L, inclusion_L])
+    return L_by_material_id[partition_material_ids]
 
 def get_element_dofs(element_nodes):
     node_dofs = 3 * element_nodes[:, :, None] + np.arange(3)
@@ -226,11 +246,80 @@ def save_cache(cache_path, parameters, **arrays):
     cache_folder.mkdir(exist_ok=True)
     np.savez(cache_path, **arrays, **parameters)
 
-def get_plastic_eigenstrain():
-    pass
+def get_local_plastic_update(strain, L, plastic_strain, accumulated_plastic_strain, yield_stress, hardening_modulus):
+    volumetric_direction = np.array([1, 1, 1, 0, 0, 0])
 
-def standard_richardson_iteration():
-    pass
+    elastic_trial_strain = strain - plastic_strain
+    trial_stress = L @ elastic_trial_strain
+    trial_mean_stress = np.sum(trial_stress[:3]) / 3
+    trial_deviatoric_stress = trial_stress - trial_mean_stress * volumetric_direction
+    trial_equivalent_stress = np.sqrt(1.5 * np.sum(trial_deviatoric_stress[:3]**2)
+                                       + 3 * np.sum(trial_deviatoric_stress[3:]**2))
+    trial_yield_function = trial_equivalent_stress - (yield_stress + hardening_modulus * accumulated_plastic_strain)
+
+    if trial_yield_function <= 0:
+        return plastic_strain, accumulated_plastic_strain, trial_stress
+
+    shear_modulus = L[3, 3]
+    plastic_multiplier = trial_yield_function / (3 * shear_modulus + hardening_modulus)
+
+    plastic_strain_increment = np.zeros(6)
+    plastic_strain_increment[:3] = plastic_multiplier * 1.5 * trial_deviatoric_stress[:3] / trial_equivalent_stress
+    plastic_strain_increment[3:] = plastic_multiplier * 3 * trial_deviatoric_stress[3:] / trial_equivalent_stress
+    plastic_strain_new = plastic_strain + plastic_strain_increment
+    accumulated_plastic_strain_new = accumulated_plastic_strain + plastic_multiplier
+
+    corrected_deviatoric_stress = (1 - 3 * shear_modulus * plastic_multiplier / trial_equivalent_stress) * trial_deviatoric_stress
+    stress = trial_mean_stress * volumetric_direction + corrected_deviatoric_stress
+
+    return plastic_strain_new, accumulated_plastic_strain_new, stress
+
+def get_plastic_eigenstrain(strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
+                             yield_stress_per_partition, hardening_modulus_per_partition):
+    partition_count = strain.shape[0]
+    plastic_strain_new = np.zeros((partition_count, 6))
+    accumulated_plastic_strain_new = np.zeros(partition_count)
+    stress = np.zeros((partition_count, 6))
+
+    for partition in range(partition_count):
+        plastic_strain_new[partition], accumulated_plastic_strain_new[partition], stress[partition] = get_local_plastic_update(
+            strain[partition], L_per_partition[partition], plastic_strain_history[partition],
+            accumulated_plastic_strain_history[partition], yield_stress_per_partition[partition],
+            hardening_modulus_per_partition[partition])
+
+    return plastic_strain_new, accumulated_plastic_strain_new, stress
+
+def standard_richardson_iteration(E, P, macro_strain, L_per_partition,
+                                   yield_stress_per_partition, hardening_modulus_per_partition,
+                                   plastic_strain_history, accumulated_plastic_strain_history):
+    partition_count = plastic_strain_history.shape[0]
+    strain_norm_floor = 1e-30
+
+    b = (E @ macro_strain).reshape(partition_count, 6)
+    strain = b.copy()
+
+    iteration = 0
+    while True:
+        plastic_strain, accumulated_plastic_strain, stress = get_plastic_eigenstrain(
+            strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
+            yield_stress_per_partition, hardening_modulus_per_partition)
+        strain_next = b + (P @ plastic_strain.reshape(-1)).reshape(partition_count, 6)
+        residual = strain_next - strain
+        relative_residual = np.linalg.norm(residual) / max(np.linalg.norm(strain_next), strain_norm_floor)
+        strain = strain_next
+        iteration += 1
+
+        if relative_residual < fixed_point_tolerance:
+            break
+        if iteration >= fixed_point_max_iterations:
+            raise RuntimeError(f"standard_richardson_iteration did not converge within {fixed_point_max_iterations} "
+                                f"iterations (relative residual {relative_residual}).")
+
+    plastic_strain, accumulated_plastic_strain, stress = get_plastic_eigenstrain(
+        strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
+        yield_stress_per_partition, hardening_modulus_per_partition)
+
+    return strain, stress, plastic_strain, accumulated_plastic_strain
 
 def fft_preconditioned_richardson_iteration():
     pass
@@ -270,6 +359,15 @@ def main():
         save_cache(P0_cache_path, P0_parameters, P0=P0)
     else:
         P0 = cached_P0["P0"]
+
+    partition_material_ids = get_partition_material_ids()
+    L_per_partition = get_L_per_partition(L_matrix, L_inclusion, partition_material_ids)
+
+    yield_stress_by_material_id = np.array([matrix_yield_stress, np.inf])
+    yield_stress_per_partition = yield_stress_by_material_id[partition_material_ids]
+
+    hardening_modulus_by_material_id = np.array([matrix_hardening_modulus, 0])
+    hardening_modulus_per_partition = hardening_modulus_by_material_id[partition_material_ids]
 
 if __name__ == "__main__":
     main()
