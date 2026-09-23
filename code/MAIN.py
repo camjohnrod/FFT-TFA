@@ -3,27 +3,29 @@ import numpy as np
 import scipy.sparse
 import scipy.sparse.linalg
 import matplotlib.pyplot as plt
-
+import time
 
 ## ------- Inputs ------- ##
 
-domain_side_length         = 1e-3
-inclusion_side_length      = (1/3) * 1e-3 #0.7e-3
-element_number_per_side    = 27
-partition_number_per_side  = 9
+domain_side_length          = 1e-3
+inclusion_side_length       = (5/9) * 1e-3 #0.7e-3
+element_number_per_side     = 27
+partition_number_per_side   = 9
 
-elastic_modulus_inclusion  = 10e9
-poisson_ratio_inclusion    = 0.3
-elastic_modulus_matrix     = 100e6
-poisson_ratio_matrix       = poisson_ratio_inclusion
-matrix_yield_stress        = 1e6
-matrix_hardening_modulus   = 10e6
+elastic_modulus_inclusion   = 10e9
+poisson_ratio_inclusion     = 0.3
+elastic_modulus_matrix      = 100e6
+poisson_ratio_matrix        = poisson_ratio_inclusion
+matrix_yield_stress         = 1e6
+matrix_hardening_modulus    = 10e6
 
-max_uniaxial_strain        = 0.03
-strain_increment_count     = 30
+max_uniaxial_strain         = 0.03
+strain_increment_count      = 30
 
-fixed_point_tolerance      = 1e-6
-fixed_point_max_iterations = 1000
+fixed_point_tolerance       = 1e-6
+fixed_point_max_iterations  = 500
+
+relaxation_factor           = 0.5
 
 ## ------- Calculated Values and Checks ------- ##
 
@@ -148,6 +150,11 @@ def get_L_per_partition(matrix_L, inclusion_L, partition_material_ids):
     L_by_material_id = np.array([matrix_L, inclusion_L])
     return L_by_material_id[partition_material_ids]
 
+def get_homogenized_L(E, L_per_partition):
+    partition_count = L_per_partition.shape[0]
+    E_blocks = E.reshape(partition_count, 6, 6)
+    return np.mean(L_per_partition @ E_blocks, axis=0)
+
 def get_element_dofs(element_nodes):
     node_dofs = 3 * element_nodes[:, :, None] + np.arange(3)
     return node_dofs.reshape(len(element_nodes), 24)
@@ -247,9 +254,13 @@ def save_cache(cache_path, parameters, **arrays):
     cache_folder.mkdir(exist_ok=True)
     np.savez(cache_path, **arrays, **parameters)
 
-def get_local_plastic_update(strain, L, plastic_strain, accumulated_plastic_strain, yield_stress, hardening_modulus):
-    volumetric_direction = np.array([1, 1, 1, 0, 0, 0])
+volumetric_direction = np.array([1, 1, 1, 0, 0, 0])
 
+deviatoric_projector = np.zeros((6, 6))
+deviatoric_projector[:3, :3] = np.eye(3) - np.ones((3, 3)) / 3
+deviatoric_projector[3:, 3:] = np.eye(3)
+
+def get_trial_state(strain, L, plastic_strain, accumulated_plastic_strain, yield_stress, hardening_modulus):
     elastic_trial_strain = strain - plastic_strain
     trial_stress = L @ elastic_trial_strain
     trial_mean_stress = np.sum(trial_stress[:3]) / 3
@@ -257,6 +268,11 @@ def get_local_plastic_update(strain, L, plastic_strain, accumulated_plastic_stra
     trial_equivalent_stress = np.sqrt(1.5 * np.sum(trial_deviatoric_stress[:3]**2)
                                        + 3 * np.sum(trial_deviatoric_stress[3:]**2))
     trial_yield_function = trial_equivalent_stress - (yield_stress + hardening_modulus * accumulated_plastic_strain)
+    return trial_stress, trial_mean_stress, trial_deviatoric_stress, trial_equivalent_stress, trial_yield_function
+
+def get_local_plastic_update(strain, L, plastic_strain, accumulated_plastic_strain, yield_stress, hardening_modulus):
+    trial_stress, trial_mean_stress, trial_deviatoric_stress, trial_equivalent_stress, trial_yield_function = get_trial_state(
+        strain, L, plastic_strain, accumulated_plastic_strain, yield_stress, hardening_modulus)
 
     if trial_yield_function <= 0:
         return plastic_strain, accumulated_plastic_strain, trial_stress
@@ -290,44 +306,127 @@ def get_plastic_eigenstrain(strain, L_per_partition, plastic_strain_history, acc
 
     return plastic_strain_new, accumulated_plastic_strain_new, stress
 
+def get_relative_residual(residual, strain):
+    strain_norm_floor = 1e-30
+    return np.linalg.norm(residual) / max(np.linalg.norm(strain), strain_norm_floor)
+
+def has_converged(relative_residual, iteration_count, solver_name):
+    if not np.isfinite(relative_residual) or relative_residual > 1:
+        raise RuntimeError(f"{solver_name} diverged after {iteration_count} iterations "
+                            f"(relative residual {relative_residual}).")
+    if relative_residual < fixed_point_tolerance:
+        return True
+    if iteration_count >= fixed_point_max_iterations:
+        raise RuntimeError(f"{solver_name} did not converge within {fixed_point_max_iterations} iterations "
+                            f"(relative residual {relative_residual}).")
+    return False
+
 def standard_richardson_iteration(E, P, macro_strain, L_per_partition,
                                    yield_stress_per_partition, hardening_modulus_per_partition,
-                                   plastic_strain_history, accumulated_plastic_strain_history):
+                                   plastic_strain_history, accumulated_plastic_strain_history,
+                                   relaxation_factor):
     partition_count = plastic_strain_history.shape[0]
-    strain_norm_floor = 1e-30
 
     b = (E @ macro_strain).reshape(partition_count, 6)
-    strain = b.copy()
-    residual_history = []
+    strain = b + (P @ plastic_strain_history.reshape(-1)).reshape(partition_count, 6)
 
-    iteration = 0
+    residual_history = []
     while True:
         plastic_strain, accumulated_plastic_strain, stress = get_plastic_eigenstrain(
             strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
             yield_stress_per_partition, hardening_modulus_per_partition)
-        strain_next = b + (P @ plastic_strain.reshape(-1)).reshape(partition_count, 6)
-        residual = strain_next - strain
-        relative_residual = np.linalg.norm(residual) / max(np.linalg.norm(strain_next), strain_norm_floor)
-        residual_history.append(relative_residual)
-        strain = strain_next
-        iteration += 1
+        residual = strain - b - (P @ plastic_strain.reshape(-1)).reshape(partition_count, 6)
+        residual_history.append(get_relative_residual(residual, strain))
 
-        if relative_residual < fixed_point_tolerance:
+        if has_converged(residual_history[-1], len(residual_history), "standard_richardson_iteration"):
             break
-        if iteration >= fixed_point_max_iterations:
-            raise RuntimeError(f"standard_richardson_iteration did not converge within {fixed_point_max_iterations} "
-                                f"iterations (relative residual {relative_residual}).")
 
-    plastic_strain, accumulated_plastic_strain, stress = get_plastic_eigenstrain(
-        strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
-        yield_stress_per_partition, hardening_modulus_per_partition)
+        strain = strain - relaxation_factor * residual
 
     return strain, stress, plastic_strain, accumulated_plastic_strain, np.array(residual_history)
 
 def get_macroscopic_stress(stress):
     return np.mean(stress, axis=0)
 
-def run_uniaxial_strain_path(E, P, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition):
+def get_local_eigenstrain_sensitivity(strain, L, plastic_strain, accumulated_plastic_strain, yield_stress, hardening_modulus):
+    _, _, trial_deviatoric_stress, trial_equivalent_stress, trial_yield_function = get_trial_state(
+        strain, L, plastic_strain, accumulated_plastic_strain, yield_stress, hardening_modulus)
+
+    if trial_yield_function <= 0:
+        return np.zeros((6, 6))
+
+    shear_modulus = L[3, 3]
+    plastic_multiplier = trial_yield_function / (3 * shear_modulus + hardening_modulus)
+
+    flow_direction = np.zeros(6)
+    flow_direction[:3] = 1.5 * trial_deviatoric_stress[:3] / trial_equivalent_stress
+    flow_direction[3:] = 3 * trial_deviatoric_stress[3:] / trial_equivalent_stress
+    normalized_deviatoric_stress = trial_deviatoric_stress / trial_equivalent_stress
+    flow_projector = np.outer(flow_direction, normalized_deviatoric_stress)
+
+    radial_sensitivity = 3 * shear_modulus / (3 * shear_modulus + hardening_modulus)
+    rotational_sensitivity = 3 * shear_modulus * plastic_multiplier / trial_equivalent_stress
+
+    return radial_sensitivity * flow_projector + rotational_sensitivity * (deviatoric_projector - flow_projector)
+
+def get_eigenstrain_sensitivity(strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
+                                yield_stress_per_partition, hardening_modulus_per_partition):
+    partition_count = strain.shape[0]
+    sensitivity = np.zeros((partition_count, 6, 6))
+
+    for partition in range(partition_count):
+        sensitivity[partition] = get_local_eigenstrain_sensitivity(
+            strain[partition], L_per_partition[partition], plastic_strain_history[partition],
+            accumulated_plastic_strain_history[partition], yield_stress_per_partition[partition],
+            hardening_modulus_per_partition[partition])
+
+    return sensitivity
+
+def get_P0_transformed(P0):
+    P0_offset_blocks = P0[:, :6].reshape(partition_number_per_side, partition_number_per_side,
+                                         partition_number_per_side, 6, 6)
+    return np.fft.fftn(P0_offset_blocks, axes=(0, 1, 2))
+
+def get_reference_fourier_inverse(P0_transformed, reference_sensitivity):
+    M0_transformed = np.eye(6) - P0_transformed @ reference_sensitivity
+    return np.linalg.inv(M0_transformed)
+
+def fft_preconditioned_richardson_iteration(E, P, macro_strain, L_per_partition,
+                                             yield_stress_per_partition, hardening_modulus_per_partition,
+                                             plastic_strain_history, accumulated_plastic_strain_history,
+                                             P0_transformed, relaxation_factor):
+    partition_count = plastic_strain_history.shape[0]
+    lattice_shape = (partition_number_per_side, partition_number_per_side, partition_number_per_side, 6)
+
+    b = (E @ macro_strain).reshape(partition_count, 6)
+    strain = b + (P @ plastic_strain_history.reshape(-1)).reshape(partition_count, 6)
+
+    sensitivity = get_eigenstrain_sensitivity(strain, L_per_partition, plastic_strain_history,
+                                              accumulated_plastic_strain_history, yield_stress_per_partition,
+                                              hardening_modulus_per_partition)
+    reference_sensitivity = np.mean(sensitivity, axis=0)
+    reference_fourier_inverse = get_reference_fourier_inverse(P0_transformed, reference_sensitivity)
+
+    residual_history = []
+    while True:
+        plastic_strain, accumulated_plastic_strain, stress = get_plastic_eigenstrain(
+            strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
+            yield_stress_per_partition, hardening_modulus_per_partition)
+        residual = strain - b - (P @ plastic_strain.reshape(-1)).reshape(partition_count, 6)
+        residual_history.append(get_relative_residual(residual, strain))
+
+        if has_converged(residual_history[-1], len(residual_history), "fft_preconditioned_richardson_iteration"):
+            break
+
+        residual_transformed = np.fft.fftn(residual.reshape(lattice_shape), axes=(0, 1, 2))
+        correction_transformed = np.einsum('...ij,...j->...i', reference_fourier_inverse, -residual_transformed)
+        correction = np.fft.ifftn(correction_transformed, axes=(0, 1, 2)).real
+        strain = strain + relaxation_factor * correction.reshape(partition_count, 6)
+
+    return strain, stress, plastic_strain, accumulated_plastic_strain, np.array(residual_history)
+
+def run_uniaxial_strain_path(E, P, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition,
+                              relaxation_factor, P0_transformed=None):
     partition_count = L_per_partition.shape[0]
     plastic_strain_history = np.zeros((partition_count, 6))
     accumulated_plastic_strain_history = np.zeros(partition_count)
@@ -341,9 +440,14 @@ def run_uniaxial_strain_path(E, P, L_per_partition, yield_stress_per_partition, 
 
     for step, strain_11 in enumerate(applied_strain_11):
         macro_strain = np.array([strain_11, 0, 0, 0, 0, 0])
-        strain, stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = standard_richardson_iteration(
-            E, P, macro_strain, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition,
-            plastic_strain_history, accumulated_plastic_strain_history)
+        if P0_transformed is None:
+            strain, stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = standard_richardson_iteration(
+                E, P, macro_strain, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition,
+                plastic_strain_history, accumulated_plastic_strain_history, relaxation_factor)
+        else:
+            strain, stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = fft_preconditioned_richardson_iteration(
+                E, P, macro_strain, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition,
+                plastic_strain_history, accumulated_plastic_strain_history, P0_transformed, relaxation_factor)
         macroscopic_stress[step] = get_macroscopic_stress(stress)
 
         if step > 0:
@@ -356,9 +460,6 @@ def run_uniaxial_strain_path(E, P, L_per_partition, yield_stress_per_partition, 
 
     return applied_strain_11, macroscopic_stress, all_residuals, load_step_boundaries
 
-def fft_preconditioned_richardson_iteration():
-    pass
-
 def main():
     element_nodes, element_partition_ids, element_material_ids = get_periodic_mesh()
     B = get_B()
@@ -366,8 +467,6 @@ def main():
     L_matrix = get_L(elastic_modulus_matrix, poisson_ratio_matrix)
     L_inclusion = get_L(elastic_modulus_inclusion, poisson_ratio_inclusion)
     L_per_element = get_L_per_element(L_matrix, L_inclusion, element_material_ids)
-    reference_L = L_matrix # using L_matrix for the reference is a placeholder for now
-    reference_L_per_element = get_L_per_element(reference_L, reference_L, element_material_ids)
 
     E_P_cache_path = cache_folder / "E_P.npz"
     E_P_parameters = {"domain_side_length": domain_side_length,
@@ -383,6 +482,12 @@ def main():
     else:
         E, P = cached_E_P["E"], cached_E_P["P"]
 
+    partition_material_ids = get_partition_material_ids()
+    L_per_partition = get_L_per_partition(L_matrix, L_inclusion, partition_material_ids)
+
+    reference_L = get_homogenized_L(E, L_per_partition)
+    reference_L_per_element = get_L_per_element(reference_L, reference_L, element_material_ids)
+
     P0_cache_path = cache_folder / "P0.npz"
     P0_parameters = {"domain_side_length": domain_side_length,
                      "element_number_per_side": element_number_per_side,
@@ -395,17 +500,30 @@ def main():
     else:
         P0 = cached_P0["P0"]
 
-    partition_material_ids = get_partition_material_ids()
-    L_per_partition = get_L_per_partition(L_matrix, L_inclusion, partition_material_ids)
-
     yield_stress_by_material_id = np.array([matrix_yield_stress, np.inf])
     yield_stress_per_partition = yield_stress_by_material_id[partition_material_ids]
 
     hardening_modulus_by_material_id = np.array([matrix_hardening_modulus, 0])
     hardening_modulus_per_partition = hardening_modulus_by_material_id[partition_material_ids]
 
+    P0_transformed = get_P0_transformed(P0)
+
+    t0 = time.time()
     applied_strain_11, macroscopic_stress, all_residuals, load_step_boundaries = run_uniaxial_strain_path(
-        E, P, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition)
+        E, P, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition, relaxation_factor)
+    t1 = time.time()
+    print(f"standard: {len(all_residuals)} iterations, {t1 - t0:.2f} seconds.")
+
+    t0 = time.time()
+    _, macroscopic_stress_fft, all_residuals_fft, load_step_boundaries_fft = run_uniaxial_strain_path(
+        E, P, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition, relaxation_factor,
+        P0_transformed)
+    t1 = time.time()
+    stress_relative_difference = (np.abs(macroscopic_stress_fft - macroscopic_stress).max()
+                                   / np.abs(macroscopic_stress).max())
+    print(f"FFT-preconditioned (relaxation_factor={relaxation_factor}): "
+          f"{len(all_residuals_fft)} iterations, {t1 - t0:.2f} seconds, "
+          f"stress agreement with standard {stress_relative_difference:.2e} relative.")
 
     plt.figure(figsize=(6, 4))
     plt.plot(applied_strain_11, macroscopic_stress[:, 0], color='red', marker='o', markersize=4, linestyle='-',
@@ -422,12 +540,16 @@ def main():
     print(f"stress-strain plot saved to {stress_strain_plot_path}")
 
     plt.figure(figsize=(10, 3))
-    plt.plot(all_residuals)
+    plt.plot(all_residuals, color='blue', label='standard')
+    plt.plot(all_residuals_fft, color='orange', label='FFT-preconditioned')
     for boundary in load_step_boundaries:
-        plt.axvline(boundary, color='gray', linestyle='--', linewidth=0.5)
+        plt.axvline(boundary, color='blue', linestyle='--', linewidth=0.5, alpha=0.4)
+    for boundary in load_step_boundaries_fft:
+        plt.axvline(boundary, color='orange', linestyle='--', linewidth=0.5, alpha=0.4)
     plt.yscale('log')
     plt.xlabel("iteration")
     plt.ylabel("relative residual")
+    plt.legend()
     residual_plot_path = cache_folder / "residual_history.png"
     plt.savefig(residual_plot_path)
     print(f"residual history plot saved to {residual_plot_path}")
