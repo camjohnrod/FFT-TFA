@@ -1,22 +1,23 @@
 import pathlib
 import sys
+import time
+from typing import NamedTuple
 import numpy as np
 import scipy.sparse
 import scipy.sparse.linalg
-import matplotlib.pyplot as plt
-import matplotlib.ticker
-import matplotlib.colors
-import matplotlib.legend
-import matplotlib.lines
-import time
 import tqdm
+import plots
 
 ## ------- Inputs ------- ##
 
 domain_side_length          = 1e-3
+inclusion_shape             = "circle"
 inclusion_side_length       = (5/9) * 1e-3
-element_number_per_side     = 27
-partition_number_per_side   = 9
+inclusion_radius            = 0.35e-3
+
+element_number_per_side     = 35
+element_number_along_z      = 1
+partition_number_per_side   = element_number_per_side
 
 elastic_modulus_inclusion   = 10e9
 elastic_modulus_matrix      = 100e6
@@ -30,54 +31,90 @@ matrix_hardening_modulus    = 10e6
 max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
 # max_macro_strain            = np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])
 # max_macro_strain            = np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])
-
 strain_increment_count      = 60
-
-timing_repeat_count         = 1
 
 fixed_point_tolerance       = 1e-6
 fixed_point_max_iterations  = 1000
-
 relaxation_factor           = 1.0
 
+timing_repeat_count         = 5
+post_process_element_stress = True
 von_mises_plot_min_stress   = 1.0e6
 von_mises_plot_max_stress   = 3.0e6
 
-post_process_element_stress = True
-
 ## ------- Calculated Values and Checks ------- ##
 
-elements_per_partition_side = element_number_per_side // partition_number_per_side
+if min(element_number_per_side, element_number_along_z, partition_number_per_side, strain_increment_count,
+       timing_repeat_count) < 1:
+    raise ValueError("The element, partition, strain increment and timing repeat counts must all be at least 1.")
 if element_number_per_side % partition_number_per_side != 0:
     raise ValueError("The number of elements per side must be divisible by the number of partitions per side.")
 
-element_count = element_number_per_side**3
-partition_count = partition_number_per_side**3
+elements_per_partition_side = element_number_per_side // partition_number_per_side
+element_count = element_number_per_side**2 * element_number_along_z
+partition_count = partition_number_per_side**2
 dof_count = 3 * element_count
 
 element_side_length = domain_side_length / element_number_per_side
-gauss_point_volume_weight = element_side_length ** 3 / 8
+element_length_along_z = domain_side_length / element_number_along_z
+element_volume = element_side_length**2 * element_length_along_z
+gauss_point_volume_weight = element_volume / 8
+partition_side_length = domain_side_length / partition_number_per_side
 
-matrix_partitions_beside_inclusion = partition_number_per_side * (domain_side_length - inclusion_side_length) / (2 * domain_side_length)
-whole_matrix_partitions_beside_inclusion = round(matrix_partitions_beside_inclusion)
-if not np.isclose(matrix_partitions_beside_inclusion, whole_matrix_partitions_beside_inclusion) or not 1 <= whole_matrix_partitions_beside_inclusion < partition_number_per_side / 2:
-    raise ValueError(f"The centred inclusion must have a whole number of matrix partitions (at least 1) on each side in x and y, so its edges fall on partition edges. Got {matrix_partitions_beside_inclusion}.")
+if inclusion_shape == "square":
+    matrix_partitions_beside_inclusion = partition_number_per_side * (domain_side_length - inclusion_side_length) / (2 * domain_side_length)
+    whole_matrix_partitions_beside_inclusion = round(matrix_partitions_beside_inclusion)
+    if not np.isclose(matrix_partitions_beside_inclusion, whole_matrix_partitions_beside_inclusion) or not 1 <= whole_matrix_partitions_beside_inclusion < partition_number_per_side / 2:
+        raise ValueError(f"The centred inclusion must have a whole number of matrix partitions (at least 1) on each side in x and y, so its edges fall on partition edges. Got {matrix_partitions_beside_inclusion}.")
+elif inclusion_shape == "circle":
+    if not 0 < inclusion_radius < domain_side_length / 2:
+        raise ValueError(f"The circular inclusion's radius must be positive and below half the domain side, so neighbouring inclusions do not touch. Got {inclusion_radius}.")
+    nearest_partition_centre_distance = 0 if partition_number_per_side % 2 == 1 else np.sqrt(2) * partition_side_length / 2
+    if inclusion_radius <= nearest_partition_centre_distance:
+        raise ValueError(f"The circular inclusion contains no partition centre, so no partition would be inclusion. Increase the radius above {nearest_partition_centre_distance} or use an odd partition count.")
+else:
+    raise ValueError(f"inclusion_shape must be \"square\" or \"circle\". Got {inclusion_shape!r}.")
 
-## ------- Mesh and Geometry ------- ##
+cache_folder = pathlib.Path(__file__).parent / "cache"
+output_folder = pathlib.Path(__file__).parent / "output"
+
+## ------- Mesh, Geometry and Materials ------- ##
+
+class Mesh(NamedTuple):
+    element_nodes: np.ndarray
+    element_partition_ids: np.ndarray
+    element_material_ids: np.ndarray
+
+class PartitionMaterials(NamedTuple):
+    L: np.ndarray
+    yield_stress: np.ndarray
+    hardening_modulus: np.ndarray
 
 def get_grid_id(i, j, k, count_per_side):
     return i + count_per_side * j + count_per_side**2 * k
 
 def is_inside_inclusion(centre):
-    distance_from_inclusion_axis = np.abs(centre[:2] - domain_side_length / 2)
-    return np.all(distance_from_inclusion_axis < inclusion_side_length / 2)
+    offset_from_inclusion_axis = centre[:2] - domain_side_length / 2
+    if inclusion_shape == "circle":
+        return np.sum(offset_from_inclusion_axis**2) < inclusion_radius**2
+    return np.all(np.abs(offset_from_inclusion_axis) < inclusion_side_length / 2)
+
+def get_partition_material_ids():
+    partition_material_ids = np.zeros(partition_count, dtype=int)
+
+    for j in range(partition_number_per_side):
+        for i in range(partition_number_per_side):
+            partition_id = get_grid_id(i, j, 0, partition_number_per_side)
+            partition_centre = (np.array([i, j]) + 0.5) * partition_side_length
+            partition_material_ids[partition_id] = int(is_inside_inclusion(partition_centre))
+
+    return partition_material_ids
 
 def get_periodic_mesh():
     element_nodes = np.zeros((element_count, 8), dtype=int)
     element_partition_ids = np.zeros(element_count, dtype=int)
-    element_material_ids = np.zeros(element_count, dtype=int)
 
-    for k in range(element_number_per_side):
+    for k in range(element_number_along_z):
         for j in range(element_number_per_side):
             for i in range(element_number_per_side):
                 element_id = get_grid_id(i, j, k, element_number_per_side)
@@ -88,35 +125,38 @@ def get_periodic_mesh():
                             corner = get_grid_id(offset_i, offset_j, offset_k, 2)
                             element_nodes[element_id, corner] = get_grid_id((i + offset_i) % element_number_per_side,
                                                                             (j + offset_j) % element_number_per_side,
-                                                                            (k + offset_k) % element_number_per_side,
+                                                                            (k + offset_k) % element_number_along_z,
                                                                             element_number_per_side)
 
                 element_partition_ids[element_id] = get_grid_id(i // elements_per_partition_side,
                                                                 j // elements_per_partition_side,
-                                                                k // elements_per_partition_side,
+                                                                0,
                                                                 partition_number_per_side)
 
-                element_centre = (np.array([i, j, k]) + 0.5) * element_side_length
-                element_material_ids[element_id] = int(is_inside_inclusion(element_centre))
-
-    return element_nodes, element_partition_ids, element_material_ids
-
-def get_partition_material_ids():
-    partition_side_length = domain_side_length / partition_number_per_side
-    partition_material_ids = np.zeros(partition_count, dtype=int)
-
-    for k in range(partition_number_per_side):
-        for j in range(partition_number_per_side):
-            for i in range(partition_number_per_side):
-                partition_id = get_grid_id(i, j, k, partition_number_per_side)
-                partition_centre = (np.array([i, j, k]) + 0.5) * partition_side_length
-                partition_material_ids[partition_id] = int(is_inside_inclusion(partition_centre))
-
-    return partition_material_ids
+    element_material_ids = get_partition_material_ids()[element_partition_ids]
+    return Mesh(element_nodes, element_partition_ids, element_material_ids)
 
 def get_value_per_material(matrix_value, inclusion_value, material_ids):
     value_by_material_id = np.array([matrix_value, inclusion_value])
     return value_by_material_id[material_ids]
+
+def get_L(elastic_modulus, poisson_ratio):
+    lame_lambda   = elastic_modulus * poisson_ratio / ((1 + poisson_ratio) * (1 - 2 * poisson_ratio))
+    shear_modulus = elastic_modulus / (2 * (1 + poisson_ratio))
+    normal_block = lame_lambda * np.ones((3, 3)) + 2 * shear_modulus * np.eye(3)
+    shear_block  = shear_modulus * np.eye(3)
+    L = np.zeros((6, 6))
+    L[:3, :3] = normal_block
+    L[3:, 3:] = shear_block
+    return L
+
+def get_partition_materials(L_matrix, L_inclusion):
+    partition_material_ids = get_partition_material_ids()
+    return PartitionMaterials(
+        L=get_value_per_material(L_matrix, L_inclusion, partition_material_ids),
+        yield_stress=get_value_per_material(matrix_yield_stress, inclusion_yield_stress, partition_material_ids),
+        hardening_modulus=get_value_per_material(matrix_hardening_modulus, inclusion_hardening_modulus,
+                                                 partition_material_ids))
 
 ## ------- Element Matrices ------- ##
 
@@ -141,7 +181,7 @@ def get_B():
         derivatives_wrt_xi, derivatives_wrt_eta, derivatives_wrt_zeta = get_shape_function_derivatives(xi, eta, zeta)
         derivatives_wrt_x = derivatives_wrt_xi   * 2 / element_side_length
         derivatives_wrt_y = derivatives_wrt_eta  * 2 / element_side_length
-        derivatives_wrt_z = derivatives_wrt_zeta * 2 / element_side_length
+        derivatives_wrt_z = derivatives_wrt_zeta * 2 / element_length_along_z
 
         for corner in range(8):
             column = 3 * corner
@@ -156,16 +196,6 @@ def get_B():
             B[gauss_index, 5, column + 2] = derivatives_wrt_x[corner]
 
     return B
-
-def get_L(elastic_modulus, poisson_ratio):
-    lame_lambda   = elastic_modulus * poisson_ratio / ((1 + poisson_ratio) * (1 - 2 * poisson_ratio))
-    shear_modulus = elastic_modulus / (2 * (1 + poisson_ratio))
-    normal_block = lame_lambda * np.ones((3, 3)) + 2 * shear_modulus * np.eye(3)
-    shear_block  = shear_modulus * np.eye(3)
-    L = np.zeros((6, 6))
-    L[:3, :3] = normal_block
-    L[3:, 3:] = shear_block
-    return L
 
 def get_element_dofs(element_nodes):
     node_dofs = 3 * element_nodes[:, :, None] + np.arange(3)
@@ -193,6 +223,10 @@ def get_integrated_B(B):
 def get_F_element(B, L):
     return get_integrated_B(B).T @ L
 
+def get_free_dofs():
+    pinned_dofs = np.arange(3)
+    return np.setdiff1d(np.arange(dof_count), pinned_dofs)
+
 ## ------- Influence Functions (Offline) ------- ##
 
 def get_F_macrostrain(B, L_per_element, element_nodes):
@@ -200,7 +234,7 @@ def get_F_macrostrain(B, L_per_element, element_nodes):
     F_macrostrain = np.zeros((dof_count, 6))
     for element_id in range(element_count):
         F_element = get_F_element(B, L_per_element[element_id])
-        F_macrostrain[element_dofs[element_id]] -= F_element
+        np.subtract.at(F_macrostrain, element_dofs[element_id], F_element)
     return F_macrostrain
 
 def get_F_eigenstrain(B, L_per_element, element_nodes, element_partition_ids):
@@ -209,19 +243,19 @@ def get_F_eigenstrain(B, L_per_element, element_nodes, element_partition_ids):
     for element_id in range(element_count):
         F_element = get_F_element(B, L_per_element[element_id])
         first_column = 6 * element_partition_ids[element_id]
-        F_eigenstrain[np.ix_(element_dofs[element_id], np.arange(first_column, first_column + 6))] += F_element
+        np.add.at(F_eigenstrain, np.ix_(element_dofs[element_id], np.arange(first_column, first_column + 6)), F_element)
     return F_eigenstrain
 
 def get_F_eigenstrain_in_first_partition(B, L_per_element, element_nodes, element_partition_ids):
     element_dofs = get_element_dofs(element_nodes)
     F_eigenstrain = np.zeros((dof_count, 6))
     for element_id in np.flatnonzero(element_partition_ids == 0):
-        F_eigenstrain[element_dofs[element_id]] += get_F_element(B, L_per_element[element_id])
+        np.add.at(F_eigenstrain, element_dofs[element_id], get_F_element(B, L_per_element[element_id]))
     return F_eigenstrain
 
 def get_partition_average_strain(displacements, B, element_nodes, element_partition_ids):
     element_dofs = get_element_dofs(element_nodes)
-    partition_volume = elements_per_partition_side**3 * element_side_length**3
+    partition_volume = elements_per_partition_side**2 * element_number_along_z * element_volume
     integrated_B = get_integrated_B(B)
     average_strain = np.zeros((6 * partition_count, displacements.shape[1]))
     for element_id in range(element_count):
@@ -231,8 +265,7 @@ def get_partition_average_strain(displacements, B, element_nodes, element_partit
     return average_strain / partition_volume
 
 def solve_influence_function(K, F, B, element_nodes, element_partition_ids):
-    pinned_dofs = np.arange(3)
-    free_dofs = np.setdiff1d(np.arange(K.shape[0]), pinned_dofs)
+    free_dofs = get_free_dofs()
     K_free = K[free_dofs][:, free_dofs].tocsc()
     print(f"  {f'factor K ({K_free.shape[0]} DOFs)':<26}: ", end="", flush=True)
     start_time = time.perf_counter()
@@ -272,29 +305,69 @@ def get_P0_offset_blocks(B, reference_L_per_element, element_nodes, element_part
     return solve_influence_function(K, F_eigenstrain, B, element_nodes, element_partition_ids)
 
 def get_P0_transformed(P0_offset_blocks):
-    P0_offset_lattice = P0_offset_blocks.reshape(partition_number_per_side, partition_number_per_side,
-                                                 partition_number_per_side, 6, 6)
-    return np.fft.fftn(P0_offset_lattice, axes=(0, 1, 2))
+    P0_offset_lattice = P0_offset_blocks.reshape(partition_number_per_side, partition_number_per_side, 6, 6)
+    return np.fft.fftn(P0_offset_lattice, axes=(0, 1))
 
 ## ------- Cache ------- ##
-
-cache_folder = pathlib.Path(__file__).parent / "cache"
 
 def load_cache(cache_path, parameters):
     if not cache_path.exists():
         print(f"{cache_path.name}: no cache found, computing.")
         return None
-    cached = np.load(cache_path)
-    for name, value in parameters.items():
-        if name not in cached.files or not np.array_equal(cached[name], value):
-            print(f"{cache_path.name}: {name} missing or changed, recomputing.")
-            return None
-    print(f"{cache_path.name}: loaded from cache.")
-    return cached
+    with np.load(cache_path) as cached:
+        for name, value in parameters.items():
+            if name not in cached.files or not np.array_equal(cached[name], value):
+                print(f"{cache_path.name}: {name} missing or changed, recomputing.")
+                return None
+        print(f"{cache_path.name}: loaded from cache.")
+        return {name: cached[name] for name in cached.files}
 
 def save_cache(cache_path, parameters, **arrays):
     cache_folder.mkdir(exist_ok=True)
     np.savez(cache_path, **arrays, **parameters)
+
+def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_partition):
+    E_P_cache_path = cache_folder / "E_P.npz"
+    E_P_parameters = {"domain_side_length": domain_side_length,
+                      "inclusion_shape": inclusion_shape,
+                      "element_number_per_side": element_number_per_side,
+                      "element_number_along_z": element_number_along_z,
+                      "partition_number_per_side": partition_number_per_side,
+                      "partitions_span_z": True,
+                      "L_matrix": L_matrix,
+                      "L_inclusion": L_inclusion}
+    if inclusion_shape == "square":
+        E_P_parameters["inclusion_side_length"] = inclusion_side_length
+    else:
+        E_P_parameters["inclusion_radius"] = inclusion_radius
+    cached_E_P = load_cache(E_P_cache_path, E_P_parameters)
+    if cached_E_P is None:
+        E, P = get_influence_functions(B, L_per_element, mesh.element_nodes, mesh.element_partition_ids)
+        save_cache(E_P_cache_path, E_P_parameters, E=E, P=P)
+    else:
+        E, P = cached_E_P["E"], cached_E_P["P"]
+
+    reference_L = get_homogenized_L(E, L_per_partition)
+    reference_L_per_element = np.tile(reference_L, (element_count, 1, 1))
+
+    P0_cache_path = cache_folder / "P0_offset_blocks.npz"
+    P0_parameters = {"domain_side_length": domain_side_length,
+                     "element_number_per_side": element_number_per_side,
+                     "element_number_along_z": element_number_along_z,
+                     "partition_number_per_side": partition_number_per_side,
+                     "partitions_span_z": True,
+                     "reference_L": reference_L}
+    cached_P0 = load_cache(P0_cache_path, P0_parameters)
+    if cached_P0 is None:
+        start_time = time.perf_counter()
+        P0_offset_blocks = get_P0_offset_blocks(B, reference_L_per_element, mesh.element_nodes,
+                                                mesh.element_partition_ids)
+        print(f"P0 offline solve (extra cost of the FFT solver): {time.perf_counter() - start_time:.2f} seconds.")
+        save_cache(P0_cache_path, P0_parameters, P0_offset_blocks=P0_offset_blocks)
+    else:
+        P0_offset_blocks = cached_P0["P0_offset_blocks"]
+
+    return E, P, get_P0_transformed(P0_offset_blocks)
 
 ## ------- J2 Material ------- ##
 
@@ -304,20 +377,25 @@ deviatoric_projector = np.zeros((6, 6))
 deviatoric_projector[:3, :3] = np.eye(3) - np.ones((3, 3)) / 3
 deviatoric_projector[3:, 3:] = np.eye(3)
 
+def get_deviatoric_stress(stress):
+    return stress @ deviatoric_projector.T
+
 def get_equivalent_stress(deviatoric_stress):
     return np.sqrt(1.5 * np.sum(deviatoric_stress[:, :3]**2, axis=1) + 3 * np.sum(deviatoric_stress[:, 3:]**2, axis=1))
 
-def get_trial_state(strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
-                    yield_stress_per_partition, hardening_modulus_per_partition):
+def get_von_mises_stress(stress):
+    return get_equivalent_stress(get_deviatoric_stress(stress))
+
+def get_trial_state(strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history):
     elastic_trial_strain = strain - plastic_strain_history
-    trial_stress = np.einsum('pij,pj->pi', L_per_partition, elastic_trial_strain)
+    trial_stress = np.einsum('pij,pj->pi', partition_materials.L, elastic_trial_strain)
     trial_mean_stress = np.sum(trial_stress[:, :3], axis=1) / 3
     trial_deviatoric_stress = trial_stress - np.outer(trial_mean_stress, volumetric_direction)
     trial_equivalent_stress = get_equivalent_stress(trial_deviatoric_stress)
-    trial_yield_function = trial_equivalent_stress - (yield_stress_per_partition
-                                                      + hardening_modulus_per_partition * accumulated_plastic_strain_history)
-    shear_modulus = L_per_partition[:, 3, 3]
-    trial_plastic_multiplier = np.maximum(trial_yield_function, 0) / (3 * shear_modulus + hardening_modulus_per_partition)
+    trial_yield_function = trial_equivalent_stress - (partition_materials.yield_stress
+                                                      + partition_materials.hardening_modulus * accumulated_plastic_strain_history)
+    shear_modulus = partition_materials.L[:, 3, 3]
+    trial_plastic_multiplier = np.maximum(trial_yield_function, 0) / (3 * shear_modulus + partition_materials.hardening_modulus)
     return (trial_stress, trial_mean_stress, trial_deviatoric_stress, trial_equivalent_stress, trial_yield_function,
             trial_plastic_multiplier)
 
@@ -327,12 +405,10 @@ def get_flow_direction(deviatoric_stress, equivalent_stress):
     flow_direction[:, 3:] = 3 * deviatoric_stress[:, 3:] / equivalent_stress[:, None]
     return flow_direction
 
-def get_plastic_eigenstrain(strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
-                            yield_stress_per_partition, hardening_modulus_per_partition):
+def get_plastic_eigenstrain(strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history):
     (trial_stress, trial_mean_stress, trial_deviatoric_stress, trial_equivalent_stress, trial_yield_function,
-     trial_plastic_multiplier) = get_trial_state(strain, L_per_partition, plastic_strain_history,
-                                                 accumulated_plastic_strain_history, yield_stress_per_partition,
-                                                 hardening_modulus_per_partition)
+     trial_plastic_multiplier) = get_trial_state(strain, partition_materials, plastic_strain_history,
+                                                 accumulated_plastic_strain_history)
 
     plastic_strain_new = plastic_strain_history.copy()
     accumulated_plastic_strain_new = accumulated_plastic_strain_history.copy()
@@ -341,7 +417,7 @@ def get_plastic_eigenstrain(strain, L_per_partition, plastic_strain_history, acc
     yielding = trial_yield_function > 0
     yielding_trial_deviatoric_stress = trial_deviatoric_stress[yielding]
     yielding_trial_equivalent_stress = trial_equivalent_stress[yielding]
-    shear_modulus = L_per_partition[yielding, 3, 3]
+    shear_modulus = partition_materials.L[yielding, 3, 3]
     plastic_multiplier = trial_plastic_multiplier[yielding]
 
     flow_direction = get_flow_direction(yielding_trial_deviatoric_stress, yielding_trial_equivalent_stress)
@@ -354,19 +430,17 @@ def get_plastic_eigenstrain(strain, L_per_partition, plastic_strain_history, acc
 
     return plastic_strain_new, accumulated_plastic_strain_new, stress
 
-def get_eigenstrain_sensitivity(strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
-                                yield_stress_per_partition, hardening_modulus_per_partition):
+def get_eigenstrain_sensitivity(strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history):
     _, _, trial_deviatoric_stress, trial_equivalent_stress, trial_yield_function, trial_plastic_multiplier = get_trial_state(
-        strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
-        yield_stress_per_partition, hardening_modulus_per_partition)
+        strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history)
 
     sensitivity = np.zeros((partition_count, 6, 6))
 
     yielding = trial_yield_function > 0
     yielding_trial_deviatoric_stress = trial_deviatoric_stress[yielding]
     yielding_trial_equivalent_stress = trial_equivalent_stress[yielding]
-    shear_modulus = L_per_partition[yielding, 3, 3]
-    hardening_modulus = hardening_modulus_per_partition[yielding]
+    shear_modulus = partition_materials.L[yielding, 3, 3]
+    hardening_modulus = partition_materials.hardening_modulus[yielding]
     plastic_multiplier = trial_plastic_multiplier[yielding]
 
     flow_direction = get_flow_direction(yielding_trial_deviatoric_stress, yielding_trial_equivalent_stress)
@@ -405,11 +479,10 @@ def has_converged(relative_residual, iteration_count, solver_name):
                             f"(relative residual {relative_residual}).")
     return False
 
-def get_reset_state(strain, b, P, induced_strain_history, L_per_partition, plastic_strain_history,
-                    accumulated_plastic_strain_history, yield_stress_per_partition, hardening_modulus_per_partition):
+def get_reset_state(strain, b, P, induced_strain_history, partition_materials, plastic_strain_history,
+                    accumulated_plastic_strain_history):
     plastic_strain, accumulated_plastic_strain, stress = get_plastic_eigenstrain(
-        strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
-        yield_stress_per_partition, hardening_modulus_per_partition)
+        strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history)
     induced_strain = get_induced_strain_reusing_history(P, plastic_strain, plastic_strain_history,
                                                         induced_strain_history)
     yielding_partitions = accumulated_plastic_strain > accumulated_plastic_strain_history
@@ -419,8 +492,7 @@ def get_reset_state(strain, b, P, induced_strain_history, L_per_partition, plast
     strain[non_yielding_partitions] = b[non_yielding_partitions] + induced_strain[non_yielding_partitions]
 
     plastic_strain, accumulated_plastic_strain, stress = get_plastic_eigenstrain(
-        strain, L_per_partition, plastic_strain_history, accumulated_plastic_strain_history,
-        yield_stress_per_partition, hardening_modulus_per_partition)
+        strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history)
     if not np.array_equal(accumulated_plastic_strain > accumulated_plastic_strain_history, yielding_partitions):
         induced_strain = get_induced_strain_reusing_history(P, plastic_strain, plastic_strain_history,
                                                             induced_strain_history)
@@ -428,9 +500,8 @@ def get_reset_state(strain, b, P, induced_strain_history, L_per_partition, plast
     residual = strain - b - induced_strain
     return strain, plastic_strain, accumulated_plastic_strain, stress, residual
 
-def standard_richardson_iteration(E, P, macro_strain, L_per_partition,
-                                   yield_stress_per_partition, hardening_modulus_per_partition,
-                                   plastic_strain_history, accumulated_plastic_strain_history):
+def standard_richardson_iteration(E, P, macro_strain, partition_materials, plastic_strain_history,
+                                  accumulated_plastic_strain_history):
     b = (E @ macro_strain).reshape(partition_count, 6)
     induced_strain_history = get_induced_strain(P, plastic_strain_history)
     strain = b + induced_strain_history
@@ -438,8 +509,8 @@ def standard_richardson_iteration(E, P, macro_strain, L_per_partition,
     residual_history = []
     while True:
         strain, plastic_strain, accumulated_plastic_strain, stress, residual = get_reset_state(
-            strain, b, P, induced_strain_history, L_per_partition, plastic_strain_history,
-            accumulated_plastic_strain_history, yield_stress_per_partition, hardening_modulus_per_partition)
+            strain, b, P, induced_strain_history, partition_materials, plastic_strain_history,
+            accumulated_plastic_strain_history)
         residual_history.append(get_relative_residual(residual, strain))
 
         if has_converged(residual_history[-1], len(residual_history), "standard_richardson_iteration"):
@@ -454,16 +525,14 @@ def get_reference_fourier_inverse(P0_transformed, reference_sensitivity):
     return np.linalg.inv(M0_transformed)
 
 def get_fft_correction(reference_fourier_inverse, residual):
-    lattice_shape = (partition_number_per_side, partition_number_per_side, partition_number_per_side, 6)
-    residual_transformed = np.fft.fftn(residual.reshape(lattice_shape), axes=(0, 1, 2))
+    lattice_shape = (partition_number_per_side, partition_number_per_side, 6)
+    residual_transformed = np.fft.fftn(residual.reshape(lattice_shape), axes=(0, 1))
     correction_transformed = np.einsum('...ij,...j->...i', reference_fourier_inverse, -residual_transformed)
-    correction = np.fft.ifftn(correction_transformed, axes=(0, 1, 2)).real
+    correction = np.fft.ifftn(correction_transformed, axes=(0, 1)).real
     return correction.reshape(partition_count, 6)
 
-def fft_preconditioned_richardson_iteration(E, P, macro_strain, L_per_partition,
-                                             yield_stress_per_partition, hardening_modulus_per_partition,
-                                             plastic_strain_history, accumulated_plastic_strain_history,
-                                             P0_transformed):
+def fft_preconditioned_richardson_iteration(E, P, macro_strain, partition_materials, plastic_strain_history,
+                                            accumulated_plastic_strain_history, P0_transformed):
     b = (E @ macro_strain).reshape(partition_count, 6)
     induced_strain_history = get_induced_strain(P, plastic_strain_history)
     strain = b + induced_strain_history
@@ -472,8 +541,8 @@ def fft_preconditioned_richardson_iteration(E, P, macro_strain, L_per_partition,
     residual_history = []
     while True:
         strain, plastic_strain, accumulated_plastic_strain, stress, residual = get_reset_state(
-            strain, b, P, induced_strain_history, L_per_partition, plastic_strain_history,
-            accumulated_plastic_strain_history, yield_stress_per_partition, hardening_modulus_per_partition)
+            strain, b, P, induced_strain_history, partition_materials, plastic_strain_history,
+            accumulated_plastic_strain_history)
         residual_history.append(get_relative_residual(residual, strain))
 
         if has_converged(residual_history[-1], len(residual_history), "fft_preconditioned_richardson_iteration"):
@@ -481,9 +550,8 @@ def fft_preconditioned_richardson_iteration(E, P, macro_strain, L_per_partition,
 
         yielding_partitions = accumulated_plastic_strain > accumulated_plastic_strain_history
         if not np.array_equal(yielding_partitions, yielding_partitions_at_last_rebuild):
-            sensitivity = get_eigenstrain_sensitivity(strain, L_per_partition, plastic_strain_history,
-                                                      accumulated_plastic_strain_history, yield_stress_per_partition,
-                                                      hardening_modulus_per_partition)
+            sensitivity = get_eigenstrain_sensitivity(strain, partition_materials, plastic_strain_history,
+                                                      accumulated_plastic_strain_history)
             reference_sensitivity = np.mean(sensitivity, axis=0)
             reference_fourier_inverse = get_reference_fourier_inverse(P0_transformed, reference_sensitivity)
             yielding_partitions_at_last_rebuild = yielding_partitions
@@ -494,14 +562,18 @@ def fft_preconditioned_richardson_iteration(E, P, macro_strain, L_per_partition,
 
 ## ------- Load Path ------- ##
 
+class LoadPathResult(NamedTuple):
+    applied_macro_strain: np.ndarray
+    macroscopic_stress: np.ndarray
+    iterations_per_step: np.ndarray
+    solve_time_per_step: np.ndarray
+    final_stress: np.ndarray
+    final_plastic_strain: np.ndarray
+
 def get_macroscopic_stress(stress):
     return np.mean(stress, axis=0)
 
-def get_deviatoric_stress(stress):
-    return stress @ deviatoric_projector.T
-
-def run_strain_path(E, P, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition,
-                    P0_transformed=None):
+def run_strain_path(E, P, partition_materials, P0_transformed=None):
     plastic_strain_history = np.zeros((partition_count, 6))
     accumulated_plastic_strain_history = np.zeros(partition_count)
 
@@ -515,17 +587,17 @@ def run_strain_path(E, P, L_per_partition, yield_stress_per_partition, hardening
         start_time = time.perf_counter()
         if P0_transformed is None:
             stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = standard_richardson_iteration(
-                E, P, macro_strain, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition,
-                plastic_strain_history, accumulated_plastic_strain_history)
+                E, P, macro_strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history)
         else:
             stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = fft_preconditioned_richardson_iteration(
-                E, P, macro_strain, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition,
-                plastic_strain_history, accumulated_plastic_strain_history, P0_transformed)
+                E, P, macro_strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history,
+                P0_transformed)
         solve_time_per_step[step] = time.perf_counter() - start_time
         iterations_per_step[step] = len(residual_history)
         macroscopic_stress[step] = get_macroscopic_stress(stress)
 
-    return macroscopic_stress, iterations_per_step, solve_time_per_step, stress, plastic_strain_history
+    return LoadPathResult(applied_macro_strain, macroscopic_stress, iterations_per_step, solve_time_per_step, stress,
+                          plastic_strain_history)
 
 ## ------- Post-processing ------- ##
 
@@ -534,12 +606,11 @@ def get_F_state(B, L_per_element, element_nodes, element_partition_ids, macro_st
     F = np.zeros(dof_count)
     for element_id in range(element_count):
         F_element = get_F_element(B, L_per_element[element_id])
-        F[element_dofs[element_id]] += F_element @ (eigenstrain[element_partition_ids[element_id]] - macro_strain)
+        np.add.at(F, element_dofs[element_id], F_element @ (eigenstrain[element_partition_ids[element_id]] - macro_strain))
     return F
 
 def solve_state_displacements(K, F):
-    pinned_dofs = np.arange(3)
-    free_dofs = np.setdiff1d(np.arange(K.shape[0]), pinned_dofs)
+    free_dofs = get_free_dofs()
     K_free = K[free_dofs][:, free_dofs]
     jacobi_preconditioner = scipy.sparse.diags(1 / K_free.diagonal())
     conjugate_gradient_tolerance = 1e-10
@@ -553,240 +624,78 @@ def solve_state_displacements(K, F):
 
 def get_element_average_fluctuation_strain(displacements, B, element_nodes):
     element_dofs = get_element_dofs(element_nodes)
-    element_volume = element_side_length**3
     return displacements[element_dofs] @ get_integrated_B(B).T / element_volume
 
-def get_element_stress(L_matrix, L_inclusion, macro_strain, eigenstrain):
+def get_element_stress(mesh, B, L_per_element, macro_strain, eigenstrain):
     start_time = time.perf_counter()
-    element_nodes, element_partition_ids, element_material_ids = get_periodic_mesh()
-    B = get_B()
-    L_per_element = get_value_per_material(L_matrix, L_inclusion, element_material_ids)
-    K = get_K(B, L_per_element, element_nodes)
-    F = get_F_state(B, L_per_element, element_nodes, element_partition_ids, macro_strain, eigenstrain)
+    K = get_K(B, L_per_element, mesh.element_nodes)
+    F = get_F_state(B, L_per_element, mesh.element_nodes, mesh.element_partition_ids, macro_strain, eigenstrain)
     displacements = solve_state_displacements(K, F)
 
-    element_strain = macro_strain + get_element_average_fluctuation_strain(displacements, B, element_nodes)
-    element_eigenstrain = eigenstrain[element_partition_ids]
+    element_strain = macro_strain + get_element_average_fluctuation_strain(displacements, B, mesh.element_nodes)
+    element_eigenstrain = eigenstrain[mesh.element_partition_ids]
     element_stress = np.einsum('eij,ej->ei', L_per_element, element_strain - element_eigenstrain)
     print(f"element stress post-processing: {time.perf_counter() - start_time:.2f} seconds.")
     return element_stress
 
 ## ------- Main ------- ##
 
-def get_partition_material_properties(L_matrix, L_inclusion):
-    partition_material_ids = get_partition_material_ids()
-    L_per_partition = get_value_per_material(L_matrix, L_inclusion, partition_material_ids)
-    yield_stress_per_partition = get_value_per_material(matrix_yield_stress, inclusion_yield_stress,
-                                                        partition_material_ids)
-    hardening_modulus_per_partition = get_value_per_material(matrix_hardening_modulus, inclusion_hardening_modulus,
-                                                             partition_material_ids)
-    return L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition
-
-def get_offline_operators(L_matrix, L_inclusion, L_per_partition):
-    element_nodes, element_partition_ids, element_material_ids = get_periodic_mesh()
-    B = get_B()
-    L_per_element = get_value_per_material(L_matrix, L_inclusion, element_material_ids)
-
-    E_P_cache_path = cache_folder / "E_P.npz"
-    E_P_parameters = {"domain_side_length": domain_side_length,
-                      "fiber_side_length": inclusion_side_length,
-                      "element_number_per_side": element_number_per_side,
-                      "partition_number_per_side": partition_number_per_side,
-                      "L_matrix": L_matrix,
-                      "L_inclusion": L_inclusion}
-    cached_E_P = load_cache(E_P_cache_path, E_P_parameters)
-    if cached_E_P is None:
-        E, P = get_influence_functions(B, L_per_element, element_nodes, element_partition_ids)
-        save_cache(E_P_cache_path, E_P_parameters, E=E, P=P)
-    else:
-        E, P = cached_E_P["E"], cached_E_P["P"]
-
-    reference_L = get_homogenized_L(E, L_per_partition)
-    reference_L_per_element = np.tile(reference_L, (element_count, 1, 1))
-
-    P0_cache_path = cache_folder / "P0_offset_blocks.npz"
-    P0_parameters = {"domain_side_length": domain_side_length,
-                     "element_number_per_side": element_number_per_side,
-                     "partition_number_per_side": partition_number_per_side,
-                     "reference_L": reference_L}
-    cached_P0 = load_cache(P0_cache_path, P0_parameters)
-    if cached_P0 is None:
-        start_time = time.perf_counter()
-        P0_offset_blocks = get_P0_offset_blocks(B, reference_L_per_element, element_nodes, element_partition_ids)
-        print(f"P0 offline solve (extra cost of the FFT solver): {time.perf_counter() - start_time:.2f} seconds.")
-        save_cache(P0_cache_path, P0_parameters, P0_offset_blocks=P0_offset_blocks)
-    else:
-        P0_offset_blocks = cached_P0["P0_offset_blocks"]
-
-    return E, P, get_P0_transformed(P0_offset_blocks)
-
 def get_solver_label(solver_name, iterations_per_step, solve_time_per_step):
     return (f"{solver_name}: {iterations_per_step.sum()} iterations, {solve_time_per_step.sum():.2f} s, "
             f"{1000 * solve_time_per_step.sum() / iterations_per_step.sum():.2f} ms per iteration")
 
-def shade_elastic_steps(axis, load_steps, iterations_per_step):
-    for load_step in load_steps[iterations_per_step == 1]:
-        axis.axvspan(load_step - 0.5, load_step + 0.5, color='0.9', linewidth=0, zorder=0)
-
-def label_elastic_steps(axis, load_steps, iterations_per_step):
-    if np.any(iterations_per_step == 1):
-        first_elastic_step = load_steps[iterations_per_step == 1][0]
-        axis.annotate("Elastic\nregime", xy=(first_elastic_step - 0.5, 1), xycoords=axis.get_xaxis_transform(),
-                      xytext=(8, -8), textcoords='offset points', ha='left', va='top', color='0.45')
-
-macro_strain_component_labels = [r"$\bar{\varepsilon}_{11}$", r"$\bar{\varepsilon}_{22}$", r"$\bar{\varepsilon}_{33}$",
-                                 r"$\bar{\gamma}_{12}$", r"$\bar{\gamma}_{23}$", r"$\bar{\gamma}_{13}$"]
-
-def get_applied_strain_description():
-    nonzero_components = [f"{label} = {value:g}" for label, value in zip(macro_strain_component_labels, max_macro_strain)
-                          if value != 0]
-    return f"Applied Strain: {', '.join(nonzero_components)} ({strain_increment_count} steps)"
-
-def add_solver_legend(axis, line, solver_name, iterations_per_step, solve_time_per_step, location, vertical_anchor):
-    no_line = matplotlib.lines.Line2D([], [], linestyle='none')
-    totals_label = f"  {iterations_per_step.sum()} iterations,\n  {solve_time_per_step.sum():.2f} s total time"
-    solver_legend = matplotlib.legend.Legend(axis, [line, no_line], [f"{solver_name}:", totals_label],
-                                             labelspacing=0.4, handlelength=1.5, frameon=False,
-                                             loc=location, bbox_to_anchor=(1.01, vertical_anchor))
-    solver_name_text, totals_text = solver_legend.get_texts()
-    solver_name_text.set_fontweight('bold')
-    solver_name_text.set_fontsize(15)
-    totals_text.set_fontsize(13)
-    axis.add_artist(solver_legend)
-    solver_legend.set_clip_on(False)
-
-load_path_summary_style = {'font.size': 14, 'axes.labelsize': 16, 'xtick.labelsize': 13, 'ytick.labelsize': 13,
-                           'legend.fontsize': 15, 'axes.titlesize': 22, 'lines.linewidth': 2.5}
-load_path_summary_figure_size = (9.5, 10)
-
-def plot_load_path_summary(macroscopic_stress, iterations_per_step, solve_time_per_step, iterations_per_step_fft,
-                           solve_time_per_step_fft):
-    load_steps = np.arange(1, strain_increment_count + 1)
-    macroscopic_deviatoric_stress_MPa = get_deviatoric_stress(macroscopic_stress) / 1e6
-    time_per_iteration_ms = 1000 * solve_time_per_step / iterations_per_step
-    time_per_iteration_ms_fft = 1000 * solve_time_per_step_fft / iterations_per_step_fft
-
-    with plt.rc_context(load_path_summary_style):
-        figure, (stress_axis, iterations_axis, time_per_iteration_axis) = plt.subplots(
-            3, 1, sharex=True, figsize=load_path_summary_figure_size, layout='constrained')
-        stress_axis.set_title(get_applied_strain_description(), pad=40)
-        # stress_axis.annotate(get_applied_strain_description(), xy=(0.5, 1), xycoords='axes fraction',
-        #                      xytext=(0, 12), textcoords='offset points', ha='center', va='bottom', color='0.35')
-        for axis in (stress_axis, iterations_axis, time_per_iteration_axis):
-            shade_elastic_steps(axis, load_steps, iterations_per_step)
-        label_elastic_steps(stress_axis, load_steps, iterations_per_step)
-
-        stress_axis.plot(load_steps, macroscopic_deviatoric_stress_MPa[:, 0], color='red', marker='o', markersize=4,
-                         linewidth=2, label=r"$\bar{\mathbf{S}}_{11}$")
-        stress_axis.plot(load_steps, macroscopic_deviatoric_stress_MPa[:, 1], color='blue', marker='s', markersize=4,
-                         linewidth=2, label=r"$\bar{\mathbf{S}}_{22}$")
-        stress_axis.plot(load_steps, macroscopic_deviatoric_stress_MPa[:, 2], color='green', marker='^', markersize=4,
-                         linewidth=2, label=r"$\bar{\mathbf{S}}_{33}$")
-        stress_axis.legend(loc='center left', bbox_to_anchor=(1.01, 0.5), frameon=False)
-        stress_axis.set_ylabel("Deviatoric stress (MPa)")
-
-        standard_line, = iterations_axis.step(load_steps, iterations_per_step, where='mid', color='tab:blue')
-        fft_line, = iterations_axis.step(load_steps, iterations_per_step_fft, where='mid', color='tab:orange')
-        add_solver_legend(iterations_axis, standard_line, "Standard", iterations_per_step, solve_time_per_step,
-                          'lower left', 0.52)
-        add_solver_legend(iterations_axis, fft_line, "FFT-preconditioned", iterations_per_step_fft,
-                          solve_time_per_step_fft, 'upper left', 0.48)
-        iterations_axis.set_ylabel("Iterations")
-        iterations_axis.set_ylim(bottom=0)
-        iterations_axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
-
-        time_per_iteration_axis.step(load_steps, time_per_iteration_ms, where='mid', color='tab:blue')
-        time_per_iteration_axis.step(load_steps, time_per_iteration_ms_fft, where='mid', color='tab:orange')
-        time_per_iteration_axis.set_ylabel("Time per iteration (ms)")
-        time_per_iteration_axis.set_ylim(bottom=0)
-        time_per_iteration_axis.set_xlabel("Load step", labelpad=12)
-        time_per_iteration_axis.set_xlim(0.5, strain_increment_count + 0.5)
-        figure.align_ylabels()
-
-        load_path_summary_plot_path = cache_folder / "load_path_summary.png"
-        figure.savefig(load_path_summary_plot_path)
-    print(f"load path summary plot saved to {load_path_summary_plot_path}")
-
-cross_section_figure_size = (5, 5)
-
-def draw_element_and_partition_edges(axis):
-    element_edges = np.linspace(0, domain_side_length, element_number_per_side + 1)
-    partition_edges = np.linspace(0, domain_side_length, partition_number_per_side + 1)
-    axis.vlines(element_edges, 0, domain_side_length, color='0.75', linewidth=0.5)
-    axis.hlines(element_edges, 0, domain_side_length, color='0.75', linewidth=0.5)
-    axis.vlines(partition_edges, 0, domain_side_length, color='0.25', linewidth=1.2, clip_on=False)
-    axis.hlines(partition_edges, 0, domain_side_length, color='0.25', linewidth=1.2, clip_on=False)
-
-def plot_cross_section():
-    partition_material_ids = get_partition_material_ids()
-    cross_section_material_ids = partition_material_ids.reshape(partition_number_per_side, partition_number_per_side,
-                                                                partition_number_per_side)[0]
-
-    figure, axis = plt.subplots(figsize=cross_section_figure_size, layout='constrained')
-    axis.imshow(cross_section_material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.55']), vmin=0, vmax=1,
-                origin='lower', extent=(0, domain_side_length, 0, domain_side_length))
-    draw_element_and_partition_edges(axis)
-    axis.set_axis_off()
-
-    cache_folder.mkdir(exist_ok=True)
-    cross_section_plot_path = cache_folder / "cross_section.png"
-    figure.savefig(cross_section_plot_path)
-    print(f"cross section plot saved to {cross_section_plot_path}")
-
-von_mises_cross_section_figure_size = (6, 5)
-
-def plot_von_mises_cross_section(stress, count_per_side, plot_file_name):
-    von_mises_stress_MPa = get_equivalent_stress(get_deviatoric_stress(stress)) / 1e6
-    cross_section_von_mises_stress_MPa = von_mises_stress_MPa.reshape(count_per_side, count_per_side, count_per_side)[0]
-
-    figure, axis = plt.subplots(figsize=von_mises_cross_section_figure_size, layout='constrained')
-    image = axis.imshow(cross_section_von_mises_stress_MPa, cmap='jet', vmin=von_mises_plot_min_stress / 1e6,
-                        vmax=von_mises_plot_max_stress / 1e6, origin='lower',
-                        extent=(0, domain_side_length, 0, domain_side_length))
-    figure.colorbar(image, ax=axis, extend='both', label="von Mises stress (MPa)")
-    draw_element_and_partition_edges(axis)
-    axis.set_axis_off()
-
-    von_mises_cross_section_plot_path = cache_folder / plot_file_name
-    figure.savefig(von_mises_cross_section_plot_path)
-    print(f"von Mises cross section plot saved to {von_mises_cross_section_plot_path}")
-
 def main():
-    plot_cross_section()
+    output_folder.mkdir(exist_ok=True)
+    partition_material_ids = get_partition_material_ids()
+    print(f"inclusion volume fraction on the partition grid: {partition_material_ids.mean():.4f}")
+    plots.plot_cross_section(partition_material_ids.reshape(partition_number_per_side, partition_number_per_side),
+                             element_number_per_side, output_folder / "cross_section.png")
+
     L_matrix = get_L(elastic_modulus_matrix, poisson_ratio_matrix)
     L_inclusion = get_L(elastic_modulus_inclusion, poisson_ratio_inclusion)
-    L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition = get_partition_material_properties(
-        L_matrix, L_inclusion)
-    E, P, P0_transformed = get_offline_operators(L_matrix, L_inclusion, L_per_partition)
+    partition_materials = get_partition_materials(L_matrix, L_inclusion)
+    mesh = get_periodic_mesh()
+    B = get_B()
+    L_per_element = get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids)
+    E, P, P0_transformed = get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, partition_materials.L)
 
     solve_time_per_step_per_repeat = np.zeros((timing_repeat_count, strain_increment_count))
     solve_time_per_step_per_repeat_fft = np.zeros((timing_repeat_count, strain_increment_count))
     for repeat in range(timing_repeat_count):
-        (macroscopic_stress, iterations_per_step, solve_time_per_step_per_repeat[repeat], final_stress,
-         final_plastic_strain) = run_strain_path(
-            E, P, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition)
-        macroscopic_stress_fft, iterations_per_step_fft, solve_time_per_step_per_repeat_fft[repeat], _, _ = run_strain_path(
-            E, P, L_per_partition, yield_stress_per_partition, hardening_modulus_per_partition, P0_transformed)
+        standard_result = run_strain_path(E, P, partition_materials)
+        fft_result = run_strain_path(E, P, partition_materials, P0_transformed)
+        solve_time_per_step_per_repeat[repeat] = standard_result.solve_time_per_step
+        solve_time_per_step_per_repeat_fft[repeat] = fft_result.solve_time_per_step
     solve_time_per_step = np.min(solve_time_per_step_per_repeat, axis=0)
     solve_time_per_step_fft = np.min(solve_time_per_step_per_repeat_fft, axis=0)
 
-    standard_label = get_solver_label("standard", iterations_per_step, solve_time_per_step)
-    fft_label = get_solver_label("FFT-preconditioned", iterations_per_step_fft, solve_time_per_step_fft)
-    stress_relative_difference = (np.abs(macroscopic_stress_fft - macroscopic_stress).max()
-                                   / np.abs(macroscopic_stress).max())
+    stress_difference = np.abs(fft_result.macroscopic_stress - standard_result.macroscopic_stress).max()
+    stress_scale = max(np.abs(standard_result.macroscopic_stress).max(), np.finfo(float).tiny)
     print(f"relaxation_factor = {relaxation_factor}")
     print(f"solve times are the minimum per load step over {timing_repeat_count} interleaved runs of each solver")
-    print(standard_label)
-    print(fft_label)
-    print(f"stress agreement between solvers: {stress_relative_difference:.2e} relative.")
+    print(get_solver_label("standard", standard_result.iterations_per_step, solve_time_per_step))
+    print(get_solver_label("FFT-preconditioned", fft_result.iterations_per_step, solve_time_per_step_fft))
+    print(f"stress agreement between solvers: {stress_difference / stress_scale:.2e} relative.")
 
-    plot_load_path_summary(macroscopic_stress, iterations_per_step, solve_time_per_step, iterations_per_step_fft,
-                           solve_time_per_step_fft)
-    plot_von_mises_cross_section(final_stress, partition_number_per_side, "von_mises_cross_section.png")
+    plots.plot_load_path_summary(get_deviatoric_stress(standard_result.macroscopic_stress) / 1e6,
+                                 standard_result.iterations_per_step, solve_time_per_step,
+                                 fft_result.iterations_per_step, solve_time_per_step_fft,
+                                 plots.get_applied_strain_description(max_macro_strain, strain_increment_count),
+                                 output_folder / "load_path_summary.png")
+    partition_von_mises_stress_MPa = get_von_mises_stress(standard_result.final_stress) / 1e6
+    plots.plot_von_mises_cross_section(
+        partition_von_mises_stress_MPa.reshape(partition_number_per_side, partition_number_per_side),
+        element_number_per_side, partition_number_per_side, von_mises_plot_min_stress / 1e6,
+        von_mises_plot_max_stress / 1e6, output_folder / "von_mises_cross_section.png")
 
     if post_process_element_stress:
-        element_stress = get_element_stress(L_matrix, L_inclusion, max_macro_strain, final_plastic_strain)
-        plot_von_mises_cross_section(element_stress, element_number_per_side, "von_mises_element_cross_section.png")
+        element_stress = get_element_stress(mesh, B, L_per_element, standard_result.applied_macro_strain[-1],
+                                            standard_result.final_plastic_strain)
+        bottom_layer_von_mises_stress_MPa = get_von_mises_stress(element_stress[:element_number_per_side**2]) / 1e6
+        plots.plot_von_mises_cross_section(
+            bottom_layer_von_mises_stress_MPa.reshape(element_number_per_side, element_number_per_side),
+            element_number_per_side, partition_number_per_side, von_mises_plot_min_stress / 1e6,
+            von_mises_plot_max_stress / 1e6, output_folder / "von_mises_element_cross_section.png")
 
 if __name__ == "__main__":
     main()
