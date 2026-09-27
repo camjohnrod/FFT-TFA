@@ -15,7 +15,7 @@ inclusion_shape             = "circle"
 inclusion_side_length       = (5/9) * 1e-3
 inclusion_radius            = 0.35e-3
 
-element_number_per_side     = 35
+element_number_per_side     = 25
 element_number_along_z      = 1
 partition_number_per_side   = element_number_per_side
 
@@ -37,7 +37,7 @@ fixed_point_tolerance       = 1e-6
 fixed_point_max_iterations  = 1000
 relaxation_factor           = 1.0
 
-timing_repeat_count         = 5
+timing_repeat_count         = 10
 post_process_element_stress = True
 von_mises_plot_min_stress   = 1.0e6
 von_mises_plot_max_stress   = 3.0e6
