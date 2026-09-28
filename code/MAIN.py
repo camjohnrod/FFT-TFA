@@ -1,3 +1,4 @@
+import functools
 import pathlib
 import sys
 import time
@@ -15,9 +16,9 @@ inclusion_shape             = "circle"
 inclusion_side_length       = (5/9) * 1e-3
 inclusion_radius            = 0.35e-3
 
-element_number_per_side     = 25
+element_number_per_side     = 75
 element_number_along_z      = 1
-partition_number_per_side   = element_number_per_side
+partition_number_per_side   = 25
 
 elastic_modulus_inclusion   = 10e9
 elastic_modulus_matrix      = 100e6
@@ -31,13 +32,14 @@ matrix_hardening_modulus    = 10e6
 max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
 # max_macro_strain            = np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])
 # max_macro_strain            = np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])
+
 strain_increment_count      = 60
 
 fixed_point_tolerance       = 1e-6
 fixed_point_max_iterations  = 1000
 relaxation_factor           = 1.0
 
-timing_repeat_count         = 10
+timing_repeat_count         = 5
 post_process_element_stress = True
 von_mises_plot_min_stress   = 1.0e6
 von_mises_plot_max_stress   = 3.0e6
@@ -369,6 +371,56 @@ def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_p
 
     return E, P, get_P0_transformed(P0_offset_blocks)
 
+## ------- Online Timing ------- ##
+
+online_time_groups = ("material_update", "induced_strain", "reference_sensitivity", "reference_inverse",
+                      "correction_solve")
+
+class OnlineTimer:
+    def __init__(self):
+        self.open_group = None
+        self.reset()
+
+    def reset(self):
+        self.time_per_group = [0.0] * len(online_time_groups)
+        self.calls_per_group = [0] * len(online_time_groups)
+
+online_timer = OnlineTimer()
+
+def timed_online(group):
+    group_id = online_time_groups.index(group)
+    def decorator(function):
+        @functools.wraps(function)
+        def timed_function(*args, **kwargs):
+            if online_timer.open_group is not None:
+                raise RuntimeError(f"online time group {group!r} started inside {online_timer.open_group!r}, "
+                                   "so its time would be counted twice.")
+            online_timer.open_group = group
+            start_time = time.perf_counter()
+            result = function(*args, **kwargs)
+            online_timer.time_per_group[group_id] += time.perf_counter() - start_time
+            online_timer.calls_per_group[group_id] += 1
+            online_timer.open_group = None
+            return result
+        return timed_function
+    return decorator
+
+def get_online_timer_overhead_per_call(call_count=100_000):
+    def untimed_function():
+        pass
+    timed_function = timed_online(online_time_groups[0])(untimed_function)
+
+    start_time = time.perf_counter()
+    for _ in range(call_count):
+        timed_function()
+    timed_duration = time.perf_counter() - start_time
+    start_time = time.perf_counter()
+    for _ in range(call_count):
+        untimed_function()
+    untimed_duration = time.perf_counter() - start_time
+    online_timer.reset()
+    return max(timed_duration - untimed_duration, 0) / call_count
+
 ## ------- J2 Material ------- ##
 
 volumetric_direction = np.array([1, 1, 1, 0, 0, 0])
@@ -405,6 +457,7 @@ def get_flow_direction(deviatoric_stress, equivalent_stress):
     flow_direction[:, 3:] = 3 * deviatoric_stress[:, 3:] / equivalent_stress[:, None]
     return flow_direction
 
+@timed_online("material_update")
 def get_plastic_eigenstrain(strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history):
     (trial_stress, trial_mean_stress, trial_deviatoric_stress, trial_equivalent_stress, trial_yield_function,
      trial_plastic_multiplier) = get_trial_state(strain, partition_materials, plastic_strain_history,
@@ -456,6 +509,7 @@ def get_eigenstrain_sensitivity(strain, partition_materials, plastic_strain_hist
 
 ## ------- Solvers ------- ##
 
+@timed_online("induced_strain")
 def get_induced_strain(P, eigenstrain):
     return (P @ eigenstrain.reshape(-1)).reshape(partition_count, 6)
 
@@ -500,6 +554,10 @@ def get_reset_state(strain, b, P, induced_strain_history, partition_materials, p
     residual = strain - b - induced_strain
     return strain, plastic_strain, accumulated_plastic_strain, stress, residual
 
+@timed_online("correction_solve")
+def get_standard_correction(residual):
+    return -residual
+
 def standard_richardson_iteration(E, P, macro_strain, partition_materials, plastic_strain_history,
                                   accumulated_plastic_strain_history):
     b = (E @ macro_strain).reshape(partition_count, 6)
@@ -516,14 +574,22 @@ def standard_richardson_iteration(E, P, macro_strain, partition_materials, plast
         if has_converged(residual_history[-1], len(residual_history), "standard_richardson_iteration"):
             break
 
-        strain = strain - relaxation_factor * residual
+        strain = strain + relaxation_factor * get_standard_correction(residual)
 
     return stress, plastic_strain, accumulated_plastic_strain, np.array(residual_history)
 
+@timed_online("reference_sensitivity")
+def get_reference_sensitivity(strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history):
+    sensitivity = get_eigenstrain_sensitivity(strain, partition_materials, plastic_strain_history,
+                                              accumulated_plastic_strain_history)
+    return np.mean(sensitivity, axis=0)
+
+@timed_online("reference_inverse")
 def get_reference_fourier_inverse(P0_transformed, reference_sensitivity):
     M0_transformed = np.eye(6) - P0_transformed @ reference_sensitivity
     return np.linalg.inv(M0_transformed)
 
+@timed_online("correction_solve")
 def get_fft_correction(reference_fourier_inverse, residual):
     lattice_shape = (partition_number_per_side, partition_number_per_side, 6)
     residual_transformed = np.fft.fftn(residual.reshape(lattice_shape), axes=(0, 1))
@@ -550,9 +616,8 @@ def fft_preconditioned_richardson_iteration(E, P, macro_strain, partition_materi
 
         yielding_partitions = accumulated_plastic_strain > accumulated_plastic_strain_history
         if not np.array_equal(yielding_partitions, yielding_partitions_at_last_rebuild):
-            sensitivity = get_eigenstrain_sensitivity(strain, partition_materials, plastic_strain_history,
-                                                      accumulated_plastic_strain_history)
-            reference_sensitivity = np.mean(sensitivity, axis=0)
+            reference_sensitivity = get_reference_sensitivity(strain, partition_materials, plastic_strain_history,
+                                                              accumulated_plastic_strain_history)
             reference_fourier_inverse = get_reference_fourier_inverse(P0_transformed, reference_sensitivity)
             yielding_partitions_at_last_rebuild = yielding_partitions
 
@@ -567,6 +632,8 @@ class LoadPathResult(NamedTuple):
     macroscopic_stress: np.ndarray
     iterations_per_step: np.ndarray
     solve_time_per_step: np.ndarray
+    group_time_per_step: np.ndarray
+    group_calls_per_step: np.ndarray
     final_stress: np.ndarray
     final_plastic_strain: np.ndarray
 
@@ -582,8 +649,11 @@ def run_strain_path(E, P, partition_materials, P0_transformed=None):
     macroscopic_stress = np.zeros((strain_increment_count, 6))
     iterations_per_step = np.zeros(strain_increment_count, dtype=int)
     solve_time_per_step = np.zeros(strain_increment_count)
+    group_time_per_step = np.zeros((strain_increment_count, len(online_time_groups)))
+    group_calls_per_step = np.zeros((strain_increment_count, len(online_time_groups)), dtype=int)
 
     for step, macro_strain in enumerate(applied_macro_strain):
+        online_timer.reset()
         start_time = time.perf_counter()
         if P0_transformed is None:
             stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = standard_richardson_iteration(
@@ -593,11 +663,13 @@ def run_strain_path(E, P, partition_materials, P0_transformed=None):
                 E, P, macro_strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history,
                 P0_transformed)
         solve_time_per_step[step] = time.perf_counter() - start_time
+        group_time_per_step[step] = online_timer.time_per_group
+        group_calls_per_step[step] = online_timer.calls_per_group
         iterations_per_step[step] = len(residual_history)
         macroscopic_stress[step] = get_macroscopic_stress(stress)
 
-    return LoadPathResult(applied_macro_strain, macroscopic_stress, iterations_per_step, solve_time_per_step, stress,
-                          plastic_strain_history)
+    return LoadPathResult(applied_macro_strain, macroscopic_stress, iterations_per_step, solve_time_per_step,
+                          group_time_per_step, group_calls_per_step, stress, plastic_strain_history)
 
 ## ------- Post-processing ------- ##
 
@@ -644,6 +716,29 @@ def get_solver_label(solver_name, iterations_per_step, solve_time_per_step):
     return (f"{solver_name}: {iterations_per_step.sum()} iterations, {solve_time_per_step.sum():.2f} s, "
             f"{1000 * solve_time_per_step.sum() / iterations_per_step.sum():.2f} ms per iteration")
 
+def run_interleaved_repeats(E, P, partition_materials, P0_transformed):
+    standard_results, fft_results = [], []
+    for repeat in range(timing_repeat_count):
+        standard_results.append(run_strain_path(E, P, partition_materials))
+        fft_results.append(run_strain_path(E, P, partition_materials, P0_transformed))
+    return standard_results, fft_results
+
+def get_fastest_repeat_per_step(results, field):
+    fastest_repeat_per_step = np.argmin([result.solve_time_per_step for result in results], axis=0)
+    return np.array([getattr(result, field) for result in results])[fastest_repeat_per_step,
+                                                                    np.arange(strain_increment_count)]
+
+def get_time_per_iteration_per_group(results):
+    solve_time = get_fastest_repeat_per_step(results, "solve_time_per_step").sum()
+    time_per_group = get_fastest_repeat_per_step(results, "group_time_per_step").sum(axis=0)
+    iteration_count = get_fastest_repeat_per_step(results, "iterations_per_step").sum()
+    return np.append(time_per_group, solve_time - time_per_group.sum()) / iteration_count
+
+def get_timer_overhead_fraction(results, timer_overhead_per_call):
+    solve_time = get_fastest_repeat_per_step(results, "solve_time_per_step").sum()
+    timed_call_count = get_fastest_repeat_per_step(results, "group_calls_per_step").sum()
+    return timer_overhead_per_call * timed_call_count / solve_time
+
 def main():
     output_folder.mkdir(exist_ok=True)
     partition_material_ids = get_partition_material_ids()
@@ -659,15 +754,10 @@ def main():
     L_per_element = get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids)
     E, P, P0_transformed = get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, partition_materials.L)
 
-    solve_time_per_step_per_repeat = np.zeros((timing_repeat_count, strain_increment_count))
-    solve_time_per_step_per_repeat_fft = np.zeros((timing_repeat_count, strain_increment_count))
-    for repeat in range(timing_repeat_count):
-        standard_result = run_strain_path(E, P, partition_materials)
-        fft_result = run_strain_path(E, P, partition_materials, P0_transformed)
-        solve_time_per_step_per_repeat[repeat] = standard_result.solve_time_per_step
-        solve_time_per_step_per_repeat_fft[repeat] = fft_result.solve_time_per_step
-    solve_time_per_step = np.min(solve_time_per_step_per_repeat, axis=0)
-    solve_time_per_step_fft = np.min(solve_time_per_step_per_repeat_fft, axis=0)
+    standard_results, fft_results = run_interleaved_repeats(E, P, partition_materials, P0_transformed)
+    standard_result, fft_result = standard_results[-1], fft_results[-1]
+    solve_time_per_step = get_fastest_repeat_per_step(standard_results, "solve_time_per_step")
+    solve_time_per_step_fft = get_fastest_repeat_per_step(fft_results, "solve_time_per_step")
 
     stress_difference = np.abs(fft_result.macroscopic_stress - standard_result.macroscopic_stress).max()
     stress_scale = max(np.abs(standard_result.macroscopic_stress).max(), np.finfo(float).tiny)
@@ -682,6 +772,15 @@ def main():
                                  fft_result.iterations_per_step, solve_time_per_step_fft,
                                  plots.get_applied_strain_description(max_macro_strain, strain_increment_count),
                                  output_folder / "load_path_summary.png")
+
+    timer_overhead_per_call = get_online_timer_overhead_per_call()
+    print(f"online timer overhead: {100 * get_timer_overhead_fraction(standard_results, timer_overhead_per_call):.3f} % "
+          f"(standard), {100 * get_timer_overhead_fraction(fft_results, timer_overhead_per_call):.3f} % "
+          f"(FFT-preconditioned) of online time")
+    plots.plot_time_per_iteration_breakdown(1000 * get_time_per_iteration_per_group(standard_results),
+                                            1000 * get_time_per_iteration_per_group(fft_results),
+                                            output_folder / "time_per_iteration_breakdown.png")
+
     partition_von_mises_stress_MPa = get_von_mises_stress(standard_result.final_stress) / 1e6
     plots.plot_von_mises_cross_section(
         partition_von_mises_stress_MPa.reshape(partition_number_per_side, partition_number_per_side),
