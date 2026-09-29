@@ -17,7 +17,7 @@ inclusion_side_length       = (5/9) * 1e-3
 inclusion_radius            = 0.35e-3
 
 element_number_per_side     = 75
-element_number_along_z      = 1
+element_number_along_z      = 5
 partition_number_per_side   = 25
 
 elastic_modulus_inclusion   = 10e9
@@ -27,7 +27,7 @@ poisson_ratio_matrix        = 0.3
 inclusion_yield_stress      = np.inf
 matrix_yield_stress         = 1.0e6
 inclusion_hardening_modulus = 0.0
-matrix_hardening_modulus    = 10e6
+matrix_hardening_modulus    = -0.75 * 10e6
 
 max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
 # max_macro_strain            = np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])
@@ -522,15 +522,20 @@ def get_relative_residual(residual, strain):
     strain_norm_floor = 1e-30
     return np.linalg.norm(residual) / max(np.linalg.norm(strain), strain_norm_floor)
 
+class SolverDidNotConverge(RuntimeError):
+    # Its own type so run_strain_path can abandon a load path without also swallowing genuine bugs, such as the
+    # online timer's nesting guard or a failed conjugate gradient in post-processing.
+    pass
+
 def has_converged(relative_residual, iteration_count, solver_name):
     if not np.isfinite(relative_residual) or relative_residual > 1:
-        raise RuntimeError(f"{solver_name} diverged after {iteration_count} iterations "
-                            f"(relative residual {relative_residual}).")
+        raise SolverDidNotConverge(f"{solver_name} diverged after {iteration_count} iterations "
+                                   f"(relative residual {relative_residual})")
     if relative_residual < fixed_point_tolerance:
         return True
     if iteration_count >= fixed_point_max_iterations:
-        raise RuntimeError(f"{solver_name} did not converge within {fixed_point_max_iterations} iterations "
-                            f"(relative residual {relative_residual}).")
+        raise SolverDidNotConverge(f"{solver_name} did not converge within {fixed_point_max_iterations} "
+                                   f"iterations (relative residual {relative_residual})")
     return False
 
 def get_reset_state(strain, b, P, induced_strain_history, partition_materials, plastic_strain_history,
@@ -636,6 +641,10 @@ class LoadPathResult(NamedTuple):
     group_calls_per_step: np.ndarray
     final_stress: np.ndarray
     final_plastic_strain: np.ndarray
+    # Steps actually solved. Entries past this are untouched zeros, so totals stay honest but anything plotted
+    # has to be sliced or the curves fall to zero at the abandoned steps.
+    completed_step_count: int
+    failure_reason: str
 
 def get_macroscopic_stress(stress):
     return np.mean(stress, axis=0)
@@ -652,16 +661,28 @@ def run_strain_path(E, P, partition_materials, P0_transformed=None):
     group_time_per_step = np.zeros((strain_increment_count, len(online_time_groups)))
     group_calls_per_step = np.zeros((strain_increment_count, len(online_time_groups)), dtype=int)
 
+    solver_name = "standard" if P0_transformed is None else "FFT-preconditioned"
+    completed_step_count = strain_increment_count
+    failure_reason = ""
+
     for step, macro_strain in enumerate(applied_macro_strain):
         online_timer.reset()
         start_time = time.perf_counter()
-        if P0_transformed is None:
-            stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = standard_richardson_iteration(
-                E, P, macro_strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history)
-        else:
-            stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = fft_preconditioned_richardson_iteration(
-                E, P, macro_strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history,
-                P0_transformed)
+        try:
+            if P0_transformed is None:
+                stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = standard_richardson_iteration(
+                    E, P, macro_strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history)
+            else:
+                stress, plastic_strain_history, accumulated_plastic_strain_history, residual_history = fft_preconditioned_richardson_iteration(
+                    E, P, macro_strain, partition_materials, plastic_strain_history, accumulated_plastic_strain_history,
+                    P0_transformed)
+        except SolverDidNotConverge as failure:
+            if step == 0:
+                raise
+            completed_step_count, failure_reason = step, str(failure)
+            print(f"  {solver_name}: abandoned the load path at step {step + 1} of {strain_increment_count}. "
+                  f"{failure_reason}.")
+            break
         solve_time_per_step[step] = time.perf_counter() - start_time
         group_time_per_step[step] = online_timer.time_per_group
         group_calls_per_step[step] = online_timer.calls_per_group
@@ -669,7 +690,8 @@ def run_strain_path(E, P, partition_materials, P0_transformed=None):
         macroscopic_stress[step] = get_macroscopic_stress(stress)
 
     return LoadPathResult(applied_macro_strain, macroscopic_stress, iterations_per_step, solve_time_per_step,
-                          group_time_per_step, group_calls_per_step, stress, plastic_strain_history)
+                          group_time_per_step, group_calls_per_step, stress, plastic_strain_history,
+                          completed_step_count, failure_reason)
 
 ## ------- Post-processing ------- ##
 
@@ -712,9 +734,15 @@ def get_element_stress(mesh, B, L_per_element, macro_strain, eigenstrain):
 
 ## ------- Main ------- ##
 
-def get_solver_label(solver_name, iterations_per_step, solve_time_per_step):
-    return (f"{solver_name}: {iterations_per_step.sum()} iterations, {solve_time_per_step.sum():.2f} s, "
-            f"{1000 * solve_time_per_step.sum() / iterations_per_step.sum():.2f} ms per iteration")
+def get_solver_label(solver_name, iterations_per_step, solve_time_per_step, completed_step_count=None):
+    label = (f"{solver_name}: {iterations_per_step.sum()} iterations, {solve_time_per_step.sum():.2f} s, "
+             f"{1000 * solve_time_per_step.sum() / iterations_per_step.sum():.2f} ms per iteration")
+    if completed_step_count is not None and completed_step_count < strain_increment_count:
+        label += f"  [PARTIAL: {completed_step_count} of {strain_increment_count} steps, excluded from timing]"
+    return label
+
+def get_completed_step_count(results):
+    return min(result.completed_step_count for result in results)
 
 def run_interleaved_repeats(E, P, partition_materials, P0_transformed):
     standard_results, fft_results = [], []
@@ -759,17 +787,28 @@ def main():
     solve_time_per_step = get_fastest_repeat_per_step(standard_results, "solve_time_per_step")
     solve_time_per_step_fft = get_fastest_repeat_per_step(fft_results, "solve_time_per_step")
 
-    stress_difference = np.abs(fft_result.macroscopic_stress - standard_result.macroscopic_stress).max()
-    stress_scale = max(np.abs(standard_result.macroscopic_stress).max(), np.finfo(float).tiny)
+    completed_steps = get_completed_step_count(standard_results)
+    completed_steps_fft = get_completed_step_count(fft_results)
+    # Compare only where both solvers actually produced a solution.
+    comparable_steps = min(completed_steps, completed_steps_fft)
+    stress_difference = np.abs(fft_result.macroscopic_stress[:comparable_steps]
+                               - standard_result.macroscopic_stress[:comparable_steps]).max()
+    stress_scale = max(np.abs(standard_result.macroscopic_stress[:comparable_steps]).max(), np.finfo(float).tiny)
     print(f"relaxation_factor = {relaxation_factor}")
     print(f"solve times are the minimum per load step over {timing_repeat_count} interleaved runs of each solver")
-    print(get_solver_label("standard", standard_result.iterations_per_step, solve_time_per_step))
-    print(get_solver_label("FFT-preconditioned", fft_result.iterations_per_step, solve_time_per_step_fft))
-    print(f"stress agreement between solvers: {stress_difference / stress_scale:.2e} relative.")
+    print(get_solver_label("standard", standard_result.iterations_per_step, solve_time_per_step, completed_steps))
+    print(get_solver_label("FFT-preconditioned", fft_result.iterations_per_step, solve_time_per_step_fft,
+                           completed_steps_fft))
+    print(f"stress agreement between solvers: {stress_difference / stress_scale:.2e} relative"
+          + (f", over the {comparable_steps} of {strain_increment_count} steps both solvers completed."
+             if comparable_steps < strain_increment_count else "."))
+    if comparable_steps < strain_increment_count:
+        print("a solver did not complete the load path, so the solve times above are not a like-for-like "
+              "comparison and no speedup should be read from them.")
 
     plots.plot_load_path_summary(get_deviatoric_stress(standard_result.macroscopic_stress) / 1e6,
-                                 standard_result.iterations_per_step, solve_time_per_step,
-                                 fft_result.iterations_per_step, solve_time_per_step_fft,
+                                 standard_result.iterations_per_step, solve_time_per_step, completed_steps,
+                                 fft_result.iterations_per_step, solve_time_per_step_fft, completed_steps_fft,
                                  plots.get_applied_strain_description(max_macro_strain, strain_increment_count),
                                  output_folder / "load_path_summary.png")
 
@@ -788,7 +827,9 @@ def main():
         von_mises_plot_max_stress / 1e6, output_folder / "von_mises_cross_section.png")
 
     if post_process_element_stress:
-        element_stress = get_element_stress(mesh, B, L_per_element, standard_result.applied_macro_strain[-1],
+        # The last step the standard solver actually solved, which is not the last requested one if it stopped early.
+        element_stress = get_element_stress(mesh, B, L_per_element,
+                                            standard_result.applied_macro_strain[completed_steps - 1],
                                             standard_result.final_plastic_strain)
         bottom_layer_von_mises_stress_MPa = get_von_mises_stress(element_stress[:element_number_per_side**2]) / 1e6
         plots.plot_von_mises_cross_section(

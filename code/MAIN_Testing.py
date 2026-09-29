@@ -95,8 +95,10 @@ else:
 if reference_solver_method not in ("fixed_point", "newton"):
     raise ValueError(f"reference_solver_method must be \"fixed_point\" or \"newton\". Got {reference_solver_method!r}.")
 
-cache_folder = pathlib.Path(__file__).parent / "cache"
-output_folder = pathlib.Path(__file__).parent / "output"
+# Separate from MAIN.py's cache and output. The cache is keyed on mesh and geometry parameters, so sharing one
+# directory between two entry points at different configurations forces a full offline recompute on every switch.
+cache_folder = pathlib.Path(__file__).parent / "cache_testing"
+output_folder = pathlib.Path(__file__).parent / "output_testing"
 
 ## ------- Mesh, Geometry and Materials ------- ##
 
