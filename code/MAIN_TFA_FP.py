@@ -4,11 +4,10 @@ import sys
 import time
 from typing import NamedTuple
 import numpy as np
-import scipy.linalg
 import scipy.sparse
 import scipy.sparse.linalg
 import tqdm
-import plots_testing as plots
+import plots
 
 ## ------- Inputs ------- ##
 
@@ -30,10 +29,10 @@ matrix_yield_stress         = 1.0e6
 inclusion_hardening_modulus = 0.0
 matrix_hardening_modulus    = 10e6
 
-max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
+# max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
 # Alternative load paths:
 # max_macro_strain            = np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])
-# max_macro_strain            = np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])
+max_macro_strain            = np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])
 
 strain_increment_count      = 60
 
@@ -43,26 +42,11 @@ divergence_residual_limit   = 1.0
 residual_strain_scale_floor = 1e-4
 relaxation_factor           = 1.0
 solver_agreement_tolerance  = 1e-4
-reference_solver_method     = "newton"
-reference_relaxation_factor = None
-reference_stability_safety  = 0.9
-reference_max_iterations    = 20000
-reference_newton_max_steps  = 50
-reference_divergence_limit  = 1e3
-reference_krylov_tolerance  = 1e-3
-reference_krylov_restart    = 30
 
 timing_repeat_count         = 5
 post_process_element_stress = True
 von_mises_plot_min_stress   = 1.0e6
 von_mises_plot_max_stress   = 3.0e6
-
-verification_enabled        = True
-verification_tolerance      = 1e-9
-jacobian_check_tolerance    = 1e-6
-verification_max_partitions = 256
-matched_stiffness_control   = False
-matched_stiffness_tolerance = 1e-5
 
 ## ------- Calculated Values and Checks ------- ##
 
@@ -106,8 +90,8 @@ elif inclusion_shape == "circle":
 else:
     raise ValueError(f"inclusion_shape must be \"square\" or \"circle\". Got {inclusion_shape!r}.")
 
-cache_folder = pathlib.Path(__file__).parent / "cache_testing"
-output_folder = pathlib.Path(__file__).parent / "output_testing"
+cache_folder = pathlib.Path(__file__).parent / "cache"
+output_folder = pathlib.Path(__file__).parent / "output"
 
 ## ------- Mesh, Geometry and Materials ------- ##
 
@@ -334,9 +318,10 @@ def get_P0_offset_blocks(B, reference_L_per_element, mesh, A):
     return solve_influence_function(K, F_eigenstrain_in_first_partition, A)
 
 def get_P0_transformed(P0_offset_blocks):
-    # P̂0(ξ) in ER-14a, transformed over the two in-plane lattice directions.
+    # P̂0(ξ) in ER-14a, transformed over the two in-plane lattice directions. The kernel is real, so P̂0(-ξ) is the
+    # complex conjugate of P̂0(ξ), and only the non-redundant half of the frequencies is kept (rfftn).
     P0_offset_lattice = P0_offset_blocks.reshape(partition_number_per_side, partition_number_per_side, 6, 6)
-    return np.fft.fftn(P0_offset_lattice, axes=(0, 1))
+    return np.fft.rfftn(P0_offset_lattice, axes=(0, 1))
 
 ## ------- Cache ------- ##
 
@@ -401,7 +386,9 @@ def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_p
     else:
         P0_offset_blocks = cached_P0["P0_offset_blocks"]
 
-    return E, P, get_P0_transformed(P0_offset_blocks)
+    # Column-major, so the columns of a run of consecutive partitions are contiguous and the induced strain can
+    # read just the yielding partitions' columns without copying them (get_induced_strain_increment).
+    return E, np.asfortranarray(P), get_P0_transformed(P0_offset_blocks)
 
 ## ------- Online Timing ------- ##
 
@@ -416,14 +403,6 @@ class OnlineTimer:
     def reset(self):
         self.time_per_group = [0.0] * len(online_time_groups)
         self.calls_per_group = [0] * len(online_time_groups)
-        # Operator applications made inside another group, which only the Newton solver's Krylov solve does. They
-        # are counted and timed separately so the cost breakdown can show all operator work as one segment.
-        self.nested_operator_applications = 0
-        self.nested_operator_time_per_group = [0.0] * len(online_time_groups)
-
-    def record_nested_operator_application(self, elapsed_time):
-        self.nested_operator_applications += 1
-        self.nested_operator_time_per_group[online_time_groups.index(self.open_group)] += elapsed_time
 
 online_timer = OnlineTimer()
 
@@ -589,10 +568,28 @@ def check_flow_stress_is_positive(partition_materials, plastic_state):
 def get_induced_strain(P, eigenstrain):
     return (P @ eigenstrain.reshape(-1)).reshape(partition_count, 6)
 
+def get_partition_runs(partitions):
+    # (first, stop) of every run of consecutive partitions in the mask, in partition order.
+    edges = np.diff(np.concatenate(([0], partitions.astype(int), [0])))
+    return zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1))
+
+@timed_online("induced_strain")
+def get_induced_strain_increment(P, eigenstrain_increment, changed_partitions):
+    # PΔμ from only the columns of P that belong to changed partitions. P is column-major, so each run of
+    # consecutive changed partitions is one contiguous block of columns, used without a copy.
+    increment = np.zeros(6 * partition_count)
+    for first, stop in get_partition_runs(changed_partitions):
+        increment += P[:, 6 * first:6 * stop] @ eigenstrain_increment[first:stop].reshape(-1)
+    return increment.reshape(partition_count, 6)
+
 def get_induced_strain_reusing_history(P, plastic_state, plastic_history, induced_strain_history):
-    if np.array_equal(plastic_state.plastic_strain, plastic_history.plastic_strain):
+    # Pμ = Pμₙ + PΔμ, where Δμ is zero outside the partitions yielding in this step, so only their columns of P
+    # are needed. The mask is taken from Δμ itself, so every skipped column multiplies an exact zero.
+    eigenstrain_increment = plastic_state.plastic_strain - plastic_history.plastic_strain
+    changed_partitions = np.any(eigenstrain_increment != 0, axis=1)
+    if not np.any(changed_partitions):
         return induced_strain_history
-    return get_induced_strain(P, plastic_state.plastic_strain)
+    return induced_strain_history + get_induced_strain_increment(P, eigenstrain_increment, changed_partitions)
 
 # Weights that turn the engineering shear convention of ER-2 into the tensor norm ε:ε, since γ = 2ε for shear.
 tensor_norm_weights = np.array([1, 1, 1, 0.5, 0.5, 0.5])
@@ -687,10 +684,11 @@ def get_reference_fourier_inverse(P0_transformed, reference_sensitivity):
 def apply_on_partition_lattice(fourier_blocks, partition_field):
     # Applies a translation-invariant operator, given by its 6 × 6 block at every lattice frequency, to a
     # partition-stacked field: transform the field, multiply frequency by frequency, transform back (ER-14a).
-    lattice_shape = (partition_number_per_side, partition_number_per_side, 6)
-    field_transformed = np.fft.fftn(partition_field.reshape(lattice_shape), axes=(0, 1))
+    # The field and the operator are real, so only the non-redundant half of the frequencies is used.
+    lattice_shape = (partition_number_per_side, partition_number_per_side)
+    field_transformed = np.fft.rfftn(partition_field.reshape(*lattice_shape, 6), axes=(0, 1))
     result_transformed = np.einsum('...ij,...j->...i', fourier_blocks, field_transformed)
-    return np.fft.ifftn(result_transformed, axes=(0, 1)).real.reshape(partition_count, 6)
+    return np.fft.irfftn(result_transformed, s=lattice_shape, axes=(0, 1)).reshape(partition_count, 6)
 
 @timed_online("correction_solve")
 def get_fft_correction(reference_fourier_inverse, residual):
@@ -724,145 +722,20 @@ def fft_preconditioned_richardson_iteration(E, P, macro_strain, partition_materi
 
     return stress, plastic_state, np.array(residual_history)
 
-## ------- Reference Lippmann-Schwinger Solver ------- ##
-
-# The reduced model of notes/Partition_Lippmann_Schwinger_New_9_28_2026: a partitionwise-constant polarization
-# interacting through the homogeneous reference medium, so the whole nonlocal operator is the P0 convolution. It is
-# a different model from actual E/P, so it matches the two solvers above only under matched phase stiffness.
-
-@timed_online("induced_strain")
-def get_reference_induced_strain(P0_transformed, partition_field):
-    # P0 applied as a convolution over the partition lattice (LS-17), the reference counterpart of
-    # get_induced_strain.
-    return apply_on_partition_lattice(P0_transformed, partition_field)
-
-def get_reference_state(strain, b, P0_transformed, reference_compliance, partition_materials, plastic_history):
-    # The LS-18 residual r = ε - b - P0 μ*, where μ* = ε - C0⁻¹ σ is the equivalent eigenstrain of LS-6.
-    plastic_state, stress = get_plastic_eigenstrain(strain, partition_materials, plastic_history)
-    equivalent_eigenstrain = strain - stress @ reference_compliance.T
-    residual = strain - b - get_reference_induced_strain(P0_transformed, equivalent_eigenstrain)
-    return plastic_state, stress, residual
-
-def get_reference_stiffness_ratio_bounds(partition_materials, reference_L):
-    # eig(P0) in [0, 1] makes the Jacobian I - P0(I - C0^-1 L_t) similar to a symmetric matrix with spectrum
-    # inside [lambda_min, lambda_max] of C0^-1 L. The elastic L is used because the plastic tangent is softer.
-    stiffness_ratio = np.linalg.eigvals(np.linalg.inv(reference_L) @ partition_materials.L).real
-    return np.min(stiffness_ratio), np.max(stiffness_ratio)
-
-def get_reference_stability_limit(partition_materials, reference_L):
-    return 2 / get_reference_stiffness_ratio_bounds(partition_materials, reference_L)[1]
-
-def get_reference_relaxation_factor(partition_materials, reference_L):
-    if reference_relaxation_factor is not None:
-        return reference_relaxation_factor
-    smallest_ratio, largest_ratio = get_reference_stiffness_ratio_bounds(partition_materials, reference_L)
-    return reference_stability_safety * 2 / (smallest_ratio + largest_ratio)
-
-@timed_online("reference_sensitivity")
-def get_reference_jacobian_blocks(strain, partition_materials, plastic_history, reference_compliance):
-    # The block-diagonal factor I - C0⁻¹ L_t of the LS-20 Jacobian J v = v - P0 [(I - C0⁻¹ L_t) v], with the
-    # algorithmic stress tangent L_t = L (I - H_μ).
-    sensitivity = get_eigenstrain_sensitivity(strain, partition_materials, plastic_history)
-    algorithmic_stiffness = partition_materials.L @ (np.eye(6) - sensitivity)
-    return np.eye(6) - reference_compliance @ algorithmic_stiffness
-
-@timed_online("correction_solve")
-def get_newton_correction(P0_transformed, jacobian_blocks, residual):
-    # Timed as one correction solve covering the whole Krylov solve, so this group means the same thing as for the
-    # Richardson solvers: the cost of producing the correction. Its P0 applications are recorded as nested.
-    def apply_jacobian(flat_vector):
-        vector = flat_vector.reshape(partition_count, 6)
-        start_time = time.perf_counter()
-        coupled_strain = apply_on_partition_lattice(P0_transformed, np.einsum('pij,pj->pi', jacobian_blocks, vector))
-        online_timer.record_nested_operator_application(time.perf_counter() - start_time)
-        return (vector - coupled_strain).reshape(-1)
-
-    system_size = 6 * partition_count
-    jacobian = scipy.sparse.linalg.LinearOperator((system_size, system_size), matvec=apply_jacobian)
-    correction, info = scipy.sparse.linalg.gmres(jacobian, -residual.reshape(-1),
-                                                 rtol=reference_krylov_tolerance, restart=reference_krylov_restart)
-    if info != 0:
-        raise SolverDidNotConverge(f"GMRES did not converge inside the reference Newton step (info {info}). Loosen "
-                                   "reference_krylov_tolerance, raise reference_krylov_restart, or use "
-                                   "reference_solver_method = \"fixed_point\"")
-    return correction.reshape(partition_count, 6)
-
-def reference_iteration(macro_strain, initial_strain, partition_materials, plastic_history, P0_transformed,
-                        reference_compliance, relaxation, method):
-    using_newton = method == "newton"
-    # A Newton step costs a whole Krylov solve, so it gets a far smaller cap than the fixed point: without one, a
-    # stagnating solve would grind through hundreds of thousands of convolutions instead of failing.
-    max_iterations = reference_newton_max_steps if using_newton else reference_max_iterations
-    b = np.tile(macro_strain, (partition_count, 1))
-    strain = initial_strain
-
-    residual_history = []
-    while True:
-        plastic_state, stress, residual = get_reference_state(strain, b, P0_transformed, reference_compliance,
-                                                              partition_materials, plastic_history)
-        residual_history.append(get_relative_residual(residual, macro_strain))
-
-        if has_converged(residual_history[-1], len(residual_history), f"reference_{method}",
-                         reference_divergence_limit, max_iterations):
-            break
-
-        if using_newton:
-            jacobian_blocks = get_reference_jacobian_blocks(strain, partition_materials, plastic_history,
-                                                            reference_compliance)
-            strain = strain + get_newton_correction(P0_transformed, jacobian_blocks, residual)
-        else:
-            # LS-19, damped.
-            strain = strain + relaxation * get_standard_correction(residual)
-
-    return stress, plastic_state, np.array(residual_history), strain
-
-class ReferenceSolver:
-    # The reference solver as a load-path solver. Each step starts from the previous step's converged strain
-    # shifted by the macrostrain increment, so the solver keeps that strain between steps; get_solvers builds a
-    # fresh one for every load path.
-    def __init__(self, P0_transformed, reference_compliance, relaxation, method):
-        self.P0_transformed = P0_transformed
-        self.reference_compliance = reference_compliance
-        self.relaxation = relaxation
-        self.method = method
-        self.previous_strain = np.zeros((partition_count, 6))
-        self.previous_macro_strain = np.zeros(6)
-
-    def __call__(self, E, P, macro_strain, partition_materials, plastic_history):
-        # E and P describe the actual heterogeneous model, which the reference model replaces, so they go unused.
-        initial_strain = self.previous_strain + (macro_strain - self.previous_macro_strain)
-        stress, plastic_state, residual_history, strain = reference_iteration(
-            macro_strain, initial_strain, partition_materials, plastic_history, self.P0_transformed,
-            self.reference_compliance, self.relaxation, self.method)
-        self.previous_strain, self.previous_macro_strain = strain, macro_strain
-        return stress, plastic_state, residual_history
-
 ## ------- Load Path ------- ##
 
-actual_model_solver_names = ("Standard", "FFT-preconditioned")
-reference_solver_name = f"Reference LS ({reference_solver_method})"
-
-def get_solvers(P0_transformed, reference_compliance, reference_relaxation):
+def get_solvers(P0_transformed):
     return {"Standard": standard_richardson_iteration,
             "FFT-preconditioned": functools.partial(fft_preconditioned_richardson_iteration,
-                                                    P0_transformed=P0_transformed),
-            reference_solver_name: ReferenceSolver(P0_transformed, reference_compliance, reference_relaxation,
-                                                   reference_solver_method)}
+                                                    P0_transformed=P0_transformed)}
 
 class LoadPathResult(NamedTuple):
     applied_macro_strain: np.ndarray
     macroscopic_stress: np.ndarray
     iterations_per_step: np.ndarray
-    # Applications of the nonlocal operator (dense P or the P0 convolution): the one work measure that means the
-    # same for every solver, since a Newton step contains a whole Krylov solve of them.
-    operator_applications_per_step: np.ndarray
-    # Taken from the material state rather than the iteration count, which only marks elastic steps for the two
-    # solvers that update non-yielding partitions in closed form.
-    yielding_per_step: np.ndarray
     solve_time_per_step: np.ndarray
     group_time_per_step: np.ndarray
     group_calls_per_step: np.ndarray
-    nested_operator_time_per_group_per_step: np.ndarray
     final_stress: np.ndarray
     final_plastic_strain: np.ndarray
     # Steps actually solved. Entries past this are untouched zeros, so totals stay honest but anything plotted
@@ -881,12 +754,9 @@ def run_strain_path(solver_name, solver, E, P, partition_materials):
     applied_macro_strain = np.outer(load_fractions, max_macro_strain)
     macroscopic_stress = np.zeros((strain_increment_count, 6))
     iterations_per_step = np.zeros(strain_increment_count, dtype=int)
-    operator_applications_per_step = np.zeros(strain_increment_count, dtype=int)
-    yielding_per_step = np.zeros(strain_increment_count, dtype=bool)
     solve_time_per_step = np.zeros(strain_increment_count)
     group_time_per_step = np.zeros((strain_increment_count, len(online_time_groups)))
     group_calls_per_step = np.zeros((strain_increment_count, len(online_time_groups)), dtype=int)
-    nested_operator_time_per_group_per_step = np.zeros((strain_increment_count, len(online_time_groups)))
     completed_step_count = strain_increment_count
     failure_reason = ""
 
@@ -909,18 +779,12 @@ def run_strain_path(solver_name, solver, E, P, partition_materials):
         group_time_per_step[step] = online_timer.time_per_group
         group_calls_per_step[step] = online_timer.calls_per_group
         iterations_per_step[step] = len(residual_history)
-        operator_applications_per_step[step] = (online_timer.calls_per_group[online_time_groups.index("induced_strain")]
-                                                + online_timer.nested_operator_applications)
-        nested_operator_time_per_group_per_step[step] = online_timer.nested_operator_time_per_group
-        yielding_per_step[step] = np.any(step_plastic_state.accumulated_plastic_strain
-                                         > plastic_history.accumulated_plastic_strain)
         macroscopic_stress[step] = get_macroscopic_stress(step_stress)
         stress, plastic_history = step_stress, step_plastic_state
 
-    return LoadPathResult(applied_macro_strain, macroscopic_stress, iterations_per_step,
-                          operator_applications_per_step, yielding_per_step, solve_time_per_step,
-                          group_time_per_step, group_calls_per_step, nested_operator_time_per_group_per_step,
-                          stress, plastic_history.plastic_strain, completed_step_count, failure_reason)
+    return LoadPathResult(applied_macro_strain, macroscopic_stress, iterations_per_step, solve_time_per_step,
+                          group_time_per_step, group_calls_per_step, stress, plastic_history.plastic_strain,
+                          completed_step_count, failure_reason)
 
 def run_interleaved_repeats(get_solvers_for_one_path, E, P, partition_materials):
     # Every solver runs once per repeat, and the one that runs first rotates between repeats. Taking the fastest
@@ -972,141 +836,6 @@ def get_element_stress(mesh, B, L_per_element, macro_strain, eigenstrain):
     print(f"element stress post-processing: {time.perf_counter() - start_time:.2f} seconds.")
     return element_stress
 
-## ------- Verification ------- ##
-
-def get_dense_P0(P0_offset_blocks):
-    # Expands the offset kernel into the full P0 by P0^BA = p0[a_B - a_A]. get_grid_id puts i fastest, so the
-    # C-order reshape indexes the lattice as [j, i] -- the same convention get_P0_transformed relies on.
-    # offsets[receiver, source] is the periodic separation along one axis; blocks is then indexed
-    # [j_receiver, i_receiver, j_source, i_source] and the transpose interleaves the 6-vector axes to give
-    # dense[6 * receiver + component, 6 * source + component].
-    offset_lattice = P0_offset_blocks.reshape(partition_number_per_side, partition_number_per_side, 6, 6)
-    lattice_indices = np.arange(partition_number_per_side)
-    offsets = (lattice_indices[:, None] - lattice_indices[None, :]) % partition_number_per_side
-    blocks = offset_lattice[offsets[:, None, :, None], offsets[None, :, None, :]]
-    return blocks.transpose(0, 1, 4, 2, 3, 5).reshape(6 * partition_count, 6 * partition_count)
-
-def get_P0_offset_blocks_from_transformed(P0_transformed):
-    return np.fft.ifftn(P0_transformed, axes=(0, 1)).real.reshape(6 * partition_count, 6)
-
-def get_reference_kernel_checks(P0_transformed, reference_L):
-    zero_frequency_error = np.max(np.abs(P0_transformed[0, 0])) / np.max(np.abs(P0_transformed))
-
-    D0_transformed = P0_transformed @ np.linalg.inv(reference_L)
-    hermitian_difference = D0_transformed - np.conj(np.swapaxes(D0_transformed, -1, -2))
-    hermitian_error = np.max(np.abs(hermitian_difference)) / np.max(np.abs(D0_transformed))
-
-    eigenvalues = np.linalg.eigvals(P0_transformed)
-    return [("zero-frequency block vanishes", zero_frequency_error, verification_tolerance),
-            ("P0(xi) C0^-1 is Hermitian", hermitian_error, verification_tolerance),
-            ("P0(xi) eigenvalues are real", np.max(np.abs(eigenvalues.imag)), verification_tolerance),
-            ("P0(xi) eigenvalues lie in [0, 1]",
-             max(-np.min(eigenvalues.real), np.max(eigenvalues.real) - 1, 0.0), verification_tolerance)]
-
-def get_dense_reference_checks(problem, dense_P0):
-    print(f"  dense reference influence functions ({6 + 6 * partition_count} load columns):")
-    reference_L_per_element = np.tile(problem.reference_L, (element_count, 1, 1))
-    A = get_partition_averaging_operator(problem.B, problem.mesh.element_nodes, problem.mesh.element_partition_ids)
-    E_reference, P_reference = get_influence_functions(problem.B, reference_L_per_element, problem.mesh, A)
-
-    identity_error = np.max(np.abs(E_reference.reshape(partition_count, 6, 6) - np.eye(6)))
-    translation_error = np.max(np.abs(P_reference - dense_P0)) / np.max(np.abs(P_reference))
-
-    partition_field = np.random.default_rng(0).standard_normal((partition_count, 6))
-    dense_induced_strain = (dense_P0 @ partition_field.reshape(-1)).reshape(partition_count, 6)
-    fft_induced_strain = get_reference_induced_strain(problem.P0_transformed, partition_field)
-    convolution_error = (np.max(np.abs(fft_induced_strain - dense_induced_strain))
-                         / np.max(np.abs(dense_induced_strain)))
-
-    return [("reference E blocks equal the identity", identity_error, verification_tolerance),
-            ("dense P0 equals the translated kernel", translation_error, verification_tolerance),
-            ("FFT convolution equals the dense product", convolution_error, verification_tolerance)]
-
-def get_jacobian_checks(partition_materials, P0_transformed, reference_compliance):
-    # Central-difference check of the LS-20 Jacobian-vector product against the residual it differentiates. This is
-    # the only test of the plastic branch of H_mu, so it has to be taken at a partly yielded state, and the active
-    # yield set must not move across the perturbation or the one-sided branch derivative is not the true one.
-    no_plastic_history = PlasticState(np.zeros((partition_count, 6)), np.zeros(partition_count))
-
-    def get_yielding(trial_strain):
-        plastic_state, _ = get_plastic_eigenstrain(trial_strain, partition_materials, no_plastic_history)
-        return plastic_state.accumulated_plastic_strain > 0
-
-    # Probe at the smallest of these load fractions that actually yields something. A fixed fraction is fragile:
-    # at 0.4 of the default path nothing has yielded yet, which silently reduces this to an elastic-only test.
-    load_fraction = next((fraction for fraction in (1.0, 2.0, 4.0, 8.0)
-                          if get_yielding(np.tile(fraction * max_macro_strain, (partition_count, 1))).any()), 1.0)
-    macro_strain = load_fraction * max_macro_strain
-    b = np.tile(macro_strain, (partition_count, 1))
-    strain = b.copy()
-
-    def get_residual(trial_strain):
-        _, _, residual = get_reference_state(trial_strain, b, P0_transformed, reference_compliance,
-                                             partition_materials, no_plastic_history)
-        return residual
-
-    direction = np.random.default_rng(1).standard_normal((partition_count, 6))
-    direction /= np.linalg.norm(direction)
-    step = 1e-6 * np.linalg.norm(strain)
-
-    jacobian_blocks = get_reference_jacobian_blocks(strain, partition_materials, no_plastic_history,
-                                                    reference_compliance)
-    analytic_product = direction - get_reference_induced_strain(
-        P0_transformed, np.einsum('pij,pj->pi', jacobian_blocks, direction))
-    finite_difference = (get_residual(strain + step * direction)
-                         - get_residual(strain - step * direction)) / (2 * step)
-
-    yielding = get_yielding(strain)
-    active_set_moved = not (np.array_equal(get_yielding(strain - step * direction), yielding)
-                            and np.array_equal(get_yielding(strain + step * direction), yielding))
-    print(f"  Jacobian check state: load fraction {load_fraction:g}, {int(yielding.sum())} of {partition_count} "
-          f"partitions yielding")
-    return [("LS-20 Jacobian matches a central difference",
-             np.max(np.abs(analytic_product - finite_difference)) / np.max(np.abs(analytic_product)),
-             jacobian_check_tolerance),
-            ("Jacobian check reaches the plastic branch", 0.0 if yielding.any() else 1.0, 0.5),
-            ("Jacobian check active yield set is fixed", 1.0 if active_set_moved else 0.0, 0.5)]
-
-def get_model_elastic_stiffness(dense_P0, L_per_partition, reference_compliance):
-    # Solves the purely elastic reduced model [I + P0 (C0^-1 L - I)] e = 1 x I_6 directly, so the measured model
-    # error carries no iterative solver tolerance, then homogenizes exactly as get_homogenized_L does.
-    stiffness_ratio = scipy.linalg.block_diag(*(reference_compliance @ L_per_partition))
-    identity = np.eye(6 * partition_count)
-    partition_strain = np.linalg.solve(identity + dense_P0 @ (stiffness_ratio - identity),
-                                       np.tile(np.eye(6), (partition_count, 1)))
-    return np.mean(L_per_partition @ partition_strain.reshape(partition_count, 6, 6), axis=0)
-
-def print_elastic_model_error(dense_P0, problem):
-    exact_stiffness = get_homogenized_L(problem.E, problem.partition_materials.L)
-    model_stiffness = get_model_elastic_stiffness(dense_P0, problem.partition_materials.L,
-                                                  problem.reference_compliance)
-    stiffness_error = np.max(np.abs(model_stiffness - exact_stiffness)) / np.max(np.abs(exact_stiffness))
-    print("  elastic model error (constant-polarization approximation, no solver tolerance involved):")
-    print(f"    homogenized stiffness    : {stiffness_error:.3e} relative, worst component")
-    print(f"    C_1111 exact vs model MPa: {exact_stiffness[0, 0] / 1e6:.3f} vs {model_stiffness[0, 0] / 1e6:.3f}")
-
-def run_verification(problem):
-    print("verification:")
-    checks = get_reference_kernel_checks(problem.P0_transformed, problem.reference_L)
-    checks += get_jacobian_checks(problem.partition_materials, problem.P0_transformed, problem.reference_compliance)
-    dense_P0 = None
-    if partition_count <= verification_max_partitions:
-        dense_P0 = get_dense_P0(get_P0_offset_blocks_from_transformed(problem.P0_transformed))
-        checks += get_dense_reference_checks(problem, dense_P0)
-    else:
-        print(f"  dense checks skipped: {partition_count} partitions exceeds verification_max_partitions "
-              f"({verification_max_partitions}). Lower partition_number_per_side to run them.")
-
-    for description, error, tolerance in checks:
-        print(f"  [{'PASS' if error <= tolerance else 'FAIL'}] {description:<43}: {error:.2e} "
-              f"(tolerance {tolerance:.0e})")
-    failed_checks = [description for description, error, tolerance in checks if not error <= tolerance]
-    if failed_checks:
-        raise RuntimeError(f"verification failed: {'; '.join(failed_checks)}.")
-
-    if dense_P0 is not None:
-        print_elastic_model_error(dense_P0, problem)
-
 ## ------- Timing Report ------- ##
 
 def get_completed_step_count(solver_results):
@@ -1127,98 +856,27 @@ def get_solver_label(solver_name, solver_results, step_count):
         label += f"  [stopped at step {last_result.completed_step_count + 1}: {last_result.failure_reason}]"
     return label
 
-def get_total_time_per_group(solver_results, step_count):
-    # Totals rather than per-iteration figures, because an iteration is not a comparable unit across the solvers.
-    # All operator applications are shown as one segment, wherever they ran: for Newton most of them happen inside
-    # the Krylov solve, which would otherwise hide them. The other groups are shown net of the operator time nested
-    # inside them.
+def get_time_per_iteration_per_group(solver_results, step_count):
     solve_time = get_fastest_repeat_per_step(solver_results, "solve_time_per_step")[:step_count].sum()
     time_per_group = get_fastest_repeat_per_step(solver_results, "group_time_per_step")[:step_count].sum(axis=0)
-    nested_operator_time_per_group = get_fastest_repeat_per_step(
-        solver_results, "nested_operator_time_per_group_per_step")[:step_count].sum(axis=0)
-    material_update, induced_strain, sensitivity, reference_inverse, correction_solve = (
-        time_per_group - nested_operator_time_per_group)
-    operator_time = induced_strain + nested_operator_time_per_group.sum()
-    segments = [material_update, operator_time, sensitivity, reference_inverse, correction_solve]
-    return np.append(segments, solve_time - sum(segments))
-
-def get_iteration_count(solver_results, step_count):
-    return get_fastest_repeat_per_step(solver_results, "iterations_per_step")[:step_count].sum()
-
-def get_operator_application_count(solver_results, step_count):
-    return get_fastest_repeat_per_step(solver_results, "operator_applications_per_step")[:step_count].sum()
+    iteration_count = get_fastest_repeat_per_step(solver_results, "iterations_per_step")[:step_count].sum()
+    return np.append(time_per_group, solve_time - time_per_group.sum()) / iteration_count
 
 def get_timer_overhead_fraction(solver_results, timer_overhead_per_call, step_count):
     solve_time = get_fastest_repeat_per_step(solver_results, "solve_time_per_step")[:step_count].sum()
     timed_call_count = get_fastest_repeat_per_step(solver_results, "group_calls_per_step")[:step_count].sum()
     return timer_overhead_per_call * timed_call_count / solve_time
 
-## ------- Problem Setup ------- ##
-
-class Problem(NamedTuple):
-    partition_material_ids: np.ndarray
-    L_matrix: np.ndarray
-    L_inclusion: np.ndarray
-    partition_materials: PartitionMaterials
-    mesh: Mesh
-    B: np.ndarray
-    L_per_element: np.ndarray
-    E: np.ndarray
-    P: np.ndarray
-    P0_transformed: np.ndarray
-    reference_L: np.ndarray
-    reference_compliance: np.ndarray
-
-def get_problem():
-    # Everything main and the experiment scripts need, built from the inputs, with the offline operators taken
-    # from the cache when it matches.
-    partition_material_ids = get_partition_material_ids()
-    L_matrix = get_L(elastic_modulus_matrix, poisson_ratio_matrix)
-    L_inclusion = get_L(elastic_modulus_inclusion, poisson_ratio_inclusion)
-    if matched_stiffness_control:
-        L_inclusion = L_matrix
-        print("matched-stiffness control: the inclusion elastic stiffness is overridden to the matrix value, which "
-              "makes the actual E/P and reference models the same equation. Yield properties still differ.")
-    partition_materials = get_partition_materials(L_matrix, L_inclusion, partition_material_ids)
-    mesh = get_periodic_mesh(partition_material_ids)
-    B = get_B()
-    L_per_element = get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids)
-    E, P, P0_transformed = get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, partition_materials.L)
-    reference_L = get_homogenized_L(E, partition_materials.L)
-    return Problem(partition_material_ids, L_matrix, L_inclusion, partition_materials, mesh, B, L_per_element, E, P,
-                   P0_transformed, reference_L, np.linalg.inv(reference_L))
-
 ## ------- Main ------- ##
 
-def print_reference_solver_settings(problem, reference_relaxation):
-    if reference_solver_method == "newton":
-        print(f"reference solver: newton, GMRES rtol {reference_krylov_tolerance:.0e}, "
-              f"restart {reference_krylov_restart}")
-    else:
-        stability_limit = get_reference_stability_limit(problem.partition_materials, problem.reference_L)
-        print(f"reference solver: fixed_point, relaxation {reference_relaxation:.4g}, stability limit "
-              f"{stability_limit:.4g}")
-
-def get_model_difference_per_step(results, actual_solver_name, step_count):
-    # The reference model's macroscopic stress against the actual E/P model's, per step, relative to the largest
-    # actual-model stress. This is modelling error, not solver error.
-    actual_stress = results[actual_solver_name][-1].macroscopic_stress[:step_count]
-    reference_stress = results[reference_solver_name][-1].macroscopic_stress[:step_count]
-    stress_scale = max(np.abs(actual_stress).max(), np.finfo(float).tiny)
-    return np.abs(reference_stress - actual_stress).max(axis=1) / stress_scale
-
-def print_comparison(results, comparable_step_count, actual_solver_name):
-    print(f"relaxation_factor = {relaxation_factor}, reference method = {reference_solver_method}")
+def print_comparison(results, comparable_step_count):
+    print(f"relaxation_factor = {relaxation_factor}")
     compared_steps = (f"the {comparable_step_count} of {strain_increment_count} steps every solver completed"
                       if comparable_step_count < strain_increment_count else f"all {strain_increment_count} steps")
     print(f"solve times are the minimum per load step over {timing_repeat_count} interleaved runs of each solver, "
           f"summed over {compared_steps}")
     for solver_name, solver_results in results.items():
         print(get_solver_label(solver_name, solver_results, comparable_step_count))
-
-    model_difference = get_model_difference_per_step(results, actual_solver_name, comparable_step_count).max()
-    print(f"model discrepancy, different models ({actual_solver_name} actual E/P vs reference): "
-          f"{model_difference:.2e} relative. This is a modelling difference, not a solver error.")
 
     timer_overhead_per_call = get_online_timer_overhead_per_call()
     overhead_labels = []
@@ -1231,56 +889,33 @@ def get_most_complete_solver_name(results):
     # The solver that got furthest along the load path, whose stresses are plotted. The first listed wins a tie.
     return max(results, key=lambda solver_name: get_completed_step_count(results[solver_name]))
 
-def get_elastic_steps(result):
-    # Steps where no partition yielded. Steps past a stopped solver's last are not elastic, only unsolved.
-    elastic_steps = ~result.yielding_per_step
-    elastic_steps[result.completed_step_count:] = False
-    return elastic_steps
+def get_solver_steps(solver_results):
+    return plots.SolverSteps(iterations_per_step=solver_results[-1].iterations_per_step,
+                             solve_time_per_step=get_fastest_repeat_per_step(solver_results, "solve_time_per_step"),
+                             completed_step_count=get_completed_step_count(solver_results))
 
-def save_load_path_plots(results, comparable_step_count, actual_solver_name):
-    actual_result = results[actual_solver_name][-1]
-    solver_series = [plots.SolverSeries(solver_name, color, solver_results[-1].iterations_per_step,
-                                        get_fastest_repeat_per_step(solver_results, "solve_time_per_step"),
-                                        get_completed_step_count(solver_results))
-                     for (solver_name, solver_results), color in zip(results.items(), plots.solver_colors)]
+def save_load_path_plots(results, comparable_step_count, plotted_solver_name):
     plots.plot_load_path_summary(
-        get_deviatoric_stress(actual_result.macroscopic_stress) / 1e6, actual_result.completed_step_count,
-        solver_series, get_elastic_steps(actual_result),
-        100 * get_model_difference_per_step(results, actual_solver_name, comparable_step_count),
-        f"reference LS model vs actual E/P ({actual_solver_name})",
+        get_deviatoric_stress(results[plotted_solver_name][-1].macroscopic_stress) / 1e6, plotted_solver_name,
+        {solver_name: get_solver_steps(solver_results) for solver_name, solver_results in results.items()},
         plots.get_applied_strain_description(max_macro_strain, strain_increment_count),
         output_folder / "load_path_summary.png")
-    plots.plot_cost_breakdown(
-        [plots.SolverCost(solver_name, get_total_time_per_group(solver_results, comparable_step_count),
-                          get_iteration_count(solver_results, comparable_step_count),
-                          get_operator_application_count(solver_results, comparable_step_count))
-         for solver_name, solver_results in results.items()],
-        output_folder / "cost_breakdown.png")
+    plots.plot_time_per_iteration_breakdown(
+        {solver_name: 1000 * get_time_per_iteration_per_group(solver_results, comparable_step_count)
+         for solver_name, solver_results in results.items()},
+        output_folder / "time_per_iteration_breakdown.png")
 
-def save_von_mises_plots(results, actual_solver_name, problem):
-    actual_result = results[actual_solver_name][-1]
-    partition_von_mises_stress_MPa = get_von_mises_stress(actual_result.final_stress) / 1e6
+def save_von_mises_plots(result, mesh, B, L_per_element):
+    partition_von_mises_stress_MPa = get_von_mises_stress(result.final_stress) / 1e6
     plots.plot_von_mises_cross_section(
         partition_von_mises_stress_MPa.reshape(partition_number_per_side, partition_number_per_side),
         element_number_per_side, partition_number_per_side, von_mises_plot_min_stress / 1e6,
         von_mises_plot_max_stress / 1e6, output_folder / "von_mises_cross_section.png")
 
-    # Final stresses are only comparable when both models reached the same final step.
-    reference_result = results[reference_solver_name][-1]
-    if actual_result.completed_step_count == reference_result.completed_step_count == strain_increment_count:
-        reference_von_mises_stress_MPa = get_von_mises_stress(reference_result.final_stress) / 1e6
-        plots.plot_von_mises_difference_cross_section(
-            (reference_von_mises_stress_MPa - partition_von_mises_stress_MPa).reshape(partition_number_per_side,
-                                                                                     partition_number_per_side),
-            element_number_per_side, partition_number_per_side, output_folder / "von_mises_model_difference.png")
-    else:
-        print("von Mises model difference plot skipped: a solver stopped before the last load step.")
-
     if post_process_element_stress:
         # The last step the solver actually solved, which is not the last requested one if it stopped early.
-        final_macro_strain = actual_result.applied_macro_strain[actual_result.completed_step_count - 1]
-        element_stress = get_element_stress(problem.mesh, problem.B, problem.L_per_element, final_macro_strain,
-                                            actual_result.final_plastic_strain)
+        final_macro_strain = result.applied_macro_strain[result.completed_step_count - 1]
+        element_stress = get_element_stress(mesh, B, L_per_element, final_macro_strain, result.final_plastic_strain)
         bottom_layer_von_mises_stress_MPa = get_von_mises_stress(element_stress[:element_number_per_side**2]) / 1e6
         plots.plot_von_mises_cross_section(
             bottom_layer_von_mises_stress_MPa.reshape(element_number_per_side, element_number_per_side),
@@ -1301,43 +936,29 @@ def check_solver_agreement(results, comparable_step_count):
     if not passed:
         raise RuntimeError("the standard and FFT-preconditioned solvers disagree on the macroscopic stress.")
 
-def check_matched_stiffness(results, comparable_step_count):
-    # With matched phase stiffness the reference and actual E/P models are the same equation, so here, and only
-    # here, the reference solver must reproduce actual E/P to solver tolerance.
-    model_difference = get_model_difference_per_step(results, "Standard", comparable_step_count).max()
-    passed = model_difference <= matched_stiffness_tolerance
-    print(f"[{'PASS' if passed else 'FAIL'}] matched-stiffness control: reference vs actual E/P "
-          f"{model_difference:.2e} relative (tolerance {matched_stiffness_tolerance:.0e}).")
-    if not passed:
-        raise RuntimeError("matched-stiffness control failed: the reference model must reproduce actual E/P to "
-                           "solver tolerance.")
-
 def main():
     output_folder.mkdir(exist_ok=True)
-    problem = get_problem()
-    print(f"inclusion volume fraction on the partition grid: {problem.partition_material_ids.mean():.4f}")
-    plots.plot_cross_section(
-        problem.partition_material_ids.reshape(partition_number_per_side, partition_number_per_side),
-        element_number_per_side, output_folder / "cross_section.png")
-    if verification_enabled:
-        run_verification(problem)
+    partition_material_ids = get_partition_material_ids()
+    print(f"inclusion volume fraction on the partition grid: {partition_material_ids.mean():.4f}")
+    plots.plot_cross_section(partition_material_ids.reshape(partition_number_per_side, partition_number_per_side),
+                             element_number_per_side, output_folder / "cross_section.png")
 
-    reference_relaxation = get_reference_relaxation_factor(problem.partition_materials, problem.reference_L)
-    print_reference_solver_settings(problem, reference_relaxation)
-    get_solvers_for_one_path = functools.partial(get_solvers, problem.P0_transformed, problem.reference_compliance,
-                                                 reference_relaxation)
-    results = run_interleaved_repeats(get_solvers_for_one_path, problem.E, problem.P, problem.partition_materials)
-    # Timings and stresses are compared only over the steps every solver completed. Stresses are plotted from the
-    # actual-model solver that got furthest, since the reference solver solves a different model.
+    L_matrix = get_L(elastic_modulus_matrix, poisson_ratio_matrix)
+    L_inclusion = get_L(elastic_modulus_inclusion, poisson_ratio_inclusion)
+    partition_materials = get_partition_materials(L_matrix, L_inclusion, partition_material_ids)
+    mesh = get_periodic_mesh(partition_material_ids)
+    B = get_B()
+    L_per_element = get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids)
+    E, P, P0_transformed = get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, partition_materials.L)
+
+    results = run_interleaved_repeats(functools.partial(get_solvers, P0_transformed), E, P, partition_materials)
+    # Timings and stresses are compared only over the steps every solver completed.
     comparable_step_count = min(get_completed_step_count(solver_results) for solver_results in results.values())
-    actual_solver_name = get_most_complete_solver_name({solver_name: results[solver_name]
-                                                        for solver_name in actual_model_solver_names})
-    print_comparison(results, comparable_step_count, actual_solver_name)
-    save_load_path_plots(results, comparable_step_count, actual_solver_name)
-    save_von_mises_plots(results, actual_solver_name, problem)
+    print_comparison(results, comparable_step_count)
+    plotted_solver_name = get_most_complete_solver_name(results)
+    save_load_path_plots(results, comparable_step_count, plotted_solver_name)
+    save_von_mises_plots(results[plotted_solver_name][-1], mesh, B, L_per_element)
     check_solver_agreement(results, comparable_step_count)
-    if matched_stiffness_control:
-        check_matched_stiffness(results, comparable_step_count)
 
 if __name__ == "__main__":
     main()
