@@ -42,14 +42,15 @@ def get_relative_residual(residual, macro_strain):
     strain_scale = max(get_strain_norm(macro_strain), config.residual_strain_scale_floor)
     return get_strain_norm(residual) / strain_scale
 
-def has_converged(relative_residual, iteration_count, solver_name, divergence_limit=config.divergence_residual_limit,
-                  max_iterations=config.fixed_point_max_iterations):
+def has_converged(relative_residual, iteration_count, divergence_limit=config.tfa_divergence_limit,
+                  max_iterations=config.tfa_max_iterations):
+    # The failure messages name no solver: run_strain_path prefixes the solver's name when it reports them.
     if not np.isfinite(relative_residual) or relative_residual > divergence_limit:
-        raise SolverDidNotConverge(f"{solver_name} diverged after {iteration_count} iterations "
-                                   f"(relative residual {relative_residual})")
-    if relative_residual < config.fixed_point_tolerance:
+        raise SolverDidNotConverge(f"diverged after {iteration_count} iterations (relative residual "
+                                   f"{relative_residual:.3e})")
+    if relative_residual < config.convergence_tolerance:
         return True
     if iteration_count >= max_iterations:
-        raise SolverDidNotConverge(f"{solver_name} did not converge within {max_iterations} iterations "
-                                   f"(relative residual {relative_residual})")
+        raise SolverDidNotConverge(f"did not converge within {max_iterations} iterations (relative residual "
+                                   f"{relative_residual:.3e})")
     return False

@@ -38,7 +38,7 @@ def main():
 
     ls_relaxation = get_reference_relaxation_factor(problem.partition_materials, problem.reference_L)
     stability_limit = get_reference_stability_limit(problem.partition_materials, problem.reference_L)
-    print(f"TFA fixed point: relaxation {config.relaxation_factor}")
+    print(f"TFA fixed point: relaxation {config.tfa_relaxation_factor}")
     print(f"LS fixed point: relaxation {ls_relaxation:.4g}, stability limit {stability_limit:.4g}")
     results = run_interleaved_repeats(functools.partial(get_solvers, problem, ls_relaxation), problem.E, problem.P,
                                       problem.partition_materials)

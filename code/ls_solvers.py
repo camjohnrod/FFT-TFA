@@ -17,6 +17,8 @@ from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain
 from online_timing import online_timer, timed_online
 from tfa_solvers import get_standard_correction
 
+## ------- LS Model ------- ##
+
 @timed_online("induced_strain")
 def get_reference_induced_strain(P0_transformed, partition_field):
     # P0 applied as a convolution over the partition lattice (LS-17), the reference counterpart of
@@ -32,13 +34,15 @@ def get_reference_state(strain, b, P0_transformed, reference_compliance, partiti
 
 def get_reference_model_residual(E, P, macro_strain, strain, partition_materials, plastic_history, P0_transformed,
                                  reference_compliance):
-    # LS-18 at a converged strain, for the independent check in run_strain_path. The fixed point keeps no
-    # bookkeeping between iterations, so evaluating the residual afresh is the whole check. E and P belong to the
-    # actual model and go unused.
+    # LS-18 at a converged strain, for the independent check in run_strain_path. The LS solvers keep no bookkeeping
+    # between iterations, so evaluating the residual afresh is the whole check. E and P belong to the actual model and
+    # go unused.
     b = np.tile(macro_strain, (config.partition_count, 1))
     _, _, residual = get_reference_state(strain, b, P0_transformed, reference_compliance, partition_materials,
                                          plastic_history)
     return residual
+
+## ------- Fixed Point ------- ##
 
 def get_reference_stiffness_ratio_bounds(partition_materials, reference_L):
     # eig(P0) in [0, 1] makes the Jacobian I - P0(I - C0^-1 L_t) similar to a symmetric matrix with spectrum
@@ -66,8 +70,8 @@ def reference_fixed_point_iteration(macro_strain, initial_strain, partition_mate
                                                               partition_materials, plastic_history)
         residual_history.append(get_relative_residual(residual, macro_strain))
 
-        if has_converged(residual_history[-1], len(residual_history), "reference_fixed_point",
-                         config.ls_divergence_limit, config.ls_max_iterations):
+        if has_converged(residual_history[-1], len(residual_history), config.ls_divergence_limit,
+                         config.ls_max_iterations):
             break
 
         # LS-19, damped.
@@ -75,7 +79,9 @@ def reference_fixed_point_iteration(macro_strain, initial_strain, partition_mate
 
     return StepResult(strain, stress, plastic_state, np.array(residual_history))
 
-@timed_online("reference_sensitivity")
+## ------- Newton ------- ##
+
+@timed_online("sensitivity")
 def get_reference_jacobian_blocks(strain, partition_materials, plastic_history, reference_compliance):
     # The block-diagonal factor I - C0⁻¹ L_t of the LS-20 Jacobian J v = v - P0 [(I - C0⁻¹ L_t) v], with the
     # algorithmic stress tangent L_t = L (I - H_μ).
@@ -84,9 +90,10 @@ def get_reference_jacobian_blocks(strain, partition_materials, plastic_history, 
     return np.eye(6) - reference_compliance @ algorithmic_stiffness
 
 @timed_online("correction_solve")
-def get_newton_correction(P0_transformed, jacobian_blocks, residual):
-    # Timed as one correction solve covering the whole Krylov solve, so this group means the same thing as for the
-    # fixed-point solvers: the cost of producing the correction. Its P0 applications are recorded as nested.
+def get_reference_newton_correction(P0_transformed, jacobian_blocks, residual):
+    # Solves the LS-20 Newton system J δε = -r by unpreconditioned GMRES. Timed as one correction solve covering the
+    # whole Krylov solve, so this group means the same thing as for the fixed-point solvers: the cost of producing
+    # the correction. Its P0 applications are recorded as nested.
     def apply_jacobian(flat_vector):
         vector = flat_vector.reshape(config.partition_count, 6)
         start_time = time.perf_counter()
@@ -99,7 +106,7 @@ def get_newton_correction(P0_transformed, jacobian_blocks, residual):
     correction, info = scipy.sparse.linalg.gmres(jacobian, -residual.reshape(-1), rtol=config.newton_krylov_tolerance,
                                                  restart=config.newton_krylov_restart)
     if info != 0:
-        raise SolverDidNotConverge(f"GMRES did not converge inside the reference Newton step (info {info}). Loosen "
+        raise SolverDidNotConverge(f"GMRES did not converge inside the LS Newton step (info {info}). Loosen "
                                    "newton_krylov_tolerance, raise newton_krylov_restart, or use MAIN_LS_FP.py")
     return correction.reshape(config.partition_count, 6)
 
@@ -116,15 +123,17 @@ def reference_newton_iteration(macro_strain, initial_strain, partition_materials
                                                               partition_materials, plastic_history)
         residual_history.append(get_relative_residual(residual, macro_strain))
 
-        if has_converged(residual_history[-1], len(residual_history), "reference_newton",
-                         config.ls_divergence_limit, config.newton_max_steps):
+        if has_converged(residual_history[-1], len(residual_history), config.ls_divergence_limit,
+                         config.newton_max_steps):
             break
 
         jacobian_blocks = get_reference_jacobian_blocks(strain, partition_materials, plastic_history,
                                                         reference_compliance)
-        strain = strain + get_newton_correction(P0_transformed, jacobian_blocks, residual)
+        strain = strain + get_reference_newton_correction(P0_transformed, jacobian_blocks, residual)
 
     return StepResult(strain, stress, plastic_state, np.array(residual_history))
+
+## ------- Load-Path Solvers ------- ##
 
 class ReferenceSolver:
     # An LS iteration as a load-path solver. Each step starts from the previous step's converged strain shifted by

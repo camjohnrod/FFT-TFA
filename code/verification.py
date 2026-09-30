@@ -1,7 +1,7 @@
-# Tolerance checks run before an LS entry point solves anything: the structure of the reference kernel P0, and,
-# when the grid is small enough for dense matrices, P0 against a direct reference solve and the elastic model error.
-# A Newton entry point adds finite-difference checks of its Jacobians. Every check prints PASS or FAIL, and any
-# failure stops the run.
+# Tolerance checks run before the LS and Newton entry points solve anything: the structure of the reference kernel
+# P0, finite-difference checks of the Newton Jacobians, and, when the grid is small enough for dense matrices, P0
+# against a direct reference solve and the LS elastic model error. Every check prints PASS or FAIL, and any failure
+# stops the run.
 
 import numpy as np
 import scipy.linalg
@@ -100,13 +100,13 @@ def get_ls_jacobian_checks(problem):
     yielding = get_yielding(strain)
     active_set_moved = not (np.array_equal(get_yielding(strain - step * direction), yielding)
                             and np.array_equal(get_yielding(strain + step * direction), yielding))
-    print(f"  Jacobian check state: load fraction {load_fraction:g}, {int(yielding.sum())} of {config.partition_count} "
-          f"partitions yielding")
+    print(f"  LS Jacobian check state: load fraction {load_fraction:g}, {int(yielding.sum())} of "
+          f"{config.partition_count} partitions yielding")
     return [("LS-20 Jacobian matches a central difference",
              np.max(np.abs(analytic_product - finite_difference)) / np.max(np.abs(analytic_product)),
              config.jacobian_check_tolerance),
-            ("Jacobian check reaches the plastic branch", 0.0 if yielding.any() else 1.0, 0.5),
-            ("Jacobian check active yield set is fixed", 1.0 if active_set_moved else 0.0, 0.5)]
+            ("LS Jacobian check reaches the plastic branch", 0.0 if yielding.any() else 1.0, 0.5),
+            ("LS Jacobian check active yield set is fixed", 1.0 if active_set_moved else 0.0, 0.5)]
 
 def get_tfa_jacobian_checks(problem):
     # Central-difference check of the ER-18 Jacobian product J v = v - P (H_μ v), used by the TFA Newton solvers,
@@ -186,7 +186,7 @@ def run_verification(problem, extra_check_functions=(), print_ls_model_error=Fal
               f"({config.verification_max_partitions}). Lower partition_number_per_side to run them.")
 
     for description, error, tolerance in checks:
-        print(f"  [{'PASS' if error <= tolerance else 'FAIL'}] {description:<43}: {error:.2e} "
+        print(f"  [{'PASS' if error <= tolerance else 'FAIL'}] {description:<45}: {error:.2e} "
               f"(tolerance {tolerance:.0e})")
     failed_checks = [description for description, error, tolerance in checks if not error <= tolerance]
     if failed_checks:

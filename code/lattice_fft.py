@@ -13,7 +13,7 @@ def get_P0_transformed(P0_offset_blocks):
     return np.fft.rfftn(P0_offset_lattice, axes=(0, 1))
 
 def get_P0_offset_blocks_from_transformed(P0_transformed):
-    # The inverse of get_P0_transformed: the real-space kernel P0[offset], one 6 x 6 block per lattice offset.
+    # The inverse of get_P0_transformed: the real-space kernel P0[offset], one 6 × 6 block per lattice offset.
     lattice_shape = (config.partition_number_per_side, config.partition_number_per_side)
     return np.fft.irfftn(P0_transformed, s=lattice_shape, axes=(0, 1)).reshape(6 * config.partition_count, 6)
 

@@ -13,6 +13,8 @@ from load_path import Solver
 from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain
 from online_timing import online_timer, timed_online
 
+## ------- Shared by Every TFA Solver ------- ##
+
 @timed_online("induced_strain")
 def get_induced_strain(P, eigenstrain):
     return (P @ eigenstrain.reshape(-1)).reshape(config.partition_count, 6)
@@ -77,6 +79,18 @@ def get_actual_residual(E, P, macro_strain, strain, partition_materials, plastic
     plastic_state, _ = get_plastic_eigenstrain(strain, partition_materials, plastic_history)
     return strain - b - get_induced_strain(P, plastic_state.plastic_strain)
 
+@timed_online("reference_inverse")
+def get_reference_fourier_inverse(P0_transformed, reference_sensitivity):
+    # Inverts M̂0(ξ) = I - P̂0(ξ) H_μ,0 (ER-15) at every frequency.
+    M0_transformed = np.eye(6) - P0_transformed @ reference_sensitivity
+    try:
+        return np.linalg.inv(M0_transformed)
+    except np.linalg.LinAlgError:
+        raise SolverDidNotConverge("the reference operator M0 is singular at some frequency, so the FFT "
+                                   "correction is undefined") from None
+
+## ------- Fixed Point (Strategy 1) ------- ##
+
 @timed_online("correction_solve")
 def get_standard_correction(residual):
     return -residual
@@ -92,29 +106,19 @@ def standard_richardson_iteration(E, P, macro_strain, partition_materials, plast
             strain, b, P, induced_strain_history, partition_materials, plastic_history)
         residual_history.append(get_relative_residual(residual, macro_strain))
 
-        if has_converged(residual_history[-1], len(residual_history), "standard_richardson_iteration"):
+        if has_converged(residual_history[-1], len(residual_history)):
             break
 
-        strain = strain + config.relaxation_factor * get_standard_correction(residual)
+        strain = strain + config.tfa_relaxation_factor * get_standard_correction(residual)
 
     return StepResult(strain, stress, plastic_state, np.array(residual_history))
 
-@timed_online("reference_sensitivity")
+@timed_online("sensitivity")
 def get_reference_sensitivity(strain, partition_materials, plastic_history):
     # H_μ,0 (ER-8): the partition average of the actual sensitivity, one 6 × 6 block shared by every partition so
     # the reference stays a convolution.
     sensitivity = get_eigenstrain_sensitivity(strain, partition_materials, plastic_history)
     return np.mean(sensitivity, axis=0)
-
-@timed_online("reference_inverse")
-def get_reference_fourier_inverse(P0_transformed, reference_sensitivity):
-    # Inverts M̂0(ξ) = I - P̂0(ξ) H_μ,0 (ER-15) at every frequency.
-    M0_transformed = np.eye(6) - P0_transformed @ reference_sensitivity
-    try:
-        return np.linalg.inv(M0_transformed)
-    except np.linalg.LinAlgError:
-        raise SolverDidNotConverge("the reference operator M0 is singular at some frequency, so the FFT "
-                                   "correction is undefined") from None
 
 @timed_online("correction_solve")
 def get_fft_correction(reference_fourier_inverse, residual):
@@ -134,7 +138,7 @@ def fft_preconditioned_richardson_iteration(E, P, macro_strain, partition_materi
             strain, b, P, induced_strain_history, partition_materials, plastic_history)
         residual_history.append(get_relative_residual(residual, macro_strain))
 
-        if has_converged(residual_history[-1], len(residual_history), "fft_preconditioned_richardson_iteration"):
+        if has_converged(residual_history[-1], len(residual_history)):
             break
 
         # The reference is rebuilt only when the set of yielding partitions changes, not every iteration.
@@ -144,13 +148,21 @@ def fft_preconditioned_richardson_iteration(E, P, macro_strain, partition_materi
             reference_fourier_inverse = get_reference_fourier_inverse(P0_transformed, reference_sensitivity)
             yielding_partitions_at_last_rebuild = yielding_partitions
 
-        strain = strain + config.relaxation_factor * get_fft_correction(reference_fourier_inverse, residual)
+        strain = strain + config.tfa_relaxation_factor * get_fft_correction(reference_fourier_inverse, residual)
 
     return StepResult(strain, stress, plastic_state, np.array(residual_history))
 
-@timed_online("reference_sensitivity")
+def get_tfa_fixed_point_solvers(P0_transformed):
+    # The two fixed-point solvers for actual E/P, by the names every entry point and output file uses.
+    return {"TFA Standard FP": Solver(standard_richardson_iteration, get_actual_residual),
+            "TFA FFT FP": Solver(functools.partial(fft_preconditioned_richardson_iteration,
+                                                   P0_transformed=P0_transformed), get_actual_residual)}
+
+## ------- Newton-Krylov (Strategy 2) ------- ##
+
+@timed_online("sensitivity")
 def get_actual_sensitivity(strain, partition_materials, plastic_history):
-    # H_μ (ER-8) at the current strain, one 6 x 6 block per partition, zero in partitions that stay elastic.
+    # H_μ (ER-8) at the current strain, one 6 × 6 block per partition, zero in partitions that stay elastic.
     return get_eigenstrain_sensitivity(strain, partition_materials, plastic_history)
 
 @timed_online("correction_solve")
@@ -193,7 +205,6 @@ def newton_krylov_iteration(E, P, macro_strain, partition_materials, plastic_his
     # solvers solve the same equation from the same start. With P0_transformed, GMRES is preconditioned by the FFT
     # reference M0 = I - P0 H_μ,0, with H_μ,0 and its rebuild rule exactly as in
     # fft_preconditioned_richardson_iteration.
-    solver_name = "tfa_newton" if P0_transformed is None else "tfa_fft_newton"
     b = (E @ macro_strain).reshape(config.partition_count, 6)
     induced_strain_history = get_induced_strain(P, plastic_history.plastic_strain)
     strain = b + induced_strain_history
@@ -206,8 +217,7 @@ def newton_krylov_iteration(E, P, macro_strain, partition_materials, plastic_his
             strain, b, P, induced_strain_history, partition_materials, plastic_history)
         residual_history.append(get_relative_residual(residual, macro_strain))
 
-        if has_converged(residual_history[-1], len(residual_history), solver_name,
-                         max_iterations=config.newton_max_steps):
+        if has_converged(residual_history[-1], len(residual_history), max_iterations=config.newton_max_steps):
             break
 
         sensitivity = get_actual_sensitivity(strain, partition_materials, plastic_history)
@@ -228,9 +238,3 @@ def get_tfa_newton_solvers(P0_transformed):
     return {"TFA Newton": Solver(newton_krylov_iteration, get_actual_residual),
             "TFA FFT Newton": Solver(functools.partial(newton_krylov_iteration, P0_transformed=P0_transformed),
                                      get_actual_residual)}
-
-def get_tfa_fixed_point_solvers(P0_transformed):
-    # The two fixed-point solvers for actual E/P, by the names every entry point and output file uses.
-    return {"TFA Standard FP": Solver(standard_richardson_iteration, get_actual_residual),
-            "TFA FFT FP": Solver(functools.partial(fft_preconditioned_richardson_iteration,
-                                                   P0_transformed=P0_transformed), get_actual_residual)}

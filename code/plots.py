@@ -1,3 +1,6 @@
+# Every figure the entry points save: the load-path summary (stress, iterations and time per iteration per step) and
+# the time breakdown per timing group, for any number of solvers, and the partition cross-section. No solver logic.
+
 from typing import NamedTuple
 import numpy as np
 import matplotlib.pyplot as plt
@@ -27,8 +30,8 @@ class SolverSteps(NamedTuple):
     completed_step_count: int
 
 def get_applied_strain_description(max_macro_strain, strain_increment_count):
-    nonzero_components = [f"{label} = {value:g}" for label, value in zip(macro_strain_component_labels, max_macro_strain)
-                          if value != 0]
+    nonzero_components = [f"{label} = {value:g}"
+                          for label, value in zip(macro_strain_component_labels, max_macro_strain) if value != 0]
     component_lines = [", ".join(nonzero_components[start:start + 3]) for start in range(0, len(nonzero_components), 3)]
     return "\n".join([f"Applied Strain ({strain_increment_count} steps)"] + component_lines)
 

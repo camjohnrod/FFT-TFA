@@ -308,13 +308,14 @@ def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_p
     if cached_P0 is None:
         start_time = time.perf_counter()
         P0_offset_blocks = get_P0_offset_blocks(B, reference_L_per_element, mesh, A)
-        print(f"P0 offline solve (extra cost of the FFT solver): {time.perf_counter() - start_time:.2f} seconds.")
+        print(f"P0 offline solve (for the FFT reference and the LS model): {time.perf_counter() - start_time:.2f} "
+              "seconds.")
         save_cache(P0_cache_path, P0_parameters, P0_offset_blocks=P0_offset_blocks)
     else:
         P0_offset_blocks = cached_P0["P0_offset_blocks"]
 
-    # Column-major, so the columns of a run of consecutive partitions are contiguous and the induced strain can
-    # read just the yielding partitions' columns without copying them (get_induced_strain_increment).
+    # Column-major, so the columns of a run of consecutive partitions are contiguous and P products can read just the
+    # yielding partitions' columns without copying them (tfa_solvers.apply_P_to_partitions).
     return E, np.asfortranarray(P), get_P0_transformed(P0_offset_blocks)
 
 ## ------- Problem Setup ------- ##
@@ -340,7 +341,7 @@ def get_problem():
     if config.matched_stiffness_control:
         L_inclusion = L_matrix
         print("matched-stiffness control: the inclusion elastic stiffness is overridden to the matrix value, which "
-              "makes the actual E/P and reference models the same equation. Yield properties still differ.")
+              "makes the TFA and LS models the same equation. Yield properties still differ.")
     partition_materials = get_partition_materials(L_matrix, L_inclusion, partition_material_ids)
     mesh = get_periodic_mesh(partition_material_ids)
     B = get_B()

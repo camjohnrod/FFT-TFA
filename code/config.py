@@ -7,15 +7,17 @@ import numpy as np
 
 ## ------- Inputs ------- ##
 
+# Geometry, mesh and partitions
 domain_side_length          = 1e-3
 inclusion_shape             = "circle"
 inclusion_side_length       = (5/9) * 1e-3
 inclusion_radius            = 0.35e-3
-
 element_number_per_side     = 75
 element_number_along_z      = 5
 partition_number_per_side   = 25
 
+# Materials. matched_stiffness_control = True gives the inclusion the matrix's elastic stiffness; the TFA and LS models
+# are then the same equation, which is the regression gate for the LS solvers.
 elastic_modulus_inclusion   = 10e9
 elastic_modulus_matrix      = 100e6
 poisson_ratio_inclusion     = 0.3
@@ -24,26 +26,26 @@ inclusion_yield_stress      = np.inf
 matrix_yield_stress         = 1.0e6
 inclusion_hardening_modulus = 0.0
 matrix_hardening_modulus    = 10e6
-# True gives the inclusion the matrix's elastic stiffness. The TFA and LS models are then the same equation, which is
-# the regression gate for the LS solvers.
 matched_stiffness_control   = False
 
-# max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
-# Alternative load paths:
-# max_macro_strain            = np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])
+# Load path: max_macro_strain reached linearly over strain_increment_count steps. Alternatives:
+#   np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])      uniaxial
+#   np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])
 max_macro_strain            = np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])
-
 strain_increment_count      = 60
 
-fixed_point_tolerance       = 1e-6
-fixed_point_max_iterations  = 1000
-divergence_residual_limit   = 1.0
+# Convergence, shared by every solver: relative residual (Formulation.md section 12) below convergence_tolerance.
+convergence_tolerance       = 1e-6
 residual_strain_scale_floor = 1e-4
-relaxation_factor           = 1.0
 solver_agreement_tolerance  = 1e-4
 independent_check_round_off = 1e-12
 
-# LS fixed point. None picks the relaxation from the stiffness-ratio bounds, times the safety factor.
+# TFA solvers. The relaxation applies to the fixed points; the divergence limit to fixed point and Newton.
+tfa_relaxation_factor       = 1.0
+tfa_max_iterations          = 1000
+tfa_divergence_limit        = 1.0
+
+# LS solvers. None picks the fixed point's relaxation from the stiffness-ratio bounds, times the safety factor.
 ls_relaxation_factor        = None
 ls_stability_safety         = 0.9
 ls_max_iterations           = 20000
@@ -54,6 +56,7 @@ newton_max_steps            = 50
 newton_krylov_tolerance     = 1e-3
 newton_krylov_restart       = 30
 
+# Checks run before solving, by the LS and Newton entry points.
 verification_enabled        = True
 verification_tolerance      = 1e-9
 jacobian_check_tolerance    = 1e-6

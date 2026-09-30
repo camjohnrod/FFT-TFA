@@ -37,10 +37,10 @@ def get_solver_label(solver_name, solver_results, step_count):
     return label
 
 def get_time_per_iteration_per_group(solver_results, step_count):
-    # Per outer iteration: one fixed-point iteration, or one Newton step including its whole Krylov solve. Operator
-    # applications made inside another group, as a Newton step's Krylov solve does, are taken out of that group and
-    # added to the induced-strain group, so all operator work shows as one segment and no time is counted twice.
-    # The last entry, "Other", is the solve time no timed group covers.
+    # Per iteration as LoadPathResult counts them (residual evaluations), so a Newton iteration includes its whole
+    # Krylov solve. Operator applications made inside another group, as a Newton step's Krylov solve does, are taken
+    # out of that group and added to the induced-strain group, so all operator work shows as one segment and no time
+    # is counted twice. The last entry, "Other", is the solve time no timed group covers.
     solve_time = get_total_over_steps(solver_results, "solve_time_per_step", step_count)
     nested_operator_time_per_group = get_total_over_steps(solver_results, "nested_operator_time_per_group_per_step",
                                                           step_count)
@@ -78,7 +78,7 @@ def print_independent_check(results):
     worst_residual = max(result.recomputed_residual_per_step[:result.completed_step_count].max()
                          for solver_results in results.values() for result in solver_results)
     print(f"[PASS] independent residual check: every completed step of every run is converged when its residual is "
-          f"recomputed from scratch (worst {worst_residual:.4e}, tolerance {config.fixed_point_tolerance:.0e}).")
+          f"recomputed from scratch (worst {worst_residual:.4e}, tolerance {config.convergence_tolerance:.0e}).")
 
 def check_solver_agreement(results, solver_names, comparable_step_count):
     # These solvers solve the same equations, so each one's macroscopic stress must match the first one's to within
@@ -128,31 +128,30 @@ def check_against_saved_results(results, solver_name, saved_run_name, saved_solv
 
 ## ------- LS Model Comparison ------- ##
 
-def get_model_difference_per_step(results, actual_solver_name, reference_solver_name, step_count):
-    # The LS model's macroscopic stress against the actual E/P model's, per step, relative to the largest
-    # actual-model stress. This is modelling error, not solver error.
-    actual_stress = results[actual_solver_name][-1].macroscopic_stress[:step_count]
-    reference_stress = results[reference_solver_name][-1].macroscopic_stress[:step_count]
-    stress_scale = max(np.abs(actual_stress).max(), np.finfo(float).tiny)
-    return np.abs(reference_stress - actual_stress).max(axis=1) / stress_scale
+def get_model_difference_per_step(results, tfa_solver_name, ls_solver_name, step_count):
+    # The LS model's macroscopic stress against the TFA (actual E/P) model's, per step, relative to the largest TFA
+    # stress. This is modelling error, not solver error.
+    tfa_stress = results[tfa_solver_name][-1].macroscopic_stress[:step_count]
+    ls_stress = results[ls_solver_name][-1].macroscopic_stress[:step_count]
+    stress_scale = max(np.abs(tfa_stress).max(), np.finfo(float).tiny)
+    return np.abs(ls_stress - tfa_stress).max(axis=1) / stress_scale
 
-def print_model_difference(results, actual_solver_name, reference_solver_name, comparable_step_count):
-    model_difference = get_model_difference_per_step(results, actual_solver_name, reference_solver_name,
+def print_model_difference(results, tfa_solver_name, ls_solver_name, comparable_step_count):
+    model_difference = get_model_difference_per_step(results, tfa_solver_name, ls_solver_name,
                                                      comparable_step_count).max()
-    print(f"model discrepancy, different models ({actual_solver_name} actual E/P vs {reference_solver_name}): "
-          f"{model_difference:.2e} relative. This is a modelling difference, not a solver error.")
+    print(f"model discrepancy, different models ({ls_solver_name} vs {tfa_solver_name}): {model_difference:.2e} "
+          "relative. This is a modelling difference, not a solver error.")
 
-def check_matched_stiffness(results, actual_solver_name, reference_solver_name, comparable_step_count):
-    # With matched phase stiffness the reference and actual E/P models are the same equation, so here, and only
-    # here, the reference solver must reproduce actual E/P to solver tolerance.
-    model_difference = get_model_difference_per_step(results, actual_solver_name, reference_solver_name,
+def check_matched_stiffness(results, tfa_solver_name, ls_solver_name, comparable_step_count):
+    # With matched phase stiffness the LS and TFA models are the same equation, so here, and only here, the LS solver
+    # must reproduce TFA to solver tolerance.
+    model_difference = get_model_difference_per_step(results, tfa_solver_name, ls_solver_name,
                                                      comparable_step_count).max()
     passed = model_difference <= config.matched_stiffness_tolerance
-    print(f"[{'PASS' if passed else 'FAIL'}] matched-stiffness control: reference vs actual E/P "
+    print(f"[{'PASS' if passed else 'FAIL'}] matched-stiffness control, {ls_solver_name} vs {tfa_solver_name}: "
           f"{model_difference:.2e} relative (tolerance {config.matched_stiffness_tolerance:.0e}).")
     if not passed:
-        raise RuntimeError("matched-stiffness control failed: the reference model must reproduce actual E/P to "
-                           "solver tolerance.")
+        raise RuntimeError("matched-stiffness control failed: the LS model must reproduce TFA to solver tolerance.")
 
 ## ------- Output Files ------- ##
 
@@ -167,7 +166,7 @@ def save_results(results, run_name):
     # Each solver's per-step results, with the problem they solve, so another entry point can check its own solvers
     # against these, but only when every problem parameter matches.
     arrays = {f"problem/{name}": np.asarray(getattr(config, name)) for name in config.problem_parameter_names}
-    arrays["fixed_point_tolerance"] = np.asarray(config.fixed_point_tolerance)
+    arrays["convergence_tolerance"] = np.asarray(config.convergence_tolerance)
     for solver_name, solver_results in results.items():
         result = solver_results[-1]
         arrays[f"{solver_name}/macroscopic_stress"] = result.macroscopic_stress

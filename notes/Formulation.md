@@ -587,6 +587,8 @@ Here $\ell$ counts linear iterations. During this solve, $\mathbf r_k$, $\mathbf
 
 **One load step:** evaluate material response and the actual residual; evaluate sensitivities; solve ER-20 using GMRES and ER-15; update strains; repeat Newton until ER-4 converges; then accept histories. Newton may require a line search or a smaller load step. With stored P, there is one nonlinear loop with one iterative linear loop inside it, but no further iterative reference solve when ER-15 applies directly.
 
+*Implementation note (2026-09-30).* Strategy 2 is implemented as `newton_krylov_iteration` in `code/tfa_solvers.py` (run by `code/MAIN_TFA_Newton.py`), with and without the reference. GMRES is right-preconditioned, solving $\mathbf J_k\mathbf M_0^{-1}\mathbf y=-\mathbf r_k$ and setting $\delta\boldsymbol\varepsilon=\mathbf M_0^{-1}\mathbf y$; this is the same correction as ER-20, but GMRES then monitors the unpreconditioned linear residual $\boldsymbol\rho_\ell$ of ER-21 directly. $\mathbf H_{\mu,0}$ is the partition mean of $\mathbf H_{\mu,k}$, as in Strategy 1. At the code's default configuration Newton needed about five times fewer iterations than Strategy 1, but about as many actual P products, so it was not faster; the reference preconditioner did not reduce the GMRES work. These are measurements for one problem, not general conclusions.
+
 ## 9. What the two strategies share, and where they differ
 
 Both must evaluate the same residual and return the same converged model response on the same solution branch. Their different corrections are

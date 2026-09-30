@@ -5,216 +5,154 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A research codebase for FFT-accelerated Transformation Field Analysis (TFA): a reduced-order homogenization
-method for elastoplastic composites (e.g. stiff circular/square inclusions in a softer J2-plastic matrix).
-There are two entry points. `code/MAIN.py` is the stable pipeline and compares two online solvers for the same
-partition-strain formulation:
+method for elastoplastic composites (stiff circular/square inclusions in a softer J2-plastic matrix). Two reduced
+models are solved by two strategies, one entry point each:
 
-- **Standard fixed-point (Richardson) iteration** on the actual eigenstrain-influence relation.
-- **FFT-preconditioned Richardson iteration**, which uses a homogeneous reference material's periodic Green's
-  function (applied via FFT over the partition lattice) to accelerate/precondition the same fixed point.
+| Entry point | Solvers | Outputs prefix |
+|---|---|---|
+| `code/MAIN_TFA_FP.py` (the gold standard) | TFA Standard FP, TFA FFT FP | `TFA_FP_` |
+| `code/MAIN_TFA_Newton.py` | TFA Newton, TFA FFT Newton | `TFA_Newton_` |
+| `code/MAIN_LS_FP.py` | both TFA FP solvers + LS FP | `LS_FP_` |
+| `code/MAIN_LS_Newton.py` | both TFA Newton solvers + LS Newton | `LS_Newton_` |
 
-Both solvers must converge to the same macroscopic stress. `check_solver_agreement` prints PASS/FAIL against
-`solver_agreement_tolerance` and raises on FAIL, after all plots are saved. `main()` also compares solve time and
-iteration count between the two.
+- **TFA** is the actual E/P model (`notes/Formulation.md`, ER-4): residual `r = ε - Eε̄ - Pμ(ε)`. FP is Strategy 1
+  (fixed point, optionally preconditioned by the FFT reference `M0 = I - P0 H_μ,0`); Newton is Strategy 2 (Newton
+  with GMRES, optionally right-preconditioned by `M0⁻¹`). All four TFA solvers solve the same equation and must agree
+  to `solver_agreement_tolerance`.
+- **LS** is a *different* model, the partition-averaged Lippmann-Schwinger formulation of
+  `notes/Partition_Lippmann_Schwinger_New_9_28_2026`, where the nonlocal operator is the P0 convolution alone. Its
+  difference from TFA is modelling error, printed as such, not a solver bug. Only under `matched_stiffness_control`
+  are the two models the same equation; that is the LS regression gate.
+- Solvers are not mixed across strategies: FP files contain only fixed-point solvers, Newton files only Newton
+  solvers. The LS files include the TFA solvers of the same strategy for comparison.
 
-A load step that cannot be solved no longer aborts the run. It raises a subclass of `LoadPathAbandoned`:
-- `SolverDidNotConverge`, raised by `has_converged` on divergence or the iteration cap, or by
-  `get_reference_fourier_inverse` when `M0` is singular.
-- `MaterialFullySoftened`, raised by `check_flow_stress_is_positive` when a converged step leaves a partition's flow
-  stress `σ_y + H·α` at or below zero. Past that point the return map flips the sign of the stress, and both solvers
-  would otherwise agree on the wrong answer.
-
-`run_strain_path` catches only `LoadPathAbandoned`, so genuine bugs (the online timer's nesting guard, a failed
-conjugate gradient in post-processing) still fail loudly. It keeps the steps before the failure and records
-`completed_step_count` and `failure_reason` on the `LoadPathResult`. Failing on the very first step re-raises,
-since there is no partial result worth keeping. Downstream, timings and the agreement check cover only the steps
-every solver completed, a stopped solver's label says where and why it stopped, and the load-path plot slices each
-curve to its completed steps and marks the abandoned step with an x. The stress curve and von Mises plots come
-from whichever solver got furthest (`get_most_complete_solver_name`). This matters mainly under softening
-(negative `matrix_hardening_modulus`), where a solver stopping early is not by itself a regression.
-
-`MAIN_Testing.py` shares all of this. Its reference solver also raises `SolverDidNotConverge` when GMRES fails
-inside a Newton step. The von Mises model-difference plot is skipped when any solver stopped early, since final
-stresses from different load steps are not comparable.
-
-`code/MAIN_Testing.py` is a working copy of that pipeline which adds a **third solver for a different reduced
-model** — the partition-averaged Lippmann-Schwinger formulation of
-`notes/Partition_Lippmann_Schwinger_New_9_28_2026`, where a partitionwise-constant polarization interacts
-through a homogeneous reference medium, so the whole nonlocal operator is a convolution applied by FFT over the
-partition lattice. It is selectable as fixed-point or matrix-free Newton-GMRES via `reference_solver_method`.
-Because it solves a *different* model, it does **not** agree with the other two to solver tolerance, and the
-difference it reports is modelling error rather than a solver bug — the printed output labels these separately.
-The one configuration where the models coincide exactly is matched phase stiffness
-(`matched_stiffness_control`), which is the regression gate for that solver.
-
-The theory is derived step-by-step in `notes/` (see below) — read the relevant note before changing solver
-math, since the code's variable names (`E`, `P`, `P0_transformed`, `H_mu`, `M0`, etc.) map directly onto the
-symbols defined there.
+Read the relevant note before changing solver math: code names (`E`, `P`, `P0_transformed`, `H_mu`, `M0`, …) map
+onto the notes' symbols and numbered equations (ER-*, LS-*), which code comments cite.
 
 ## Running the code
 
 ```bash
-python code/MAIN.py            # stable pipeline, two solvers
-python code/MAIN_Testing.py    # adds the reference Lippmann-Schwinger solver and its verification checks
-python code/experiments/<name>.py   # runnable from any cwd; reads config from MAIN_Testing.py's constants
+python code/MAIN_TFA_FP.py        # any of the four, from any directory
+python code/check_code.py         # after any change: static checks plus a ~30 s smoke run of all four
 ```
 
-There is no package manifest (no `requirements.txt`/`pyproject.toml`), no pytest suite, and no virtualenv in
-the repo. The default `python` (miniforge `base` conda env) already has the four dependencies: `numpy`,
-`scipy`, `matplotlib`, `tqdm`. The `fenics-env`/`fenicsx-env` conda envs are unrelated to this project.
+There is no pytest suite; `code/check_code.py` is the test to run after changing code. It fails on anything unused
+(including `NamedTuple` fields and config constants), overlong lines, retired names, or any entry point that
+exits with an error or prints a FAIL or SKIPPED check on a small copy of the problem. It checks consistency, not
+results: compare numbers against a baseline by hand when a change is meant to leave them alone.
 
-Configuration is changed by editing the module-level constants at the top of `MAIN.py` / `MAIN_Testing.py`
-(there are no CLI arguments). The experiment scripts have no config of their own; edit `MAIN_Testing.py` to
-change what they measure. Check `git diff` before committing, since those constants are often left at a local
-study configuration.
+No package manifest or virtualenv. The default `python` (miniforge `base` conda env) has the
+dependencies (`numpy`, `scipy`, `matplotlib`, `tqdm`); the `fenics-env`/`fenicsx-env` envs are unrelated.
 
-`MAIN_Testing.py` does carry its own checks: with `verification_enabled` it runs tolerance checks (printed
-PASS/FAIL, raising `RuntimeError` on any failure) before solving: four on reference-kernel structure, three on
-the LS-20 Jacobian (finite-difference match, plastic branch reached, active set fixed), and — only when
-`partition_count <= verification_max_partitions` (default 256) — three dense comparisons that need an extra full
-offline solve, followed by the elastic model error. At the default 25×25 grid the dense checks and the model
-error are **skipped** (7 checks, not 10); lower `partition_number_per_side` to get them. The two entry points keep **separate caches and output folders**
-(`cache`/`output` versus `cache_testing`/`output_testing`); they were shared originally, and because the cache
-is keyed on mesh and geometry parameters, alternating between two entry points at different configurations
-forced a full offline recompute every switch.
+**All configuration is `code/config.py`**, shared by every entry point and grouped by topic: geometry, materials,
+load path, convergence (`convergence_tolerance` applies to every solver), `tfa_*`, `ls_*` and `newton_*` solver
+settings, verification, timing. There are no CLI arguments. Check `git diff` before committing, since it is often
+left at a local study configuration.
 
-`code/experiments/` holds standalone measurement scripts that import `MAIN_Testing`, build their inputs with
-`m.get_problem()` (which also applies `matched_stiffness_control`) and read its module-level constants: `c0_sweep` (reference-stiffness accuracy/speed tradeoff), `elastic_only` (model error at one mesh,
-for M-refinement studies — use a square inclusion aligned to partition boundaries or geometry drift confounds
-it), `spectrum` (dense Jacobian spectrum and the damped-Richardson stability limit), `solver_cross_check`
-(fixed point versus Newton reaching the same root), `group_breakdown` (per-timing-group cost), and
-`mean_check` (LS-9 mean consistency plus an independent residual recompute). Each has a header explaining what
-it measures. Several build dense `M x M` operators, so run them at small partition counts.
+Runs are slow: `main()` does `timing_repeat_count` interleaved full load paths per solver. LS FP needs ~55,000
+iterations per path at the default 25×25 grid (~25 s per path). Estimate cost before running and background large
+configurations.
 
-Runs are not fast: `main()` executes `timing_repeat_count` (default 5) interleaved full strain-path solves for
-*each* solver, at `strain_increment_count` (default 60) load steps each, on a `partition_number_per_side`² grid
-(default 25×25 = 625 partitions) with `element_number_per_side`² (default 75×75) elements. Estimate cost from
-these input constants before running, and background/redirect output for large configurations. Offline setup
-(assembling and factorizing the global stiffness matrix to build the influence functions `E`, `P`, and
-`P0_offset_blocks`) is the expensive one-time step; it is cached to `code/cache/*.npz` keyed on the exact input
-parameters that affect it plus a `cache_version` constant (increase it whenever a code change alters the offline
-operators, since parameters alone cannot detect that), so changing unrelated parameters (e.g. load path, yield stress) reuses the cache
-while changing mesh/geometry/reference-stiffness parameters triggers recomputation.
+**Checks every run makes, all printing PASS/FAIL and stopping the run on FAIL:**
+- Agreement between the solvers of the same model in the file (`check_solver_agreement`).
+- The independent residual check: after every step, outside the timings, `run_strain_path` recomputes the model
+  residual from scratch at the returned strain (`get_actual_residual` for TFA, `get_reference_model_residual` for
+  LS) and requires it converged. It catches solver bookkeeping bugs the solver's own residual cannot.
+- Newton files: cross-checks against the fixed-point result of the same model saved by the FP file
+  (`check_against_saved_results`). SKIPPED, with the reason, when that file is missing or was saved for a different
+  problem (`config.problem_parameter_names`). Run the FP file first.
+- LS and Newton files with `verification_enabled`: reference-kernel checks, finite-difference Jacobian checks
+  (ER-18, LS-20), and, only when `partition_count <= verification_max_partitions` (default 256, so **skipped at the
+  default 25×25 grid**), dense checks against a direct reference solve plus the LS elastic model error. Lower
+  `partition_number_per_side` (e.g. 15 with 45 elements) to get them.
 
-Output plots (cross-sections, load-path summary, timing breakdown, von Mises fields) are written to
-`code/output/` (created if missing but never cleared, so a PNG a run did not regenerate — e.g. von Mises fields
-with `post_process_element_stress` off — is stale from an earlier configuration). The caches are gitignored, but `code/output/` is **tracked** in git
-(and `code/output_testing/` is neither tracked nor ignored), so any run shows up as changed PNGs in
-`git status`.
+**Cache and output.** The offline step (factorizing the global stiffness to build `E`, `P`, `P0`) is cached in
+`code/cache/` (gitignored), shared by all entry points, one file per parameter set named by a hash of its
+parameters (`offline.get_cache_path`). Bump `offline.cache_version` whenever a code change alters the offline
+operators, since parameters alone cannot detect that. `code/output/` is **tracked**: each run first deletes its own
+`<prefix>*` files, then writes `<prefix>load_path_summary.png`, `<prefix>time_breakdown.png` and
+`<prefix>results.npz` (per-solver results plus the problem parameters, read by the cross-checks), plus the shared
+`cross_section.png`. Any run therefore shows up in `git status`.
 
-## Architecture (`code/MAIN.py`, single file, organized top-to-bottom as a pipeline)
+## Architecture
 
-`MAIN_Testing.py` is `MAIN.py` plus additions, in the same section order. Every top-level definition that exists
-in both files is **textually identical**, including the whole standard and FFT-preconditioned solver path (J2
-update, `reset_elastic_partitions`, residual, convergence, corrections, `run_interleaved_repeats`), with only
-these exceptions: the configuration constants (`matrix_hardening_modulus`, cache and output folders),
-`OnlineTimer` (which also counts P0 applications nested inside the Newton Krylov solve), `get_solvers`,
-`LoadPathResult`, `run_strain_path`, and the Main-section helpers. Keep it that way: it is a copy, not an import,
-so a change to shared logic must be made identically in both files. A quick check is to parse both files with
-`ast` and compare the source of every top-level name they share.
+The entry points are thin (`main()` reads as an outline); the pipeline lives in modules under `code/`, imported in
+one direction: `config` → `lattice_fft`, `offline`, `online_timing`, `material` → `convergence` → `load_path` →
+`tfa_solvers` → `ls_solvers` → `verification`, `report`, `plots`. Every module reads inputs as `config.<name>`.
 
-The additions are: a Reference Lippmann-Schwinger Solver section (`ReferenceSolver`, which keeps its warm start
-between steps and is therefore built fresh for every load path by `get_solvers`), a Verification section, a
-Problem Setup section (`Problem`/`get_problem`, shared with the experiments), and a total-time cost breakdown
-that shows all operator applications as one segment.
+| Module | Contents |
+|---|---|
+| `config.py` | Inputs, derived values, geometry checks, `problem_parameter_names`, folders |
+| `offline.py` | periodic hex mesh, materials, 8-node element matrices, `E`/`P`/`P0` influence functions, cache, `get_problem()` |
+| `lattice_fft.py` | the partition-lattice FFT: `get_P0_transformed`, `apply_on_partition_lattice` and the inverse |
+| `material.py` | vectorized J2 radial return and its sensitivity `H_μ` |
+| `online_timing.py` | `timed_online` groups and the nested-operator accounting |
+| `convergence.py` | residual norm, `has_converged`, `StepResult`, failure exceptions |
+| `load_path.py` | `Solver`, `LoadPathResult`, `run_strain_path` (with the independent check), interleaved repeats |
+| `tfa_solvers.py` | TFA fixed-point and Newton-Krylov solvers; `get_tfa_fixed_point_solvers` / `get_tfa_newton_solvers` define the solver names |
+| `ls_solvers.py` | LS residual, fixed point and Newton, and the warm-starting `ReferenceSolver` |
+| `verification.py` | kernel, dense and Jacobian checks, `run_verification` |
+| `report.py` | timing aggregation, printed comparison, agreement and cross-checks, saved results, plot saving |
+| `plots.py` | load-path summary and time breakdown for any number of solvers, cross-section |
 
-The file runs as one linear script, in this order, and later sections depend on earlier ones by data, not by
-class hierarchy — there is no object model beyond a few `NamedTuple`s (`Mesh`, `PartitionMaterials`, `PlasticState`,
-`TrialState`, `LoadPathResult`):
+Non-obvious points:
+- **Strain convention (ER-2):** engineering shear, `(ε11, ε22, ε33, 2ε12, 2ε23, 2ε13)`. `get_relative_residual`
+  weights shear by ½ to undo the doubling, and divides by the imposed strain's norm but never by less than
+  `residual_strain_scale_floor` (`Formulation.md` section 12).
+- **Why the TFA solvers agree:** all four evaluate the residual through the same `reset_elastic_partitions`
+  (material update, closed-form update of elastic partitions, actual residual), from the same starting strain
+  `Eε̄ + Pμₙ`. Both FFT variants use the same `H_μ,0` (partition mean of `H_μ`), rebuilt only when the set of
+  yielding partitions changes.
+- **Induced strain:** within a step, Pμ = Pμₙ + PΔμ with Δμ zero outside the yielding partitions. `P` is stored
+  column-major, so each run of consecutive yielding partitions is a contiguous block of columns, and
+  `apply_P_to_partitions` multiplies only those blocks without copying. Newton's Jacobian products use the same
+  function, since `H_μ` is zero outside the yielding partitions. Don't switch to fancy-indexing `P[:, columns]`:
+  copying the columns costs more than the full product.
+- **Half spectrum:** the kernel and every lattice field are real, so `P0_transformed` and `M0⁻¹` hold only the
+  non-redundant half of the frequencies (`rfftn`, shape `(N, N//2 + 1, 6, 6)`), transformed back with
+  `irfftn(..., s=(N, N))`. Anything new that reads `P0_transformed` must use this convention.
+- **Lattice requirement:** the FFT needs a congruent, translated partition lattice, so there is one z-layer of
+  partitions spanning the full thickness. The geometry checks also require a circular inclusion to contain a
+  partition centre, and a square one to land exactly on partition boundaries.
+- **Newton:** GMRES is *right*-preconditioned (solve `J M0⁻¹ y = -r`, then `δε = M0⁻¹ y`), so its residual is the
+  true linear residual. Newton settings (`newton_*`) are shared by every Newton solver.
+- **Iterations** count residual evaluations for every solver: a fixed point's corrections plus one, a Newton
+  solver's Newton steps plus one, each Newton step including its whole GMRES solve. Time per iteration is
+  therefore not comparable between fixed point and Newton; total time is.
+- **Timing:** `timed_online` raises if timed calls nest. Operator products made inside the GMRES solve are therefore
+  called untimed and recorded with `online_timer.record_nested_operator_application`; the time breakdown moves them
+  into the induced-strain segment and out of the correction-solve group, so nothing is counted twice. Every check
+  runs after a step's timings are recorded. Reports take the fastest repeat per step, over the steps every solver
+  completed.
+- **Failed load steps:** an unsolvable step raises a `LoadPathAbandoned` subclass (`SolverDidNotConverge`, or
+  `MaterialFullySoftened` when a flow stress reaches zero and the return map would flip the stress sign).
+  `run_strain_path` catches only these, so real bugs still stop the run; a failure on the first step re-raises.
+  Under softening, a solver stopping early is not by itself a regression.
+- **Known differences between solvers, by design:** LS starts each step from its previous strain plus the uniform
+  increment, while TFA starts from the exact elastic predictor, so LS spends iterations on elastic steps. TFA and LS
+  fixed points have different divergence limits and iteration caps (`tfa_divergence_limit`, `tfa_max_iterations`
+  against `ls_divergence_limit`, `ls_max_iterations`). Compare solvers by time: a column-restricted P product
+  and a P0 convolution cost very different amounts, so work counts are not comparable across models.
+- **"Reference" means two things.** In `tfa_solvers.py` it is the FFT reference medium used to precondition TFA
+  (`M0`, `H_μ,0`, `get_reference_fourier_inverse`). In `ls_solvers.py` it is the LS model itself, which the
+  LS note calls the reference model (`ReferenceSolver`, `get_reference_state`). Identifiers follow the notes.
 
-1. **Inputs** — every physical/numerical parameter is a plain module-level constant at the top of the file
-   (domain size, inclusion shape/size, mesh and partition resolution, material properties, load path,
-   solver tolerances). This is the only place run configuration is changed.
-2. **Calculated values and checks** — derived quantities (element/partition counts, DOF count, element size)
-   and validation that the inclusion geometry is compatible with the partition grid (e.g. a circular inclusion
-   must contain at least one partition centre; a square one must land exactly on partition boundaries).
-3. **Mesh, geometry and materials** — builds a periodic hexahedral (8-node brick) mesh on a regular grid
-   (`get_periodic_mesh`), assigns each element to a partition and a material (matrix=0, inclusion=1) via
-   `get_partition_material_ids`/`is_inside_inclusion`. `get_grid_id` is the shared (i, j, k) → flat-index
-   convention used throughout for elements, nodes, and partitions.
-4. **Element matrices and assembly** — standard isoparametric 8-node hex FEM: shape function derivatives at 8 Gauss points
-   (`get_shape_function_derivatives`), the strain-displacement matrix `B` (`get_B`, using the ER-2 engineering
-   strain/stress convention: shear strains are doubled, `(ε11,ε22,ε33,2ε12,2ε23,2ε13)`), per-element
-   stiffness `K_element`, and `assemble_element_blocks`, the one sparse assembly helper behind `K`, the load
-   matrices `F_macrostrain`/`F_eigenstrain` (`F_μ` of ER-24) and the partition-averaging operator `A_ε`.
-5. **Influence functions (offline)** — the expensive precomputation. `get_influence_functions` assembles the
-   global stiffness `K`, solves once per macrostrain/eigenstrain load column (batched, `solve_influence_function`,
-   via a sparse LU factorization reused across right-hand sides) and applies `A_ε`, following
-   ER-24's `P = A_ε K⁻¹ F_μ`, to get partition-average-strain response matrices `E` (macrostrain → partition strain) and `P` (partition eigenstrain → partition strain) — these are
-   the *actual* heterogeneous-material influence operators from the TFA relation `ε^B = E^B ε̄ + Σ_A P^{BA} μ^A`
-   (see `notes/Formulation.md` Eq. ER-1). `get_P0_offset_blocks`/`get_P0_transformed` build the analogous
-   influence operator `P0` for a *homogeneous reference material* on the same partition lattice, and Fourier
-   transform it over the 2D partition grid (`np.fft.fftn`) — this is what makes the second solver "FFT" and
-   requires partitions to form a congruent, translated lattice (hence one z-layer of partitions spanning the
-   full domain thickness, `element_number_along_z` not required to equal `partition_number_per_side`).
-6. **Cache** — `load_cache`/`save_cache`/`get_offline_operators` wrap steps above: results are stored in
-   `code/cache/E_P.npz` and `code/cache/P0_offset_blocks.npz` alongside the exact parameter dict that produced
-   them; a cache is only reused if every recorded parameter matches exactly.
-7. **Online timing** — `OnlineTimer`/`timed_online` is a lightweight instrumentation decorator that accumulates
-   wall-clock time per named phase (`material_update`, `induced_strain`, `reference_sensitivity`,
-   `reference_inverse`, `correction_solve`) across an online solve, used later to build the per-iteration timing
-   breakdown plot. Decorated calls must not nest (it raises if they do), since nested timing would double-count.
-8. **J2 material** — vectorized (all partitions at once) J2 plasticity with linear isotropic hardening and
-   closed-form radial return (`get_trial_state`, `get_plastic_eigenstrain`) plus its analytic eigenstrain
-   sensitivity `H_μ` (`get_eigenstrain_sensitivity`), used both for the actual stress-update and (averaged) as
-   the FFT solver's frozen reference sensitivity `H_{μ,0}`.
-9. **Solvers** — `standard_richardson_iteration` (direct fixed point, correction = `-residual`) and
-   `fft_preconditioned_richardson_iteration` (correction solved via the reference operator in Fourier space,
-   `get_fft_correction`, rebuilt only when the set of yielding partitions changes — see
-   `get_reference_sensitivity`/`get_reference_fourier_inverse`). Both share `reset_elastic_partitions`, which evaluates
-   the material update, updates non-yielding partitions' strain in closed form, and computes the actual
-   residual; this shared logic is why solver correctness parity is expected. Convergence is measured by
-   `get_relative_residual` as in `Formulation.md` section 12: the RMS tensor norm of the residual (shear
-   components weighted by 1/2, undoing the engineering doubling), divided by the imposed strain's norm but never
-   by less than `residual_strain_scale_floor`. `relaxation_factor` scales the
-   correction in either solver.
-10. **Load path** — `run_strain_path` steps a prescribed macroscopic strain path (`max_macro_strain` scaled
-    linearly over `strain_increment_count` steps) through a solver function passed in by name (`get_solvers`), carrying plastic history
-    forward between steps; `run_interleaved_repeats` runs every solver `timing_repeat_count` times interleaved
-    (to average out system noise fairly) for the final timing comparison.
-11. **Post-processing** — `get_element_stress` recovers full per-element stress fields by solving one more
-    (fine-mesh, CG-based) elastic problem with the converged partition eigenstrains as body-force-equivalent
-    loads, only run if `post_process_element_stress` is set; used to plot fine-resolution von Mises fields
-    against the coarser partition-averaged von Mises field.
-12. **Timing report** — picks the fastest repeat per step and sums timings over the comparable steps.
-13. **Main** — `main()` reads as an outline: build mesh/materials, get cached offline operators, run the
-    interleaved solvers, then `print_comparison`, `save_load_path_plots`, `save_von_mises_plots` and finally
-    `check_solver_agreement`.
+Measured at the default configuration (2026-09-30), useful before trying to speed things up: P products dominate
+every TFA solver. TFA Newton needs ~5× fewer iterations than TFA FP but about as many P products, so it is not
+faster (TFA FFT FP is the fastest TFA solver). The FFT reference does not reduce GMRES work for TFA Newton. With
+strong softening (`matrix_hardening_modulus = -6e7`) every TFA solver stops at step 8; Newton has no line search.
 
-`code/plots.py` holds all matplotlib figure-generation logic (cross-section geometry plot, load-path summary
-with elastic-regime shading, timing breakdown, von Mises cross-sections) and has no solver logic of its own.
-`code/plots_testing.py` is its counterpart for `MAIN_Testing.py`: the two are deliberately separate so the test
-pipeline can change figures without breaking `MAIN.py`. It generalises the load-path summary to a list of
-solvers and adds a model-difference panel, replaces the per-iteration breakdown with a total-time
-`plot_cost_breakdown` (an iteration is not a comparable unit once a Newton step contains a whole Krylov solve,
-so it also annotates nonlocal operator applications), and adds a von Mises model-difference field.
+## Notes directory
 
-## Notes directory (theory — read before touching solver math)
-
-- `notes/Formulation.md` — the primary, current derivation. Walks from the actual heterogeneous partition-strain
-  relation (Eq. ER-1) through the classical Moulinec–Suquet reference-split/FFT idea, to two solution
-  strategies for the *reduced* TFA problem: Strategy 1, reference fixed-point iteration (implemented in
-  `MAIN.py` as `fft_preconditioned_richardson_iteration`), and reference-preconditioned Newton–Krylov (not yet implemented —
-  described as Strategy 2, a possible future direction). Defines every symbol used in the code
-  (`E`, `P`, `P0`, `H_μ`, `M0`, anchor/sensitivity choices) with numbered equations (ER-1 … ER-25) that are
-  referenced directly in code comments/commit history. Section 9–11 give convergence caveats worth checking
-  before assuming a solver change is an improvement (e.g. elastic steps have `H_μ = 0` so the FFT solver's
-  reference matches exactly; fixed-point convergence is not guaranteed just because the reference is
-  invertible).
-- `notes/verified_notes/` — an earlier, more slowly-paced 7-part derivation sequence (see its own `README.md`
-  for the reading order) covering displacement influence functions, partitioned eigenstrain, the partition
-  strain transformation, nonlinear FEM/Newton structure, and the full J2 return-mapping algorithm in detail.
-  `Formulation.md` cites part 7 of this sequence for the constitutive convention; treat these as the
-  detailed backing derivations when `Formulation.md`'s summary isn't enough.
-- `notes/Partition_Lippmann_Schwinger_New_9_28_2026` — a newer formulation (no file extension), now
-  **implemented** as the third solver in `MAIN_Testing.py`; read it before touching that solver, since its
-  equation labels (`LS-7`, `LS-14`, `LS-18`, `LS-20`) are cited directly in the code. Its algebra was checked
-  equation by equation and holds. Three caveats worth knowing, none of them yet written into the note itself:
-  its section 7.1 recommends a midpoint-Lame reference stiffness, which measured worst of five candidates
-  (55 % plastic error) because that is a convergence heuristic for the linear elastic basic scheme rather than
-  a model choice; the plastic branch of `H_mu` is never stated even though section 1.4 gives the full return
-  map, so the implementation derives it (and verifies it against a finite difference); and the note leaves
-  M-convergence open in section 5.4, where measurement shows first order in partition size.
-- `references/` — source PDFs cited by the notes (Moulinec–Suquet, Fish–Cui eigenstate-based homogenization,
-  Ladecký et al. FFT-preconditioned FE solver, Dvorak, computational plasticity), referenced by the notes'
-  attribution sections.
+- `notes/Formulation.md` is the primary derivation (ER-1 … ER-25). Strategy 1 is
+  `fft_preconditioned_richardson_iteration`, Strategy 2 is `newton_krylov_iteration`. Sections 9–11 give
+  convergence caveats to check before assuming a solver change is an improvement.
+- `notes/verified_notes/` is a slower 7-part backing derivation; its `README.md` gives the reading order.
+  `Formulation.md` cites part 7 for the J2 constitutive convention.
+- `notes/Partition_Lippmann_Schwinger_New_9_28_2026` (no extension) is the LS model, and its LS-* labels are cited
+  in `ls_solvers.py`. Its algebra holds. Three caveats are not yet written into the note:
+  - Section 7.1's midpoint-Lamé reference stiffness measured worst of five candidates (55 % plastic error). It is
+    a convergence heuristic for the linear elastic scheme, not a model choice.
+  - The plastic branch of `H_mu` is never stated. The code derives it and checks it against a finite difference.
+  - Section 5.4 leaves M-convergence open. Measured convergence is first order in partition size.
+- `references/` holds the source PDFs the notes cite.

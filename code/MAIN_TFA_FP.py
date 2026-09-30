@@ -24,7 +24,7 @@ def main():
     print(f"inclusion volume fraction on the partition grid: {problem.partition_material_ids.mean():.4f}")
     save_cross_section_plot(problem.partition_material_ids)
 
-    print(f"TFA fixed point: relaxation {config.relaxation_factor}")
+    print(f"TFA fixed point: relaxation {config.tfa_relaxation_factor}")
     results = run_interleaved_repeats(functools.partial(get_tfa_fixed_point_solvers, problem.P0_transformed),
                                       problem.E, problem.P, problem.partition_materials)
     comparable_step_count = get_comparable_step_count(results)

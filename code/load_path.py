@@ -29,18 +29,16 @@ def check_residual_independently(solver_name, step, recomputed_residual, macro_s
     # A solver only reports convergence from its own bookkeeping, so the model residual is recomputed from scratch at
     # the strain it returned. Allowing only round-off above the convergence tolerance, anything else is a bug.
     relative_residual = get_relative_residual(recomputed_residual, macro_strain)
-    if not relative_residual <= config.fixed_point_tolerance + config.independent_check_round_off:
+    if not relative_residual <= config.convergence_tolerance + config.independent_check_round_off:
         raise RuntimeError(f"{solver_name} reported convergence at step {step + 1}, but the residual recomputed from "
-                           f"scratch is {relative_residual:.3e} (tolerance {config.fixed_point_tolerance:.0e}).")
+                           f"scratch is {relative_residual:.3e} (tolerance {config.convergence_tolerance:.0e}).")
     return relative_residual
 
 class LoadPathResult(NamedTuple):
-    applied_macro_strain: np.ndarray
     macroscopic_stress: np.ndarray
+    # Residual evaluations per step, the same unit for every solver: a fixed point's corrections plus one, or a
+    # Newton solver's Newton steps plus one.
     iterations_per_step: np.ndarray
-    # Applications of the nonlocal operator, wherever they ran. A count, not a cost: a P product restricted to the
-    # yielding partitions and a P0 convolution cost very different amounts.
-    operator_applications_per_step: np.ndarray
     # Taken from the material state rather than the iteration count, which marks elastic steps only for solvers that
     # update non-yielding partitions in closed form.
     yielding_per_step: np.ndarray
@@ -49,7 +47,6 @@ class LoadPathResult(NamedTuple):
     group_time_per_step: np.ndarray
     group_calls_per_step: np.ndarray
     nested_operator_time_per_group_per_step: np.ndarray
-    final_stress: np.ndarray
     final_plastic_strain: np.ndarray
     # Steps actually solved. Entries past this are untouched zeros, so totals stay honest but anything plotted
     # has to be sliced or the curves fall to zero at the abandoned steps.
@@ -68,7 +65,6 @@ def run_strain_path(solver_name, solver, E, P, partition_materials):
     applied_macro_strain = np.outer(load_fractions, config.max_macro_strain)
     macroscopic_stress = np.zeros((step_count, 6))
     iterations_per_step = np.zeros(step_count, dtype=int)
-    operator_applications_per_step = np.zeros(step_count, dtype=int)
     yielding_per_step = np.zeros(step_count, dtype=bool)
     recomputed_residual_per_step = np.zeros(step_count)
     solve_time_per_step = np.zeros(step_count)
@@ -89,14 +85,11 @@ def run_strain_path(solver_name, solver, E, P, partition_materials):
             if step == 0:
                 raise
             completed_step_count, failure_reason = step, str(failure)
-            print(f"  {solver_name}: abandoned the load path at step {step + 1} of {step_count}. "
-                  f"{failure_reason}.")
+            print(f"  {solver_name}: abandoned the load path at step {step + 1} of {step_count}: {failure_reason}.")
             break
         solve_time_per_step[step] = time.perf_counter() - start_time
         group_time_per_step[step] = online_timer.time_per_group
         group_calls_per_step[step] = online_timer.calls_per_group
-        operator_applications_per_step[step] = (online_timer.calls_per_group[online_time_groups.index("induced_strain")]
-                                                + online_timer.nested_operator_applications)
         nested_operator_time_per_group_per_step[step] = online_timer.nested_operator_time_per_group
 
         # The step's timings are recorded above, and the timer is reset before the next step, so the independent
@@ -109,12 +102,11 @@ def run_strain_path(solver_name, solver, E, P, partition_materials):
         yielding_per_step[step] = np.any(step_result.plastic_state.accumulated_plastic_strain
                                          > plastic_history.accumulated_plastic_strain)
         macroscopic_stress[step] = get_macroscopic_stress(step_result.stress)
-        stress, plastic_history = step_result.stress, step_result.plastic_state
+        plastic_history = step_result.plastic_state
 
-    return LoadPathResult(applied_macro_strain, macroscopic_stress, iterations_per_step,
-                          operator_applications_per_step, yielding_per_step, recomputed_residual_per_step,
+    return LoadPathResult(macroscopic_stress, iterations_per_step, yielding_per_step, recomputed_residual_per_step,
                           solve_time_per_step, group_time_per_step, group_calls_per_step,
-                          nested_operator_time_per_group_per_step, stress, plastic_history.plastic_strain,
+                          nested_operator_time_per_group_per_step, plastic_history.plastic_strain,
                           completed_step_count, failure_reason)
 
 def run_interleaved_repeats(get_solvers_for_one_path, E, P, partition_materials):
