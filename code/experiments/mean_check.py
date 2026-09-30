@@ -12,33 +12,26 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import numpy as np
 import MAIN_Testing as m
 
-L_matrix = m.get_L(m.elastic_modulus_matrix, m.poisson_ratio_matrix)
-L_inclusion = m.get_L(m.elastic_modulus_inclusion, m.poisson_ratio_inclusion)
-partition_materials = m.get_partition_materials(L_matrix, L_inclusion)
-mesh, B = m.get_periodic_mesh(), m.get_B()
-L_per_element = m.get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids)
-E, P, P0_transformed = m.get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, partition_materials.L)
-C0 = m.get_homogenized_L(E, partition_materials.L)
-compliance = np.linalg.inv(C0)
-relaxation = m.get_reference_relaxation_factor(partition_materials, C0)
+problem = m.get_problem()
+materials, compliance = problem.partition_materials, problem.reference_compliance
+relaxation = m.get_reference_relaxation_factor(materials, problem.reference_L)
 
 macro_strain = m.max_macro_strain / 3        # partly plastic
-plastic, accumulated = np.zeros((m.partition_count, 6)), np.zeros(m.partition_count)
-stress, plastic, accumulated, residuals, strain = m.reference_iteration(
-    macro_strain, np.tile(macro_strain, (m.partition_count, 1)), partition_materials, plastic, accumulated,
-    P0_transformed, compliance, relaxation)
+no_plastic_history = m.PlasticState(np.zeros((m.partition_count, 6)), np.zeros(m.partition_count))
+b = np.tile(macro_strain, (m.partition_count, 1))
+stress, plastic_state, residuals, strain = m.reference_iteration(
+    macro_strain, b, materials, no_plastic_history, problem.P0_transformed, compliance, relaxation,
+    m.reference_solver_method)
 
 mean_strain = strain.mean(axis=0)
 strain_scale = max(np.abs(macro_strain).max(), np.finfo(float).tiny)
 print(f"converged in {len(residuals)} iterations, final relative residual {residuals[-1]:.2e}")
 print(f"mean strain consistency  |<eps> - eps_bar| / |eps_bar| : "
       f"{np.abs(mean_strain - macro_strain).max() / strain_scale:.2e}")
-print(f"yielding partitions: {int((accumulated > 0).sum())} of {m.partition_count}")
+print(f"yielding partitions: {int((plastic_state.accumulated_plastic_strain > 0).sum())} of {m.partition_count}")
 
 # residual recomputed from scratch, guarding against stale state inside the loop
-b = np.tile(macro_strain, (m.partition_count, 1))
-_, _, fresh_stress = m.get_plastic_eigenstrain(strain, partition_materials, np.zeros((m.partition_count, 6)),
-                                               np.zeros(m.partition_count))
-fresh_residual = strain - b - m.get_reference_induced_strain(P0_transformed, strain - fresh_stress @ compliance.T)
+_, fresh_stress = m.get_plastic_eigenstrain(strain, materials, no_plastic_history)
+fresh_residual = strain - b - m.get_reference_induced_strain(problem.P0_transformed, strain - fresh_stress @ compliance.T)
 print(f"independently recomputed relative residual                : "
-      f"{np.linalg.norm(fresh_residual) / np.linalg.norm(strain):.2e}")
+      f"{m.get_relative_residual(fresh_residual, macro_strain):.2e}")

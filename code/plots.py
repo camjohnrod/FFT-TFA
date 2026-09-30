@@ -1,3 +1,4 @@
+from typing import NamedTuple
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker
@@ -13,6 +14,17 @@ macro_strain_component_labels = [r"$\bar{\varepsilon}_{11}$", r"$\bar{\varepsilo
 load_path_summary_style = {'font.size': 14, 'axes.labelsize': 16, 'xtick.labelsize': 13, 'ytick.labelsize': 13,
                            'legend.fontsize': 15, 'axes.titlesize': 22, 'lines.linewidth': 2.5}
 load_path_summary_figure_size = (10, 10)
+deviatoric_stress_component_styles = [('red', 'o', r"$\bar{\mathbf{S}}_{11}$"),
+                                      ('blue', 's', r"$\bar{\mathbf{S}}_{22}$"),
+                                      ('green', '^', r"$\bar{\mathbf{S}}_{33}$")]
+# One entry per solver, in the order the solvers are given; each legend sits beside the iterations panel.
+solver_colors = ['tab:blue', 'tab:orange']
+solver_legend_placements = [('lower left', 0.52), ('upper left', 0.48)]
+
+class SolverSteps(NamedTuple):
+    iterations_per_step: np.ndarray
+    solve_time_per_step: np.ndarray
+    completed_step_count: int
 
 def get_applied_strain_description(max_macro_strain, strain_increment_count):
     nonzero_components = [f"{label} = {value:g}" for label, value in zip(macro_strain_component_labels, max_macro_strain)
@@ -52,12 +64,12 @@ def label_elastic_steps(axis, load_steps, iterations_per_step, max_font_size=13,
         label.set_position((4, -8))
         label.set_fontsize(min_font_size + 2)
 
-def add_solver_legend(axis, line, solver_name, iterations_per_step, solve_time_per_step, location, vertical_anchor,
-                      completed_step_count=None):
+def add_solver_legend(axis, line, solver_name, solver_steps, location, vertical_anchor):
     no_line = matplotlib.lines.Line2D([], [], linestyle='none')
-    totals_label = f"  {iterations_per_step.sum()} iterations,\n  {solve_time_per_step.sum():.2f} s total time"
-    if completed_step_count is not None and completed_step_count < len(iterations_per_step):
-        totals_label += f"\n  (stopped at step {completed_step_count + 1})"
+    totals_label = (f"  {solver_steps.iterations_per_step.sum()} iterations,\n"
+                    f"  {solver_steps.solve_time_per_step.sum():.2f} s total time")
+    if solver_steps.completed_step_count < len(solver_steps.iterations_per_step):
+        totals_label += f"\n  (stopped at step {solver_steps.completed_step_count + 1})"
     solver_legend = matplotlib.legend.Legend(axis, [line, no_line], [f"{solver_name}:", totals_label],
                                              labelspacing=0.4, handlelength=1.5, frameon=False,
                                              loc=location, bbox_to_anchor=(1.01, vertical_anchor))
@@ -76,18 +88,20 @@ def mark_solver_failure(axis, load_steps, values, completed_step_count, color):
     axis.plot(load_steps[completed_step_count], values[completed_step_count - 1], marker='x', markersize=11,
               markeredgewidth=2.5, color=color, linestyle='none', clip_on=False, zorder=5)
 
-def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, iterations_per_step, solve_time_per_step,
-                           completed_step_count, iterations_per_step_fft, solve_time_per_step_fft,
-                           completed_step_count_fft, title, plot_path):
-    strain_increment_count = len(iterations_per_step)
+def get_time_per_iteration_ms(solver_steps):
+    # Abandoned steps have zero iterations and zero time, so they stay at zero instead of being divided.
+    time_per_iteration_ms = np.zeros(len(solver_steps.iterations_per_step))
+    solved = solver_steps.iterations_per_step > 0
+    time_per_iteration_ms[solved] = (1000 * solver_steps.solve_time_per_step[solved]
+                                     / solver_steps.iterations_per_step[solved])
+    return time_per_iteration_ms
+
+def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name, steps_per_solver, title, plot_path):
+    # The stress panel shows the solver named stress_solver_name; the iteration and timing panels show every solver
+    # in steps_per_solver, a dict from solver name to SolverSteps.
+    stress_solver_steps = steps_per_solver[stress_solver_name]
+    strain_increment_count = len(stress_solver_steps.iterations_per_step)
     load_steps = np.arange(1, strain_increment_count + 1)
-    # Guard the division: abandoned steps have zero iterations and zero time.
-    solved = iterations_per_step > 0
-    solved_fft = iterations_per_step_fft > 0
-    time_per_iteration_ms = np.zeros(strain_increment_count)
-    time_per_iteration_ms_fft = np.zeros(strain_increment_count)
-    time_per_iteration_ms[solved] = 1000 * solve_time_per_step[solved] / iterations_per_step[solved]
-    time_per_iteration_ms_fft[solved_fft] = 1000 * solve_time_per_step_fft[solved_fft] / iterations_per_step_fft[solved_fft]
 
     with plt.rc_context(load_path_summary_style):
         figure, (stress_axis, iterations_axis, time_per_iteration_axis) = plt.subplots(
@@ -97,52 +111,42 @@ def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, iterations_per_ste
         stress_axis.annotate(title_heading, xy=(0.5, 1), xycoords=stress_axis.title, xytext=(0, 6),
                              textcoords='offset points', ha='center', va='bottom',
                              fontsize=load_path_summary_style['axes.titlesize'])
-        # stress_axis.annotate(get_applied_strain_description(), xy=(0.5, 1), xycoords='axes fraction',
-        #                      xytext=(0, 12), textcoords='offset points', ha='center', va='bottom', color='0.35')
         for axis in (stress_axis, iterations_axis, time_per_iteration_axis):
-            shade_elastic_steps(axis, load_steps, iterations_per_step)
+            shade_elastic_steps(axis, load_steps, stress_solver_steps.iterations_per_step)
 
-        solved_steps = load_steps[:completed_step_count]
-        stress_axis.plot(solved_steps, macroscopic_deviatoric_stress_MPa[:completed_step_count, 0], color='red',
-                         marker='o', markersize=4, linewidth=2, label=r"$\bar{\mathbf{S}}_{11}$")
-        stress_axis.plot(solved_steps, macroscopic_deviatoric_stress_MPa[:completed_step_count, 1], color='blue',
-                         marker='s', markersize=4, linewidth=2, label=r"$\bar{\mathbf{S}}_{22}$")
-        stress_axis.plot(solved_steps, macroscopic_deviatoric_stress_MPa[:completed_step_count, 2], color='green',
-                         marker='^', markersize=4, linewidth=2, label=r"$\bar{\mathbf{S}}_{33}$")
+        stress_step_count = stress_solver_steps.completed_step_count
+        solved_stress = macroscopic_deviatoric_stress_MPa[:stress_step_count]
+        for component, (color, marker, label) in enumerate(deviatoric_stress_component_styles):
+            stress_axis.plot(load_steps[:stress_step_count], solved_stress[:, component], color=color, marker=marker,
+                             markersize=4, linewidth=2, label=label)
         stress_axis.legend(loc='center left', bbox_to_anchor=(1.01, 0.5), frameon=False)
         stress_axis.set_ylabel("Deviatoric stress (MPa)")
 
-        standard_line, = iterations_axis.step(solved_steps, iterations_per_step[:completed_step_count], where='mid',
-                                              color='tab:blue')
-        fft_line, = iterations_axis.step(load_steps[:completed_step_count_fft],
-                                         iterations_per_step_fft[:completed_step_count_fft], where='mid',
-                                         color='tab:orange')
-        add_solver_legend(iterations_axis, standard_line, "Standard", iterations_per_step, solve_time_per_step,
-                          'lower left', 0.52, completed_step_count)
-        add_solver_legend(iterations_axis, fft_line, "FFT-preconditioned", iterations_per_step_fft,
-                          solve_time_per_step_fft, 'upper left', 0.48, completed_step_count_fft)
-        mark_solver_failure(iterations_axis, load_steps, iterations_per_step, completed_step_count, 'tab:blue')
-        mark_solver_failure(iterations_axis, load_steps, iterations_per_step_fft, completed_step_count_fft,
-                            'tab:orange')
+        for (solver_name, solver_steps), color, (legend_location, legend_anchor) in zip(
+                steps_per_solver.items(), solver_colors, solver_legend_placements):
+            solved_steps = load_steps[:solver_steps.completed_step_count]
+            time_per_iteration_ms = get_time_per_iteration_ms(solver_steps)
+
+            line, = iterations_axis.step(solved_steps, solver_steps.iterations_per_step[:len(solved_steps)],
+                                         where='mid', color=color)
+            add_solver_legend(iterations_axis, line, solver_name, solver_steps, legend_location, legend_anchor)
+            mark_solver_failure(iterations_axis, load_steps, solver_steps.iterations_per_step,
+                                solver_steps.completed_step_count, color)
+
+            time_per_iteration_axis.step(solved_steps, time_per_iteration_ms[:len(solved_steps)], where='mid',
+                                         color=color)
+            mark_solver_failure(time_per_iteration_axis, load_steps, time_per_iteration_ms,
+                                solver_steps.completed_step_count, color)
+
         iterations_axis.set_ylabel("Iterations")
         iterations_axis.set_ylim(bottom=0)
         iterations_axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
-
-        time_per_iteration_axis.step(solved_steps, time_per_iteration_ms[:completed_step_count], where='mid',
-                                     color='tab:blue')
-        time_per_iteration_axis.step(load_steps[:completed_step_count_fft],
-                                     time_per_iteration_ms_fft[:completed_step_count_fft], where='mid',
-                                     color='tab:orange')
-        mark_solver_failure(time_per_iteration_axis, load_steps, time_per_iteration_ms, completed_step_count,
-                            'tab:blue')
-        mark_solver_failure(time_per_iteration_axis, load_steps, time_per_iteration_ms_fft,
-                            completed_step_count_fft, 'tab:orange')
         time_per_iteration_axis.set_ylabel("Time per iteration (ms)")
         time_per_iteration_axis.set_ylim(bottom=0)
         time_per_iteration_axis.set_xlabel("Load step", labelpad=12)
         time_per_iteration_axis.set_xlim(0.5, strain_increment_count + 0.5)
         figure.align_ylabels()
-        label_elastic_steps(stress_axis, load_steps, iterations_per_step)
+        label_elastic_steps(stress_axis, load_steps, stress_solver_steps.iterations_per_step)
 
         figure.savefig(plot_path)
     plt.close(figure)
@@ -160,11 +164,11 @@ time_breakdown_style = {'font.size': 13, 'axes.labelsize': 14, 'xtick.labelsize'
 time_breakdown_figure_size = (10, 3.6)
 time_breakdown_legend_row_count = 2
 
-def plot_time_per_iteration_breakdown(time_per_iteration_per_group_ms, time_per_iteration_per_group_ms_fft,
-                                      plot_path):
-    solver_names = ["Standard", "FFT-preconditioned"]
-    time_per_iteration_ms = np.array([time_per_iteration_per_group_ms, time_per_iteration_per_group_ms_fft])
-    bar_positions = np.array([1, 0])
+def plot_time_per_iteration_breakdown(time_per_iteration_per_group_ms_per_solver, plot_path):
+    # One bar per solver, top to bottom in the order given, split into the online time groups.
+    solver_names = list(time_per_iteration_per_group_ms_per_solver)
+    time_per_iteration_ms = np.array(list(time_per_iteration_per_group_ms_per_solver.values()))
+    bar_positions = np.arange(len(solver_names))[::-1]
 
     segment_ends = np.cumsum(time_per_iteration_ms, axis=1)
     total_time_per_iteration_ms = segment_ends[:, -1]

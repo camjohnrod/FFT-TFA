@@ -13,18 +13,29 @@ partition-strain formulation:
 - **FFT-preconditioned Richardson iteration**, which uses a homogeneous reference material's periodic Green's
   function (applied via FFT over the partition lattice) to accelerate/precondition the same fixed point.
 
-Both solvers must converge to the same macroscopic stress; `main()` verifies that agreement and compares solve
-time / iteration count between the two.
+Both solvers must converge to the same macroscopic stress. `check_solver_agreement` prints PASS/FAIL against
+`solver_agreement_tolerance` and raises on FAIL, after all plots are saved. `main()` also compares solve time and
+iteration count between the two.
 
-A solver that stops converging no longer aborts the run. `has_converged` raises `SolverDidNotConverge`, a
-dedicated subclass so that genuine bugs — the online timer's nesting guard, a failed conjugate gradient in
-post-processing — still fail loudly; `run_strain_path` catches only that type, abandons the load path there,
-and records `completed_step_count` and `failure_reason` on the `LoadPathResult`. Failing on the very first
-step re-raises, since there is no partial result worth keeping. Downstream, a truncated solver is tagged
-`[PARTIAL: ...]` and excluded from timing claims, the stress-agreement check runs only over steps both solvers
-completed, and the load-path plot slices each curve to its completed steps and marks the abandoned step with
-an x. This matters mainly under softening (negative hardening), where the Richardson fixed point is expected
-to lose contraction.
+A load step that cannot be solved no longer aborts the run. It raises a subclass of `LoadPathAbandoned`:
+- `SolverDidNotConverge`, raised by `has_converged` on divergence or the iteration cap, or by
+  `get_reference_fourier_inverse` when `M0` is singular.
+- `MaterialFullySoftened`, raised by `check_flow_stress_is_positive` when a converged step leaves a partition's flow
+  stress `σ_y + H·α` at or below zero. Past that point the return map flips the sign of the stress, and both solvers
+  would otherwise agree on the wrong answer.
+
+`run_strain_path` catches only `LoadPathAbandoned`, so genuine bugs (the online timer's nesting guard, a failed
+conjugate gradient in post-processing) still fail loudly. It keeps the steps before the failure and records
+`completed_step_count` and `failure_reason` on the `LoadPathResult`. Failing on the very first step re-raises,
+since there is no partial result worth keeping. Downstream, timings and the agreement check cover only the steps
+every solver completed, a stopped solver's label says where and why it stopped, and the load-path plot slices each
+curve to its completed steps and marks the abandoned step with an x. The stress curve and von Mises plots come
+from whichever solver got furthest (`get_most_complete_solver_name`). This matters mainly under softening
+(negative `matrix_hardening_modulus`), where a solver stopping early is not by itself a regression.
+
+`MAIN_Testing.py` shares all of this. Its reference solver also raises `SolverDidNotConverge` when GMRES fails
+inside a Newton step. The von Mises model-difference plot is skipped when any solver stopped early, since final
+stresses from different load steps are not comparable.
 
 `code/MAIN_Testing.py` is a working copy of that pipeline which adds a **third solver for a different reduced
 model** — the partition-averaged Lippmann-Schwinger formulation of
@@ -45,22 +56,30 @@ symbols defined there.
 ```bash
 python code/MAIN.py            # stable pipeline, two solvers
 python code/MAIN_Testing.py    # adds the reference Lippmann-Schwinger solver and its verification checks
+python code/experiments/<name>.py   # runnable from any cwd; reads config from MAIN_Testing.py's constants
 ```
 
-There is no package manifest (no `requirements.txt`/`pyproject.toml`) and no pytest suite. A `.venv` exists
-locally with `numpy`, `scipy`, `matplotlib`, and `tqdm` installed — activate it or otherwise ensure those four
-packages are available before running.
+There is no package manifest (no `requirements.txt`/`pyproject.toml`), no pytest suite, and no virtualenv in
+the repo. The default `python` (miniforge `base` conda env) already has the four dependencies: `numpy`,
+`scipy`, `matplotlib`, `tqdm`. The `fenics-env`/`fenicsx-env` conda envs are unrelated to this project.
 
-`MAIN_Testing.py` does carry its own checks: with `verification_enabled` it runs ten assertions before solving
-(reference-kernel structure, a finite-difference check of the LS-20 Jacobian, and — below
-`verification_max_partitions` — dense comparisons that need an extra full offline solve), then prints the
-elastic model error. The two entry points keep **separate caches and output folders**
+Configuration is changed by editing the module-level constants at the top of `MAIN.py` / `MAIN_Testing.py`
+(there are no CLI arguments). The experiment scripts have no config of their own; edit `MAIN_Testing.py` to
+change what they measure. Check `git diff` before committing, since those constants are often left at a local
+study configuration.
+
+`MAIN_Testing.py` does carry its own checks: with `verification_enabled` it runs tolerance checks (printed
+PASS/FAIL, raising `RuntimeError` on any failure) before solving: four on reference-kernel structure, three on
+the LS-20 Jacobian (finite-difference match, plastic branch reached, active set fixed), and — only when
+`partition_count <= verification_max_partitions` (default 256) — three dense comparisons that need an extra full
+offline solve, followed by the elastic model error. At the default 25×25 grid the dense checks and the model
+error are **skipped** (7 checks, not 10); lower `partition_number_per_side` to get them. The two entry points keep **separate caches and output folders**
 (`cache`/`output` versus `cache_testing`/`output_testing`); they were shared originally, and because the cache
 is keyed on mesh and geometry parameters, alternating between two entry points at different configurations
 forced a full offline recompute every switch.
 
-`code/experiments/` holds standalone measurement scripts that import `MAIN_Testing` and read its module-level
-constants: `c0_sweep` (reference-stiffness accuracy/speed tradeoff), `elastic_only` (model error at one mesh,
+`code/experiments/` holds standalone measurement scripts that import `MAIN_Testing`, build their inputs with
+`m.get_problem()` (which also applies `matched_stiffness_control`) and read its module-level constants: `c0_sweep` (reference-stiffness accuracy/speed tradeoff), `elastic_only` (model error at one mesh,
 for M-refinement studies — use a square inclusion aligned to partition boundaries or geometry drift confounds
 it), `spectrum` (dense Jacobian spectrum and the damped-Richardson stability limit), `solver_cross_check`
 (fixed point versus Newton reaching the same root), `group_breakdown` (per-timing-group cost), and
@@ -73,17 +92,35 @@ Runs are not fast: `main()` executes `timing_repeat_count` (default 5) interleav
 these input constants before running, and background/redirect output for large configurations. Offline setup
 (assembling and factorizing the global stiffness matrix to build the influence functions `E`, `P`, and
 `P0_offset_blocks`) is the expensive one-time step; it is cached to `code/cache/*.npz` keyed on the exact input
-parameters that affect it, so changing unrelated parameters (e.g. load path, yield stress) reuses the cache
+parameters that affect it plus a `cache_version` constant (increase it whenever a code change alters the offline
+operators, since parameters alone cannot detect that), so changing unrelated parameters (e.g. load path, yield stress) reuses the cache
 while changing mesh/geometry/reference-stiffness parameters triggers recomputation.
 
 Output plots (cross-sections, load-path summary, timing breakdown, von Mises fields) are written to
-`code/output/`, created fresh each run.
+`code/output/` (created if missing but never cleared, so a PNG a run did not regenerate — e.g. von Mises fields
+with `post_process_element_stress` off — is stale from an earlier configuration). The caches are gitignored, but `code/output/` is **tracked** in git
+(and `code/output_testing/` is neither tracked nor ignored), so any run shows up as changed PNGs in
+`git status`.
 
 ## Architecture (`code/MAIN.py`, single file, organized top-to-bottom as a pipeline)
 
+`MAIN_Testing.py` is `MAIN.py` plus additions, in the same section order. Every top-level definition that exists
+in both files is **textually identical**, including the whole standard and FFT-preconditioned solver path (J2
+update, `reset_elastic_partitions`, residual, convergence, corrections, `run_interleaved_repeats`), with only
+these exceptions: the configuration constants (`matrix_hardening_modulus`, cache and output folders),
+`OnlineTimer` (which also counts P0 applications nested inside the Newton Krylov solve), `get_solvers`,
+`LoadPathResult`, `run_strain_path`, and the Main-section helpers. Keep it that way: it is a copy, not an import,
+so a change to shared logic must be made identically in both files. A quick check is to parse both files with
+`ast` and compare the source of every top-level name they share.
+
+The additions are: a Reference Lippmann-Schwinger Solver section (`ReferenceSolver`, which keeps its warm start
+between steps and is therefore built fresh for every load path by `get_solvers`), a Verification section, a
+Problem Setup section (`Problem`/`get_problem`, shared with the experiments), and a total-time cost breakdown
+that shows all operator applications as one segment.
+
 The file runs as one linear script, in this order, and later sections depend on earlier ones by data, not by
-class hierarchy — there is no object model beyond a few `NamedTuple`s (`Mesh`, `PartitionMaterials`,
-`LoadPathResult`):
+class hierarchy — there is no object model beyond a few `NamedTuple`s (`Mesh`, `PartitionMaterials`, `PlasticState`,
+`TrialState`, `LoadPathResult`):
 
 1. **Inputs** — every physical/numerical parameter is a plain module-level constant at the top of the file
    (domain size, inclusion shape/size, mesh and partition resolution, material properties, load path,
@@ -95,14 +132,15 @@ class hierarchy — there is no object model beyond a few `NamedTuple`s (`Mesh`,
    (`get_periodic_mesh`), assigns each element to a partition and a material (matrix=0, inclusion=1) via
    `get_partition_material_ids`/`is_inside_inclusion`. `get_grid_id` is the shared (i, j, k) → flat-index
    convention used throughout for elements, nodes, and partitions.
-4. **Element matrices** — standard isoparametric 8-node hex FEM: shape function derivatives at 8 Gauss points
+4. **Element matrices and assembly** — standard isoparametric 8-node hex FEM: shape function derivatives at 8 Gauss points
    (`get_shape_function_derivatives`), the strain-displacement matrix `B` (`get_B`, using the ER-2 engineering
-   strain/stress convention: shear strains are doubled, `(ε11,ε22,ε33,2ε12,2ε23,2ε13)`), and per-element
-   stiffness `K_element`.
+   strain/stress convention: shear strains are doubled, `(ε11,ε22,ε33,2ε12,2ε23,2ε13)`), per-element
+   stiffness `K_element`, and `assemble_element_blocks`, the one sparse assembly helper behind `K`, the load
+   matrices `F_macrostrain`/`F_eigenstrain` (`F_μ` of ER-24) and the partition-averaging operator `A_ε`.
 5. **Influence functions (offline)** — the expensive precomputation. `get_influence_functions` assembles the
    global stiffness `K`, solves once per macrostrain/eigenstrain load column (batched, `solve_influence_function`,
-   via a sparse LU factorization reused across right-hand sides) to get partition-average-strain response
-   matrices `E` (macrostrain → partition strain) and `P` (partition eigenstrain → partition strain) — these are
+   via a sparse LU factorization reused across right-hand sides) and applies `A_ε`, following
+   ER-24's `P = A_ε K⁻¹ F_μ`, to get partition-average-strain response matrices `E` (macrostrain → partition strain) and `P` (partition eigenstrain → partition strain) — these are
    the *actual* heterogeneous-material influence operators from the TFA relation `ε^B = E^B ε̄ + Σ_A P^{BA} μ^A`
    (see `notes/Formulation.md` Eq. ER-1). `get_P0_offset_blocks`/`get_P0_transformed` build the analogous
    influence operator `P0` for a *homogeneous reference material* on the same partition lattice, and Fourier
@@ -123,21 +161,25 @@ class hierarchy — there is no object model beyond a few `NamedTuple`s (`Mesh`,
 9. **Solvers** — `standard_richardson_iteration` (direct fixed point, correction = `-residual`) and
    `fft_preconditioned_richardson_iteration` (correction solved via the reference operator in Fourier space,
    `get_fft_correction`, rebuilt only when the set of yielding partitions changes — see
-   `get_reference_sensitivity`/`get_reference_fourier_inverse`). Both share `get_reset_state`, which evaluates
+   `get_reference_sensitivity`/`get_reference_fourier_inverse`). Both share `reset_elastic_partitions`, which evaluates
    the material update, updates non-yielding partitions' strain in closed form, and computes the actual
-   residual; this shared logic is why solver correctness parity is expected. `relaxation_factor` scales the
+   residual; this shared logic is why solver correctness parity is expected. Convergence is measured by
+   `get_relative_residual` as in `Formulation.md` section 12: the RMS tensor norm of the residual (shear
+   components weighted by 1/2, undoing the engineering doubling), divided by the imposed strain's norm but never
+   by less than `residual_strain_scale_floor`. `relaxation_factor` scales the
    correction in either solver.
 10. **Load path** — `run_strain_path` steps a prescribed macroscopic strain path (`max_macro_strain` scaled
-    linearly over `strain_increment_count` steps) through one of the two solvers, carrying plastic history
-    forward between steps; `run_interleaved_repeats` runs both solvers `timing_repeat_count` times interleaved
+    linearly over `strain_increment_count` steps) through a solver function passed in by name (`get_solvers`), carrying plastic history
+    forward between steps; `run_interleaved_repeats` runs every solver `timing_repeat_count` times interleaved
     (to average out system noise fairly) for the final timing comparison.
 11. **Post-processing** — `get_element_stress` recovers full per-element stress fields by solving one more
     (fine-mesh, CG-based) elastic problem with the converged partition eigenstrains as body-force-equivalent
     loads, only run if `post_process_element_stress` is set; used to plot fine-resolution von Mises fields
     against the coarser partition-averaged von Mises field.
-12. **Main** — wires the above into one script run: builds mesh/materials, gets cached offline operators, runs
-    interleaved solver comparisons, prints solve-time/iteration/residual agreement, and generates all plots via
-    `plots.py`.
+12. **Timing report** — picks the fastest repeat per step and sums timings over the comparable steps.
+13. **Main** — `main()` reads as an outline: build mesh/materials, get cached offline operators, run the
+    interleaved solvers, then `print_comparison`, `save_load_path_plots`, `save_von_mises_plots` and finally
+    `check_solver_agreement`.
 
 `code/plots.py` holds all matplotlib figure-generation logic (cross-section geometry plot, load-path summary
 with elastic-regime shading, timing breakdown, von Mises cross-sections) and has no solver logic of its own.

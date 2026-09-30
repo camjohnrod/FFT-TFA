@@ -1,5 +1,5 @@
 # Runs both reference solver methods in one process and checks they reach the same root.
-# Monkey-patches reference_solver_method, so it compares fixed point against Newton on identical inputs.
+# Builds one reference solver per method, so it compares fixed point against Newton on identical inputs.
 # Agreement should sit at the convergence tolerance, not at machine precision: 6.9e-07 on macroscopic stress
 # and 2.4e-06 on final plastic strain, against a 1e-6 relative residual tolerance.
 #
@@ -13,26 +13,26 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import numpy as np
 import MAIN_Testing as m
 
-L_matrix = m.get_L(m.elastic_modulus_matrix, m.poisson_ratio_matrix)
-L_inclusion = m.get_L(m.elastic_modulus_inclusion, m.poisson_ratio_inclusion)
-partition_materials = m.get_partition_materials(L_matrix, L_inclusion)
-mesh, B = m.get_periodic_mesh(), m.get_B()
-L_per_element = m.get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids)
-E, P, P0_transformed = m.get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, partition_materials.L)
-reference_L = m.get_homogenized_L(E, partition_materials.L)
-compliance = np.linalg.inv(reference_L)
-relaxation = m.get_reference_relaxation_factor(partition_materials, reference_L)
+problem = m.get_problem()
+relaxation = m.get_reference_relaxation_factor(problem.partition_materials, problem.reference_L)
 
 results = {}
 for method in ("newton", "fixed_point"):
-    m.reference_solver_method = method
-    results[method] = m.run_strain_path("reference", E, P, partition_materials, P0_transformed, compliance,
-                                        relaxation)
+    solver = m.ReferenceSolver(problem.P0_transformed, problem.reference_compliance, relaxation, method)
+    results[method] = m.run_strain_path(f"reference {method}", solver, problem.E, problem.P,
+                                        problem.partition_materials)
     print(f"{method:<12}: {results[method].iterations_per_step.sum():>6d} iterations, "
           f"{results[method].solve_time_per_step.sum():.2f} s")
 
 newton, fixed_point = results["newton"], results["fixed_point"]
-stress_scale = np.abs(fixed_point.macroscopic_stress).max()
-print(f"\nsame root? macroscopic stress   : {np.abs(newton.macroscopic_stress - fixed_point.macroscopic_stress).max() / stress_scale:.2e} relative")
-strain_scale = np.abs(fixed_point.final_plastic_strain).max()
-print(f"same root? final plastic strain : {np.abs(newton.final_plastic_strain - fixed_point.final_plastic_strain).max() / strain_scale:.2e} relative")
+step_count = min(newton.completed_step_count, fixed_point.completed_step_count)
+if step_count < m.strain_increment_count:
+    print(f"\ncompared over the {step_count} steps both methods completed; final plastic strains are from "
+          "different steps and are not compared")
+stress_scale = np.abs(fixed_point.macroscopic_stress[:step_count]).max()
+stress_difference = np.abs(newton.macroscopic_stress[:step_count] - fixed_point.macroscopic_stress[:step_count]).max()
+print(f"\nsame root? macroscopic stress   : {stress_difference / stress_scale:.2e} relative")
+if step_count == m.strain_increment_count:
+    strain_scale = np.abs(fixed_point.final_plastic_strain).max()
+    strain_difference = np.abs(newton.final_plastic_strain - fixed_point.final_plastic_strain).max()
+    print(f"same root? final plastic strain : {strain_difference / strain_scale:.2e} relative")

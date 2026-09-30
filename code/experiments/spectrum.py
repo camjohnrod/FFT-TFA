@@ -11,28 +11,20 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import numpy as np
+import scipy.linalg
 import MAIN_Testing as m
 
-L_matrix = m.get_L(m.elastic_modulus_matrix, m.poisson_ratio_matrix)
-L_inclusion = m.get_L(m.elastic_modulus_inclusion, m.poisson_ratio_inclusion)
-partition_materials = m.get_partition_materials(L_matrix, L_inclusion)
-mesh = m.get_periodic_mesh()
-B = m.get_B()
-L_per_element = m.get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids)
-E, P, P0_transformed = m.get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, partition_materials.L)
-C0 = m.get_homogenized_L(E, partition_materials.L)
+problem = m.get_problem()
+C0 = problem.reference_L
 
 print("eig(C0)       MPa:", np.round(np.linalg.eigvalsh(C0) / 1e6, 2))
-print("eig(L_matrix) MPa:", np.round(np.linalg.eigvalsh(L_matrix) / 1e6, 2))
-print("eig(L_incl)   MPa:", np.round(np.linalg.eigvalsh(L_inclusion) / 1e6, 2))
+print("eig(L_matrix) MPa:", np.round(np.linalg.eigvalsh(problem.L_matrix) / 1e6, 2))
+print("eig(L_incl)   MPa:", np.round(np.linalg.eigvalsh(problem.L_inclusion) / 1e6, 2))
 
 n = 6 * m.partition_count
-P0_offset = np.fft.ifftn(P0_transformed, axes=(0, 1)).real.reshape(n, 6)
-dense_P0 = m.get_dense_P0(P0_offset)
+dense_P0 = m.get_dense_P0(m.get_P0_offset_blocks_from_transformed(problem.P0_transformed))
 C0_M = np.kron(np.eye(m.partition_count), C0)
-L_M = np.zeros((n, n))
-for A in range(m.partition_count):
-    L_M[6*A:6*A+6, 6*A:6*A+6] = partition_materials.L[A]
+L_M = scipy.linalg.block_diag(*problem.partition_materials.L)
 
 J = np.eye(n) - dense_P0 @ (np.eye(n) - np.linalg.solve(C0_M, L_M))
 eigenvalues = np.linalg.eigvals(J)
