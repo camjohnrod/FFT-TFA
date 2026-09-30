@@ -164,10 +164,11 @@ def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name
 
 ## ------- Time per Iteration Breakdown ------- ##
 
+# One label per online time group (online_timing.online_time_groups), in the notes' symbols, then "Other". The
+# sensitivity is H_μ for the Newton Jacobians and its partition average H_μ,0 for the FFT reference.
 online_time_group_labels = [r"Material update $\mu(\varepsilon)$",
                             r"Induced strain $\mathbf{P}\mu$ or $\mathbf{P}_0\mu^*$",
-                            r"Sensitivity $\tilde{\mathbf{M}}_{\mu,0}$",
-                            r"Build $(\mathbf{I}-\mathbf{P}_0\tilde{\mathbf{M}}_{\mu,0})^{-1}$",
+                            r"Sensitivity $\mathbf{H}_\mu$", r"Build $\mathbf{M}_0^{-1}$",
                             r"Solve for $\delta\varepsilon$", "Other"]
 online_time_group_colors = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#4a3aa7', '#d3d2cc']
 time_breakdown_style = {'font.size': 13, 'axes.labelsize': 14, 'xtick.labelsize': 12, 'ytick.labelsize': 14,

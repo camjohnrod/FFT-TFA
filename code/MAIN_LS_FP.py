@@ -34,7 +34,7 @@ def main():
     print(f"inclusion volume fraction on the partition grid: {problem.partition_material_ids.mean():.4f}")
     save_cross_section_plot(problem.partition_material_ids)
     if config.verification_enabled:
-        run_verification(problem)
+        run_verification(problem, print_ls_model_error=True)
 
     ls_relaxation = get_reference_relaxation_factor(problem.partition_materials, problem.reference_L)
     stability_limit = get_reference_stability_limit(problem.partition_materials, problem.reference_L)
