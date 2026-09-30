@@ -58,7 +58,6 @@ def get_timer_overhead_fraction(solver_results, timer_overhead_per_call, step_co
 ## ------- Printed Comparison and Checks ------- ##
 
 def print_comparison(results, comparable_step_count):
-    print(f"relaxation_factor = {config.relaxation_factor}")
     compared_steps = (f"the {comparable_step_count} of {config.strain_increment_count} steps every solver completed"
                       if comparable_step_count < config.strain_increment_count
                       else f"all {config.strain_increment_count} steps")
@@ -96,6 +95,36 @@ def check_solver_agreement(results, solver_names, comparable_step_count):
               f"{comparable_step_count} of {config.strain_increment_count} steps.")
         if not passed:
             raise RuntimeError(f"{solver_name} and {reference_name} disagree on the macroscopic stress.")
+
+def check_against_saved_results(results, solver_name, saved_run_name, saved_solver_name):
+    # A solver in this entry point against the same model solved by another entry point's solver, from that one's
+    # saved results. Both solve the same equation, so their macroscopic stresses must agree to solver tolerance. The
+    # check is skipped, not failed, when there is no saved result or it was made for a different problem.
+    saved_path = config.output_folder / f"{saved_run_name}_results.npz"
+    description = f"stress agreement, {solver_name} vs {saved_solver_name} saved by {saved_run_name}"
+    if not saved_path.exists():
+        print(f"[SKIPPED] {description}: {saved_path.name} not found. Run MAIN_{saved_run_name}.py first.")
+        return
+    with np.load(saved_path) as saved:
+        changed_names = [name for name in config.problem_parameter_names
+                         if not np.array_equal(saved[f"problem/{name}"], np.asarray(getattr(config, name)))]
+        if changed_names:
+            print(f"[SKIPPED] {description}: it was saved for a different problem ({', '.join(changed_names)} "
+                  f"changed). Rerun MAIN_{saved_run_name}.py.")
+            return
+        saved_stress = saved[f"{saved_solver_name}/macroscopic_stress"]
+        saved_step_count = int(saved[f"{saved_solver_name}/completed_step_count"])
+
+    step_count = min(get_completed_step_count(results[solver_name]), saved_step_count)
+    stress = results[solver_name][-1].macroscopic_stress[:step_count]
+    stress_scale = max(np.abs(saved_stress[:step_count]).max(), np.finfo(float).tiny)
+    stress_difference = np.abs(stress - saved_stress[:step_count]).max() / stress_scale
+    passed = stress_difference <= config.solver_agreement_tolerance
+    print(f"[{'PASS' if passed else 'FAIL'}] {description}: {stress_difference:.2e} relative (tolerance "
+          f"{config.solver_agreement_tolerance:.0e}), over {step_count} of {config.strain_increment_count} steps.")
+    if not passed:
+        raise RuntimeError(f"{solver_name} disagrees with {saved_solver_name} from {saved_run_name} on the "
+                           "macroscopic stress.")
 
 ## ------- LS Model Comparison ------- ##
 

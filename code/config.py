@@ -49,8 +49,14 @@ ls_stability_safety         = 0.9
 ls_max_iterations           = 20000
 ls_divergence_limit         = 1e3
 
+# Newton-GMRES, shared by every Newton solver so they are compared at identical settings.
+newton_max_steps            = 50
+newton_krylov_tolerance     = 1e-3
+newton_krylov_restart       = 30
+
 verification_enabled        = True
 verification_tolerance      = 1e-9
+jacobian_check_tolerance    = 1e-6
 verification_max_partitions = 256
 matched_stiffness_tolerance = 1e-5
 

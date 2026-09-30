@@ -8,6 +8,7 @@
 
 import functools
 
+import config
 from load_path import run_interleaved_repeats
 from offline import get_problem
 from report import (check_solver_agreement, get_comparable_step_count, get_most_complete_solver_name,
@@ -23,6 +24,7 @@ def main():
     print(f"inclusion volume fraction on the partition grid: {problem.partition_material_ids.mean():.4f}")
     save_cross_section_plot(problem.partition_material_ids)
 
+    print(f"TFA fixed point: relaxation {config.relaxation_factor}")
     results = run_interleaved_repeats(functools.partial(get_tfa_fixed_point_solvers, problem.P0_transformed),
                                       problem.E, problem.P, problem.partition_materials)
     comparable_step_count = get_comparable_step_count(results)
