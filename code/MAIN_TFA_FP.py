@@ -8,19 +8,14 @@
 
 import functools
 
-from load_path import Solver, run_interleaved_repeats
+from load_path import run_interleaved_repeats
 from offline import get_problem
 from report import (check_solver_agreement, get_comparable_step_count, get_most_complete_solver_name,
                     print_comparison, print_independent_check, remove_old_outputs, save_cross_section_plot,
                     save_load_path_plots, save_results)
-from tfa_solvers import fft_preconditioned_richardson_iteration, get_actual_residual, standard_richardson_iteration
+from tfa_solvers import get_tfa_fixed_point_solvers
 
 run_name = "TFA_FP"
-
-def get_solvers(P0_transformed):
-    return {"TFA Standard FP": Solver(standard_richardson_iteration, get_actual_residual),
-            "TFA FFT FP": Solver(functools.partial(fft_preconditioned_richardson_iteration,
-                                                   P0_transformed=P0_transformed), get_actual_residual)}
 
 def main():
     remove_old_outputs(run_name)
@@ -28,8 +23,8 @@ def main():
     print(f"inclusion volume fraction on the partition grid: {problem.partition_material_ids.mean():.4f}")
     save_cross_section_plot(problem.partition_material_ids)
 
-    results = run_interleaved_repeats(functools.partial(get_solvers, problem.P0_transformed), problem.E, problem.P,
-                                      problem.partition_materials)
+    results = run_interleaved_repeats(functools.partial(get_tfa_fixed_point_solvers, problem.P0_transformed),
+                                      problem.E, problem.P, problem.partition_materials)
     comparable_step_count = get_comparable_step_count(results)
     print_comparison(results, comparable_step_count)
     print_independent_check(results)

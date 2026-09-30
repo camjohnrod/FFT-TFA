@@ -19,6 +19,7 @@ deviatoric_stress_component_styles = [('red', 'o', r"$\bar{\mathbf{S}}_{11}$"),
                                       ('green', '^', r"$\bar{\mathbf{S}}_{33}$")]
 # One colour per solver, in the order the solvers are given. Their legends are stacked beside the iterations panel.
 solver_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+iterations_log_axis_ratio = 20
 
 class SolverSteps(NamedTuple):
     iterations_per_step: np.ndarray
@@ -141,8 +142,15 @@ def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name
                                 solver_steps.completed_step_count, color)
 
         iterations_axis.set_ylabel("Iterations")
-        iterations_axis.set_ylim(bottom=0)
-        iterations_axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+        # Counts more than an order of magnitude apart, such as the LS fixed point against TFA, share a log axis so
+        # the smaller ones stay readable. Otherwise the axis is linear from zero.
+        largest_counts = [solver_steps.iterations_per_step.max() for solver_steps in steps_per_solver.values()]
+        if max(largest_counts) > iterations_log_axis_ratio * max(min(largest_counts), 1):
+            iterations_axis.set_yscale('log')
+            iterations_axis.set_ylim(bottom=0.8)
+        else:
+            iterations_axis.set_ylim(bottom=0)
+            iterations_axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
         time_per_iteration_axis.set_ylabel("Time per iteration (ms)")
         time_per_iteration_axis.set_ylim(bottom=0)
         time_per_iteration_axis.set_xlabel("Load step", labelpad=12)
@@ -156,7 +164,8 @@ def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name
 
 ## ------- Time per Iteration Breakdown ------- ##
 
-online_time_group_labels = [r"Material update $\mu(\varepsilon)$", r"Induced strain $\mathbf{P}\mu$",
+online_time_group_labels = [r"Material update $\mu(\varepsilon)$",
+                            r"Induced strain $\mathbf{P}\mu$ or $\mathbf{P}_0\mu^*$",
                             r"Sensitivity $\tilde{\mathbf{M}}_{\mu,0}$",
                             r"Build $(\mathbf{I}-\mathbf{P}_0\tilde{\mathbf{M}}_{\mu,0})^{-1}$",
                             r"Solve for $\delta\varepsilon$", "Other"]

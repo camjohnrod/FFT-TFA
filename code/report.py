@@ -79,7 +79,7 @@ def print_independent_check(results):
     worst_residual = max(result.recomputed_residual_per_step[:result.completed_step_count].max()
                          for solver_results in results.values() for result in solver_results)
     print(f"[PASS] independent residual check: every completed step of every run is converged when its residual is "
-          f"recomputed from scratch (worst {worst_residual:.2e}, tolerance {config.fixed_point_tolerance:.0e}).")
+          f"recomputed from scratch (worst {worst_residual:.4e}, tolerance {config.fixed_point_tolerance:.0e}).")
 
 def check_solver_agreement(results, solver_names, comparable_step_count):
     # These solvers solve the same equations, so each one's macroscopic stress must match the first one's to within
@@ -96,6 +96,34 @@ def check_solver_agreement(results, solver_names, comparable_step_count):
               f"{comparable_step_count} of {config.strain_increment_count} steps.")
         if not passed:
             raise RuntimeError(f"{solver_name} and {reference_name} disagree on the macroscopic stress.")
+
+## ------- LS Model Comparison ------- ##
+
+def get_model_difference_per_step(results, actual_solver_name, reference_solver_name, step_count):
+    # The LS model's macroscopic stress against the actual E/P model's, per step, relative to the largest
+    # actual-model stress. This is modelling error, not solver error.
+    actual_stress = results[actual_solver_name][-1].macroscopic_stress[:step_count]
+    reference_stress = results[reference_solver_name][-1].macroscopic_stress[:step_count]
+    stress_scale = max(np.abs(actual_stress).max(), np.finfo(float).tiny)
+    return np.abs(reference_stress - actual_stress).max(axis=1) / stress_scale
+
+def print_model_difference(results, actual_solver_name, reference_solver_name, comparable_step_count):
+    model_difference = get_model_difference_per_step(results, actual_solver_name, reference_solver_name,
+                                                     comparable_step_count).max()
+    print(f"model discrepancy, different models ({actual_solver_name} actual E/P vs {reference_solver_name}): "
+          f"{model_difference:.2e} relative. This is a modelling difference, not a solver error.")
+
+def check_matched_stiffness(results, actual_solver_name, reference_solver_name, comparable_step_count):
+    # With matched phase stiffness the reference and actual E/P models are the same equation, so here, and only
+    # here, the reference solver must reproduce actual E/P to solver tolerance.
+    model_difference = get_model_difference_per_step(results, actual_solver_name, reference_solver_name,
+                                                     comparable_step_count).max()
+    passed = model_difference <= config.matched_stiffness_tolerance
+    print(f"[{'PASS' if passed else 'FAIL'}] matched-stiffness control: reference vs actual E/P "
+          f"{model_difference:.2e} relative (tolerance {config.matched_stiffness_tolerance:.0e}).")
+    if not passed:
+        raise RuntimeError("matched-stiffness control failed: the reference model must reproduce actual E/P to "
+                           "solver tolerance.")
 
 ## ------- Output Files ------- ##
 

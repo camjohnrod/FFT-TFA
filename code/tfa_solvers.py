@@ -1,10 +1,12 @@
 # The online solvers for the actual E/P model (ER-4): standard and FFT-preconditioned fixed-point iteration.
 
+import functools
 import numpy as np
 
 import config
 from convergence import SolverDidNotConverge, StepResult, get_relative_residual, has_converged
 from lattice_fft import apply_on_partition_lattice
+from load_path import Solver
 from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain
 from online_timing import timed_online
 
@@ -137,3 +139,9 @@ def fft_preconditioned_richardson_iteration(E, P, macro_strain, partition_materi
         strain = strain + config.relaxation_factor * get_fft_correction(reference_fourier_inverse, residual)
 
     return StepResult(strain, stress, plastic_state, np.array(residual_history))
+
+def get_tfa_fixed_point_solvers(P0_transformed):
+    # The two fixed-point solvers for actual E/P, by the names every entry point and output file uses.
+    return {"TFA Standard FP": Solver(standard_richardson_iteration, get_actual_residual),
+            "TFA FFT FP": Solver(functools.partial(fft_preconditioned_richardson_iteration,
+                                                   P0_transformed=P0_transformed), get_actual_residual)}

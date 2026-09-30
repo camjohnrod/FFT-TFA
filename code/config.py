@@ -24,6 +24,9 @@ inclusion_yield_stress      = np.inf
 matrix_yield_stress         = 1.0e6
 inclusion_hardening_modulus = 0.0
 matrix_hardening_modulus    = 10e6
+# True gives the inclusion the matrix's elastic stiffness. The TFA and LS models are then the same equation, which is
+# the regression gate for the LS solvers.
+matched_stiffness_control   = False
 
 # max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
 # Alternative load paths:
@@ -39,6 +42,17 @@ residual_strain_scale_floor = 1e-4
 relaxation_factor           = 1.0
 solver_agreement_tolerance  = 1e-4
 independent_check_round_off = 1e-12
+
+# LS fixed point. None picks the relaxation from the stiffness-ratio bounds, times the safety factor.
+ls_relaxation_factor        = None
+ls_stability_safety         = 0.9
+ls_max_iterations           = 20000
+ls_divergence_limit         = 1e3
+
+verification_enabled        = True
+verification_tolerance      = 1e-9
+verification_max_partitions = 256
+matched_stiffness_tolerance = 1e-5
 
 timing_repeat_count         = 5
 
@@ -90,8 +104,8 @@ problem_parameter_names = ("domain_side_length", "inclusion_shape", "inclusion_s
                            "element_number_per_side", "element_number_along_z", "partition_number_per_side",
                            "elastic_modulus_inclusion", "elastic_modulus_matrix", "poisson_ratio_inclusion",
                            "poisson_ratio_matrix", "inclusion_yield_stress", "matrix_yield_stress",
-                           "inclusion_hardening_modulus", "matrix_hardening_modulus", "max_macro_strain",
-                           "strain_increment_count")
+                           "inclusion_hardening_modulus", "matrix_hardening_modulus", "matched_stiffness_control",
+                           "max_macro_strain", "strain_increment_count")
 
 # Shared by every entry point. Cache files are named by a hash of the parameters that produced them, and output files
 # are prefixed with the entry point's run name.

@@ -12,6 +12,11 @@ def get_P0_transformed(P0_offset_blocks):
                                                  6, 6)
     return np.fft.rfftn(P0_offset_lattice, axes=(0, 1))
 
+def get_P0_offset_blocks_from_transformed(P0_transformed):
+    # The inverse of get_P0_transformed: the real-space kernel P0[offset], one 6 x 6 block per lattice offset.
+    lattice_shape = (config.partition_number_per_side, config.partition_number_per_side)
+    return np.fft.irfftn(P0_transformed, s=lattice_shape, axes=(0, 1)).reshape(6 * config.partition_count, 6)
+
 def apply_on_partition_lattice(fourier_blocks, partition_field):
     # Applies a translation-invariant operator, given by its 6 × 6 block at every lattice frequency, to a
     # partition-stacked field: transform the field, multiply frequency by frequency, transform back (ER-14a).

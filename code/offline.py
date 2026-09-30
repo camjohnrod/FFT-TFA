@@ -322,9 +322,14 @@ def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_p
 class Problem(NamedTuple):
     partition_material_ids: np.ndarray
     partition_materials: PartitionMaterials
+    mesh: Mesh
+    B: np.ndarray
     E: np.ndarray
     P: np.ndarray
     P0_transformed: np.ndarray
+    # The homogeneous reference stiffness C0 (the homogenized stiffness of the actual composite) and its inverse.
+    reference_L: np.ndarray
+    reference_compliance: np.ndarray
 
 def get_problem():
     # Everything an entry point needs, built from config, with the offline operators taken from the cache when it
@@ -332,9 +337,15 @@ def get_problem():
     partition_material_ids = get_partition_material_ids()
     L_matrix = get_L(config.elastic_modulus_matrix, config.poisson_ratio_matrix)
     L_inclusion = get_L(config.elastic_modulus_inclusion, config.poisson_ratio_inclusion)
+    if config.matched_stiffness_control:
+        L_inclusion = L_matrix
+        print("matched-stiffness control: the inclusion elastic stiffness is overridden to the matrix value, which "
+              "makes the actual E/P and reference models the same equation. Yield properties still differ.")
     partition_materials = get_partition_materials(L_matrix, L_inclusion, partition_material_ids)
     mesh = get_periodic_mesh(partition_material_ids)
     B = get_B()
     L_per_element = get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids)
     E, P, P0_transformed = get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, partition_materials.L)
-    return Problem(partition_material_ids, partition_materials, E, P, P0_transformed)
+    reference_L = get_homogenized_L(E, partition_materials.L)
+    return Problem(partition_material_ids, partition_materials, mesh, B, E, P, P0_transformed, reference_L,
+                   np.linalg.inv(reference_L))
