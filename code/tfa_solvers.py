@@ -3,7 +3,7 @@
 import numpy as np
 
 import config
-from convergence import SolverDidNotConverge, get_relative_residual, has_converged
+from convergence import SolverDidNotConverge, StepResult, get_relative_residual, has_converged
 from lattice_fft import apply_on_partition_lattice
 from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain
 from online_timing import timed_online
@@ -59,6 +59,14 @@ def reset_elastic_partitions(strain, b, P, induced_strain_history, partition_mat
     residual = strain - b - induced_strain
     return strain, plastic_state, stress, residual
 
+def get_actual_residual(E, P, macro_strain, strain, partition_materials, plastic_history):
+    # ER-4 recomputed from scratch at a converged strain, for the independent check in run_strain_path: a fresh
+    # material update and the full product P μ, sharing none of the solvers' bookkeeping (the elastic reset, the
+    # incremental P products, the reused history product).
+    b = (E @ macro_strain).reshape(config.partition_count, 6)
+    plastic_state, _ = get_plastic_eigenstrain(strain, partition_materials, plastic_history)
+    return strain - b - get_induced_strain(P, plastic_state.plastic_strain)
+
 @timed_online("correction_solve")
 def get_standard_correction(residual):
     return -residual
@@ -79,7 +87,7 @@ def standard_richardson_iteration(E, P, macro_strain, partition_materials, plast
 
         strain = strain + config.relaxation_factor * get_standard_correction(residual)
 
-    return stress, plastic_state, np.array(residual_history)
+    return StepResult(strain, stress, plastic_state, np.array(residual_history))
 
 @timed_online("reference_sensitivity")
 def get_reference_sensitivity(strain, partition_materials, plastic_history):
@@ -128,4 +136,4 @@ def fft_preconditioned_richardson_iteration(E, P, macro_strain, partition_materi
 
         strain = strain + config.relaxation_factor * get_fft_correction(reference_fourier_inverse, residual)
 
-    return stress, plastic_state, np.array(residual_history)
+    return StepResult(strain, stress, plastic_state, np.array(residual_history))

@@ -1,13 +1,24 @@
-# The residual norm and convergence test every solver uses, and the ways a load step can fail.
+# The residual norm and convergence test every solver uses, what a solver returns for a converged load step, and
+# the ways a load step can fail.
 
+from typing import NamedTuple
 import numpy as np
 
 import config
+from material import PlasticState
+
+class StepResult(NamedTuple):
+    # A converged load step. The strain is the converged partition strain, at which run_strain_path recomputes the
+    # model's residual from scratch as an independent check.
+    strain: np.ndarray
+    stress: np.ndarray
+    plastic_state: PlasticState
+    residual_history: np.ndarray
 
 class LoadPathAbandoned(RuntimeError):
     # A load step that cannot be solved. run_strain_path catches only this type and keeps the steps before it, so
-    # genuine bugs, such as the online timer's nesting guard or a failed conjugate gradient in post-processing,
-    # still stop the run.
+    # genuine bugs, such as the online timer's nesting guard or a failed independent residual check, still stop
+    # the run.
     pass
 
 class SolverDidNotConverge(LoadPathAbandoned):

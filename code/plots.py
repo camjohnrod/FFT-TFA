@@ -17,9 +17,8 @@ load_path_summary_figure_size = (10, 10)
 deviatoric_stress_component_styles = [('red', 'o', r"$\bar{\mathbf{S}}_{11}$"),
                                       ('blue', 's', r"$\bar{\mathbf{S}}_{22}$"),
                                       ('green', '^', r"$\bar{\mathbf{S}}_{33}$")]
-# One entry per solver, in the order the solvers are given; each legend sits beside the iterations panel.
-solver_colors = ['tab:blue', 'tab:orange']
-solver_legend_placements = [('lower left', 0.52), ('upper left', 0.48)]
+# One colour per solver, in the order the solvers are given. Their legends are stacked beside the iterations panel.
+solver_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
 
 class SolverSteps(NamedTuple):
     iterations_per_step: np.ndarray
@@ -32,15 +31,15 @@ def get_applied_strain_description(max_macro_strain, strain_increment_count):
     component_lines = [", ".join(nonzero_components[start:start + 3]) for start in range(0, len(nonzero_components), 3)]
     return "\n".join([f"Applied Strain ({strain_increment_count} steps)"] + component_lines)
 
-def shade_elastic_steps(axis, load_steps, iterations_per_step):
-    for load_step in load_steps[iterations_per_step == 1]:
+def shade_elastic_steps(axis, load_steps, elastic_steps):
+    for load_step in load_steps[elastic_steps]:
         axis.axvspan(load_step - 0.5, load_step + 0.5, color='0.9', linewidth=0, zorder=0)
 
-def label_elastic_steps(axis, load_steps, iterations_per_step, max_font_size=13, min_font_size=8, band_fill_fraction=0.85):
-    elastic_steps = load_steps[iterations_per_step == 1]
-    if len(elastic_steps) == 0:
+def label_elastic_steps(axis, load_steps, elastic_steps, max_font_size=13, min_font_size=8, band_fill_fraction=0.85):
+    elastic_load_steps = load_steps[elastic_steps]
+    if len(elastic_load_steps) == 0:
         return
-    band_left, band_right = elastic_steps[0] - 0.5, elastic_steps[-1] + 0.5
+    band_left, band_right = elastic_load_steps[0] - 0.5, elastic_load_steps[-1] + 0.5
     label = axis.annotate("Elastic\nregime", xy=((band_left + band_right) / 2, 1), xycoords=axis.get_xaxis_transform(),
                           xytext=(0, -8), textcoords='offset points', ha='center', va='top', color='0.4',
                           fontsize=max_font_size, linespacing=1.1)
@@ -64,7 +63,7 @@ def label_elastic_steps(axis, load_steps, iterations_per_step, max_font_size=13,
         label.set_position((4, -8))
         label.set_fontsize(min_font_size + 2)
 
-def add_solver_legend(axis, line, solver_name, solver_steps, location, vertical_anchor):
+def add_solver_legend(axis, line, solver_name, solver_steps, vertical_anchor):
     no_line = matplotlib.lines.Line2D([], [], linestyle='none')
     totals_label = (f"  {solver_steps.iterations_per_step.sum()} iterations,\n"
                     f"  {solver_steps.solve_time_per_step.sum():.2f} s total time")
@@ -72,7 +71,7 @@ def add_solver_legend(axis, line, solver_name, solver_steps, location, vertical_
         totals_label += f"\n  (stopped at step {solver_steps.completed_step_count + 1})"
     solver_legend = matplotlib.legend.Legend(axis, [line, no_line], [f"{solver_name}:", totals_label],
                                              labelspacing=0.4, handlelength=1.5, frameon=False,
-                                             loc=location, bbox_to_anchor=(1.01, vertical_anchor))
+                                             loc='center left', bbox_to_anchor=(1.01, vertical_anchor))
     solver_name_text, totals_text = solver_legend.get_texts()
     solver_name_text.set_fontweight('bold')
     solver_name_text.set_fontsize(15)
@@ -96,9 +95,11 @@ def get_time_per_iteration_ms(solver_steps):
                                      / solver_steps.iterations_per_step[solved])
     return time_per_iteration_ms
 
-def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name, steps_per_solver, title, plot_path):
+def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name, steps_per_solver, elastic_steps,
+                           title, plot_path):
     # The stress panel shows the solver named stress_solver_name; the iteration and timing panels show every solver
-    # in steps_per_solver, a dict from solver name to SolverSteps.
+    # in steps_per_solver, a dict from solver name to SolverSteps. elastic_steps marks the steps where no partition
+    # yielded, which are shaded.
     stress_solver_steps = steps_per_solver[stress_solver_name]
     strain_increment_count = len(stress_solver_steps.iterations_per_step)
     load_steps = np.arange(1, strain_increment_count + 1)
@@ -112,7 +113,7 @@ def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name
                              textcoords='offset points', ha='center', va='bottom',
                              fontsize=load_path_summary_style['axes.titlesize'])
         for axis in (stress_axis, iterations_axis, time_per_iteration_axis):
-            shade_elastic_steps(axis, load_steps, stress_solver_steps.iterations_per_step)
+            shade_elastic_steps(axis, load_steps, elastic_steps)
 
         stress_step_count = stress_solver_steps.completed_step_count
         solved_stress = macroscopic_deviatoric_stress_MPa[:stress_step_count]
@@ -122,14 +123,15 @@ def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name
         stress_axis.legend(loc='center left', bbox_to_anchor=(1.01, 0.5), frameon=False)
         stress_axis.set_ylabel("Deviatoric stress (MPa)")
 
-        for (solver_name, solver_steps), color, (legend_location, legend_anchor) in zip(
-                steps_per_solver.items(), solver_colors, solver_legend_placements):
+        for solver_index, (solver_name, solver_steps) in enumerate(steps_per_solver.items()):
+            color = solver_colors[solver_index]
+            legend_anchor = 1 - (solver_index + 0.5) / len(steps_per_solver)
             solved_steps = load_steps[:solver_steps.completed_step_count]
             time_per_iteration_ms = get_time_per_iteration_ms(solver_steps)
 
             line, = iterations_axis.step(solved_steps, solver_steps.iterations_per_step[:len(solved_steps)],
                                          where='mid', color=color)
-            add_solver_legend(iterations_axis, line, solver_name, solver_steps, legend_location, legend_anchor)
+            add_solver_legend(iterations_axis, line, solver_name, solver_steps, legend_anchor)
             mark_solver_failure(iterations_axis, load_steps, solver_steps.iterations_per_step,
                                 solver_steps.completed_step_count, color)
 
@@ -146,7 +148,7 @@ def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name
         time_per_iteration_axis.set_xlabel("Load step", labelpad=12)
         time_per_iteration_axis.set_xlim(0.5, strain_increment_count + 0.5)
         figure.align_ylabels()
-        label_elastic_steps(stress_axis, load_steps, stress_solver_steps.iterations_per_step)
+        label_elastic_steps(stress_axis, load_steps, elastic_steps)
 
         figure.savefig(plot_path)
     plt.close(figure)
@@ -203,7 +205,6 @@ def plot_time_per_iteration_breakdown(time_per_iteration_per_group_ms_per_solver
 ## ------- Cross Sections ------- ##
 
 cross_section_figure_size = (5, 5)
-von_mises_cross_section_figure_size = (6, 5)
 
 def draw_element_and_partition_edges(axis, element_number_per_side, partition_number_per_side):
     element_edges = np.linspace(0, 1, element_number_per_side + 1)
@@ -225,16 +226,3 @@ def plot_cross_section(cross_section_material_ids, element_number_per_side, plot
     figure.savefig(plot_path)
     plt.close(figure)
     print(f"cross section plot saved to {plot_path}")
-
-def plot_von_mises_cross_section(cross_section_von_mises_stress_MPa, element_number_per_side, partition_number_per_side,
-                                 min_stress_MPa, max_stress_MPa, plot_path):
-    figure, axis = plt.subplots(figsize=von_mises_cross_section_figure_size, layout='constrained')
-    image = axis.imshow(cross_section_von_mises_stress_MPa, cmap='jet', vmin=min_stress_MPa, vmax=max_stress_MPa,
-                        origin='lower', extent=(0, 1, 0, 1))
-    figure.colorbar(image, ax=axis, extend='both', label="von Mises stress (MPa)")
-    draw_element_and_partition_edges(axis, element_number_per_side, partition_number_per_side)
-    axis.set_axis_off()
-
-    figure.savefig(plot_path)
-    plt.close(figure)
-    print(f"von Mises cross section plot saved to {plot_path}")

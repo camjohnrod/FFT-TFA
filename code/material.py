@@ -32,9 +32,6 @@ def get_deviatoric_stress(stress):
 def get_equivalent_stress(deviatoric_stress):
     return np.sqrt(1.5 * np.sum(deviatoric_stress[:, :3]**2, axis=1) + 3 * np.sum(deviatoric_stress[:, 3:]**2, axis=1))
 
-def get_von_mises_stress(stress):
-    return get_equivalent_stress(get_deviatoric_stress(stress))
-
 def get_flow_stress(partition_materials, accumulated_plastic_strain):
     return partition_materials.yield_stress + partition_materials.hardening_modulus * accumulated_plastic_strain
 

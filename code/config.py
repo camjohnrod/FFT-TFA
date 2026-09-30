@@ -38,11 +38,9 @@ divergence_residual_limit   = 1.0
 residual_strain_scale_floor = 1e-4
 relaxation_factor           = 1.0
 solver_agreement_tolerance  = 1e-4
+independent_check_round_off = 1e-12
 
 timing_repeat_count         = 5
-post_process_element_stress = True
-von_mises_plot_min_stress   = 1.0e6
-von_mises_plot_max_stress   = 3.0e6
 
 ## ------- Calculated Values and Checks ------- ##
 
@@ -86,5 +84,16 @@ elif inclusion_shape == "circle":
 else:
     raise ValueError(f"inclusion_shape must be \"square\" or \"circle\". Got {inclusion_shape!r}.")
 
+# The inputs that define the physical problem and its load path. They are saved with every run's results, and results
+# from two runs are only compared when all of these match.
+problem_parameter_names = ("domain_side_length", "inclusion_shape", "inclusion_side_length", "inclusion_radius",
+                           "element_number_per_side", "element_number_along_z", "partition_number_per_side",
+                           "elastic_modulus_inclusion", "elastic_modulus_matrix", "poisson_ratio_inclusion",
+                           "poisson_ratio_matrix", "inclusion_yield_stress", "matrix_yield_stress",
+                           "inclusion_hardening_modulus", "matrix_hardening_modulus", "max_macro_strain",
+                           "strain_increment_count")
+
+# Shared by every entry point. Cache files are named by a hash of the parameters that produced them, and output files
+# are prefixed with the entry point's run name.
 cache_folder = pathlib.Path(__file__).parent / "cache"
 output_folder = pathlib.Path(__file__).parent / "output"

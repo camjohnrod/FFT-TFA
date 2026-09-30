@@ -14,6 +14,14 @@ class OnlineTimer:
     def reset(self):
         self.time_per_group = [0.0] * len(online_time_groups)
         self.calls_per_group = [0] * len(online_time_groups)
+        # Operator applications made inside another group, which only a Newton solver's Krylov solve does. They are
+        # counted and timed separately so the time breakdown can show all operator work as one segment.
+        self.nested_operator_applications = 0
+        self.nested_operator_time_per_group = [0.0] * len(online_time_groups)
+
+    def record_nested_operator_application(self, elapsed_time):
+        self.nested_operator_applications += 1
+        self.nested_operator_time_per_group[online_time_groups.index(self.open_group)] += elapsed_time
 
 online_timer = OnlineTimer()
 

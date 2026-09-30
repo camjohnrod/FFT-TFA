@@ -1,6 +1,7 @@
 # Offline setup: the periodic hexahedral mesh and its materials, the 8-node element matrices, the influence
 # functions E and P of the actual composite and P0 of the homogeneous reference, and their cache.
 
+import hashlib
 import sys
 import time
 from typing import NamedTuple
@@ -244,6 +245,16 @@ def get_P0_offset_blocks(B, reference_L_per_element, mesh, A):
 # Increase whenever a code change alters the offline operators, so caches made by the old code are recomputed.
 cache_version = 1
 
+def get_cache_path(kind, parameters):
+    # One file per parameter set, so switching between configurations or entry points reuses each one's operators
+    # instead of overwriting a single file. The parameters are also stored in the file and checked on load.
+    digest = hashlib.sha256()
+    for name in sorted(parameters):
+        value = np.asarray(parameters[name])
+        digest.update(f"{name}:{value.dtype.str}:{value.shape}:".encode())
+        digest.update(value.tobytes())
+    return config.cache_folder / f"{kind}_{digest.hexdigest()[:12]}.npz"
+
 def load_cache(cache_path, parameters):
     if not cache_path.exists():
         print(f"{cache_path.name}: no cache found, computing.")
@@ -263,7 +274,6 @@ def save_cache(cache_path, parameters, **arrays):
 def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_partition):
     A = get_partition_averaging_operator(B, mesh.element_nodes, mesh.element_partition_ids)
 
-    E_P_cache_path = config.cache_folder / "E_P.npz"
     E_P_parameters = {"cache_version": cache_version,
                       "domain_side_length": config.domain_side_length,
                       "inclusion_shape": config.inclusion_shape,
@@ -276,6 +286,7 @@ def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_p
         E_P_parameters["inclusion_side_length"] = config.inclusion_side_length
     else:
         E_P_parameters["inclusion_radius"] = config.inclusion_radius
+    E_P_cache_path = get_cache_path("E_P", E_P_parameters)
     cached_E_P = load_cache(E_P_cache_path, E_P_parameters)
     if cached_E_P is None:
         E, P = get_influence_functions(B, L_per_element, mesh, A)
@@ -286,13 +297,13 @@ def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_p
     reference_L = get_homogenized_L(E, L_per_partition)
     reference_L_per_element = np.tile(reference_L, (config.element_count, 1, 1))
 
-    P0_cache_path = config.cache_folder / "P0_offset_blocks.npz"
     P0_parameters = {"cache_version": cache_version,
                      "domain_side_length": config.domain_side_length,
                      "element_number_per_side": config.element_number_per_side,
                      "element_number_along_z": config.element_number_along_z,
                      "partition_number_per_side": config.partition_number_per_side,
                      "reference_L": reference_L}
+    P0_cache_path = get_cache_path("P0_offset_blocks", P0_parameters)
     cached_P0 = load_cache(P0_cache_path, P0_parameters)
     if cached_P0 is None:
         start_time = time.perf_counter()
@@ -305,3 +316,25 @@ def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_p
     # Column-major, so the columns of a run of consecutive partitions are contiguous and the induced strain can
     # read just the yielding partitions' columns without copying them (get_induced_strain_increment).
     return E, np.asfortranarray(P), get_P0_transformed(P0_offset_blocks)
+
+## ------- Problem Setup ------- ##
+
+class Problem(NamedTuple):
+    partition_material_ids: np.ndarray
+    partition_materials: PartitionMaterials
+    E: np.ndarray
+    P: np.ndarray
+    P0_transformed: np.ndarray
+
+def get_problem():
+    # Everything an entry point needs, built from config, with the offline operators taken from the cache when it
+    # matches.
+    partition_material_ids = get_partition_material_ids()
+    L_matrix = get_L(config.elastic_modulus_matrix, config.poisson_ratio_matrix)
+    L_inclusion = get_L(config.elastic_modulus_inclusion, config.poisson_ratio_inclusion)
+    partition_materials = get_partition_materials(L_matrix, L_inclusion, partition_material_ids)
+    mesh = get_periodic_mesh(partition_material_ids)
+    B = get_B()
+    L_per_element = get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids)
+    E, P, P0_transformed = get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, partition_materials.L)
+    return Problem(partition_material_ids, partition_materials, E, P, P0_transformed)
