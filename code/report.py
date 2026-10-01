@@ -6,7 +6,7 @@ import numpy as np
 
 import config
 import plots
-from material import get_deviatoric_stress
+from material import get_deviatoric_stress, get_equivalent_stress
 from online_timing import get_online_timer_overhead_per_call, online_time_groups
 
 ## ------- Timing Report ------- ##
@@ -106,8 +106,10 @@ def check_against_saved_results(results, solver_name, saved_run_name, saved_solv
         print(f"[SKIPPED] {description}: {saved_path.name} not found. Run MAIN_{saved_run_name}.py first.")
         return
     with np.load(saved_path) as saved:
+        # A parameter missing from the file was added after it was saved, so it counts as changed.
         changed_names = [name for name in config.problem_parameter_names
-                         if not np.array_equal(saved[f"problem/{name}"], np.asarray(getattr(config, name)))]
+                         if f"problem/{name}" not in saved.files
+                         or not np.array_equal(saved[f"problem/{name}"], np.asarray(getattr(config, name)))]
         if changed_names:
             print(f"[SKIPPED] {description}: it was saved for a different problem ({', '.join(changed_names)} "
                   f"changed). Rerun MAIN_{saved_run_name}.py.")
@@ -183,9 +185,17 @@ def save_cross_section_plot(partition_material_ids):
         partition_material_ids.reshape(config.partition_number_per_side, config.partition_number_per_side),
         config.element_number_per_side, config.output_folder / "cross_section.png")
 
-def get_most_complete_solver_name(results):
-    # The solver that got furthest along the load path, whose stresses are plotted. The first listed wins a tie.
-    return max(results, key=lambda solver_name: get_completed_step_count(results[solver_name]))
+def save_von_mises_stress_plot(results, solver_names, partition_material_ids, run_name):
+    # At the last step every solver shown completed, so the maps compare the same load.
+    step_count = min(get_completed_step_count(results[solver_name]) for solver_name in solver_names)
+    grid_shape = (config.partition_number_per_side, config.partition_number_per_side)
+    plots.plot_von_mises_stress(
+        {solver_name: get_equivalent_stress(get_deviatoric_stress(
+            results[solver_name][-1].partition_stress_per_step[step_count - 1])).reshape(grid_shape) / 1e6
+         for solver_name in solver_names},
+        partition_material_ids.reshape(grid_shape), config.element_number_per_side, step_count,
+        config.strain_increment_count, config.von_mises_min_MPa, config.von_mises_max_MPa,
+        config.output_folder / f"{run_name}_von_mises_stress.png")
 
 def get_elastic_steps(result):
     # Steps where no partition yielded. Steps past a stopped solver's last are not elastic, only unsolved.
@@ -198,12 +208,15 @@ def get_solver_steps(solver_results):
                              solve_time_per_step=get_fastest_repeat_per_step(solver_results, "solve_time_per_step"),
                              completed_step_count=get_completed_step_count(solver_results))
 
-def save_load_path_plots(results, comparable_step_count, stress_solver_name, run_name):
-    stress_result = results[stress_solver_name][-1]
+def save_load_path_plots(results, comparable_step_count, reference_solver_name, new_solver_name, run_name):
+    # Stresses are plotted for the reference and the method being tested; the elastic steps shaded are the
+    # reference's, since the LS model can yield at different steps from TFA.
     plots.plot_load_path_summary(
-        get_deviatoric_stress(stress_result.macroscopic_stress) / 1e6, stress_solver_name,
+        {solver_name: get_deviatoric_stress(results[solver_name][-1].macroscopic_stress) / 1e6
+         for solver_name in (reference_solver_name, new_solver_name)},
+        reference_solver_name, new_solver_name,
         {solver_name: get_solver_steps(solver_results) for solver_name, solver_results in results.items()},
-        get_elastic_steps(stress_result),
+        get_elastic_steps(results[reference_solver_name][-1]),
         plots.get_applied_strain_description(config.max_macro_strain, config.strain_increment_count),
         config.output_folder / f"{run_name}_load_path_summary.png")
     plots.plot_time_per_iteration_breakdown(

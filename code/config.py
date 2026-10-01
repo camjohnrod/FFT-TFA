@@ -13,7 +13,7 @@ inclusion_shape             = "circle"
 inclusion_side_length       = (5/9) * 1e-3
 inclusion_radius            = 0.35e-3
 element_number_per_side     = 75
-element_number_along_z      = 5
+element_number_along_z      = 3
 partition_number_per_side   = 25
 
 # Materials. matched_stiffness_control = True gives the inclusion the matrix's elastic stiffness; the TFA and LS models
@@ -28,10 +28,18 @@ inclusion_hardening_modulus = 0.0
 matrix_hardening_modulus    = 10e6
 matched_stiffness_control   = False
 
+# Reference medium: the homogeneous stiffness C0 from which the P0 kernel is built. It is part of the LS model, so it
+# changes the LS answer; for TFA it only preconditions the FFT solvers, changing their convergence, not their answer.
+#   "homogenized"  the homogenized stiffness of the actual composite, <L E> over the partitions
+#   "voigt"        the Voigt average <L> over the partitions
+#   "matrix"       the matrix stiffness
+reference_stiffness         = "homogenized"
+
 # Load path: max_macro_strain reached linearly over strain_increment_count steps. Alternatives:
 #   np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])      uniaxial
-#   np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])
-max_macro_strain            = np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])
+#   np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])  mixed mode tension
+#   np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])  mixed mode with shear
+max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
 strain_increment_count      = 60
 
 # Convergence, shared by every solver: relative residual (Formulation.md section 12) below convergence_tolerance.
@@ -65,11 +73,18 @@ matched_stiffness_tolerance = 1e-5
 
 timing_repeat_count         = 5
 
+# Colour-scale limits (MPa) of the von Mises stress maps, so maps from different runs can share a scale. None takes
+# that limit from the plotted maps. The difference map always keeps its own scale, centred on zero.
+von_mises_min_MPa           = None
+von_mises_max_MPa           = None
+
 ## ------- Calculated Values and Checks ------- ##
 
 if min(element_number_per_side, element_number_along_z, partition_number_per_side, strain_increment_count,
        timing_repeat_count) < 1:
     raise ValueError("The element, partition, strain increment and timing repeat counts must all be at least 1.")
+if von_mises_min_MPa is not None and von_mises_max_MPa is not None and von_mises_min_MPa >= von_mises_max_MPa:
+    raise ValueError("The von Mises colour-scale minimum must be below its maximum.")
 if element_number_per_side % partition_number_per_side != 0:
     raise ValueError("The number of elements per side must be divisible by the number of partitions per side.")
 
@@ -107,6 +122,10 @@ elif inclusion_shape == "circle":
 else:
     raise ValueError(f"inclusion_shape must be \"square\" or \"circle\". Got {inclusion_shape!r}.")
 
+if reference_stiffness not in ("homogenized", "voigt", "matrix"):
+    raise ValueError("reference_stiffness must be \"homogenized\", \"voigt\" or \"matrix\". "
+                     f"Got {reference_stiffness!r}.")
+
 # The inputs that define the physical problem and its load path. They are saved with every run's results, and results
 # from two runs are only compared when all of these match.
 problem_parameter_names = ("domain_side_length", "inclusion_shape", "inclusion_side_length", "inclusion_radius",
@@ -114,7 +133,7 @@ problem_parameter_names = ("domain_side_length", "inclusion_shape", "inclusion_s
                            "elastic_modulus_inclusion", "elastic_modulus_matrix", "poisson_ratio_inclusion",
                            "poisson_ratio_matrix", "inclusion_yield_stress", "matrix_yield_stress",
                            "inclusion_hardening_modulus", "matrix_hardening_modulus", "matched_stiffness_control",
-                           "max_macro_strain", "strain_increment_count")
+                           "reference_stiffness", "max_macro_strain", "strain_increment_count")
 
 # Shared by every entry point. Cache files are named by a hash of the parameters that produced them, and output files
 # are prefixed with the entry point's run name.

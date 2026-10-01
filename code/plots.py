@@ -1,5 +1,6 @@
 # Every figure the entry points save: the load-path summary (stress, iterations and time per iteration per step) and
-# the time breakdown per timing group, for any number of solvers, and the partition cross-section. No solver logic.
+# the time breakdown per timing group, for any number of solvers, the partition cross-section and the von Mises stress
+# maps on it. No solver logic.
 
 from typing import NamedTuple
 import numpy as np
@@ -7,7 +8,9 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker
 import matplotlib.colors
 import matplotlib.legend
+import matplotlib.legend_handler
 import matplotlib.lines
+import matplotlib.text
 
 ## ------- Load Path Summary ------- ##
 
@@ -20,6 +23,12 @@ load_path_summary_figure_size = (10, 10)
 deviatoric_stress_component_styles = [('red', 'o', r"$\bar{\mathbf{S}}_{11}$"),
                                       ('blue', 's', r"$\bar{\mathbf{S}}_{22}$"),
                                       ('green', '^', r"$\bar{\mathbf{S}}_{33}$")]
+# The stress panel draws the method being tested as a wide translucent line and the reference as a thin dashed line
+# of the same colour on top, so where they agree the dashes run inside the band.
+# The band carries no markers; they are drawn opaque on top of it, so they stay visible.
+new_method_stress_style = {'linewidth': 3, 'alpha': 0.35}
+new_method_marker_style = {'linestyle': 'none', 'markersize': 4}
+reference_stress_style = {'linewidth': 1.5, 'linestyle': (0, (4, 2)), 'zorder': 3}
 # One colour per solver, in the order the solvers are given. Their legends are stacked beside the iterations panel.
 solver_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
 iterations_log_axis_ratio = 20
@@ -99,13 +108,46 @@ def get_time_per_iteration_ms(solver_steps):
                                      / solver_steps.iterations_per_step[solved])
     return time_per_iteration_ms
 
-def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name, steps_per_solver, elastic_steps,
-                           title, plot_path):
-    # The stress panel shows the solver named stress_solver_name; the iteration and timing panels show every solver
-    # in steps_per_solver, a dict from solver name to SolverSteps. elastic_steps marks the steps where no partition
-    # yielded, which are shaded.
-    stress_solver_steps = steps_per_solver[stress_solver_name]
-    strain_increment_count = len(stress_solver_steps.iterations_per_step)
+def get_new_method_stress_handle(color, marker):
+    return (matplotlib.lines.Line2D([], [], color=color, **new_method_stress_style),
+            matplotlib.lines.Line2D([], [], color=color, marker=marker, **new_method_marker_style))
+
+class ColumnTitle(NamedTuple):
+    text: str
+
+class HandlerColumnTitle(matplotlib.legend_handler.HandlerBase):
+    # Draws the title starting at the left edge of the handle column, where the example lines start, instead of in
+    # the label column.
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        return [matplotlib.text.Text(xdescent, ydescent + height / 2, orig_handle.text, fontsize=fontsize,
+                                     fontweight='bold', horizontalalignment='left', verticalalignment='center',
+                                     transform=trans)]
+
+def add_stress_legend(axis, reference_solver_name, new_solver_name):
+    # A grid: one row per component, one column per solver, each column headed by the solver's name.
+    new_handles = [ColumnTitle(new_solver_name)] + [get_new_method_stress_handle(color, marker)
+                                                    for color, marker, _ in deviatoric_stress_component_styles]
+    reference_handles = [ColumnTitle(reference_solver_name)] + [
+        matplotlib.lines.Line2D([], [], color=color, **reference_stress_style)
+        for color, _, _ in deviatoric_stress_component_styles]
+    component_labels = [label for _, _, label in deviatoric_stress_component_styles]
+    # The title is drawn by its handle, but the invisible label under it keeps the column wide enough to hold it.
+    legend = axis.legend(new_handles + reference_handles,
+                         [new_solver_name] + component_labels + [reference_solver_name] + component_labels,
+                         ncols=2, loc='center left', bbox_to_anchor=(1.01, 0.5), frameon=False, fontsize=13,
+                         handlelength=2.2, columnspacing=1.2,
+                         handler_map={tuple: matplotlib.legend_handler.HandlerTuple(ndivide=1),
+                                      ColumnTitle: HandlerColumnTitle()})
+    for text in (legend.get_texts()[0], legend.get_texts()[4]):
+        text.set_visible(False)
+
+def plot_load_path_summary(deviatoric_stress_MPa_per_solver, reference_solver_name, new_solver_name, steps_per_solver,
+                           elastic_steps, title, plot_path):
+    # The stress panel compares the method being tested, new_solver_name, against reference_solver_name, each up to
+    # the last step it solved; deviatoric_stress_MPa_per_solver maps both names to their macroscopic deviatoric
+    # stress per step. The iteration and timing panels show every solver in steps_per_solver, a dict from solver name
+    # to SolverSteps. elastic_steps marks the steps where no partition yielded, which are shaded.
+    strain_increment_count = len(steps_per_solver[reference_solver_name].iterations_per_step)
     load_steps = np.arange(1, strain_increment_count + 1)
 
     with plt.rc_context(load_path_summary_style):
@@ -119,12 +161,18 @@ def plot_load_path_summary(macroscopic_deviatoric_stress_MPa, stress_solver_name
         for axis in (stress_axis, iterations_axis, time_per_iteration_axis):
             shade_elastic_steps(axis, load_steps, elastic_steps)
 
-        stress_step_count = stress_solver_steps.completed_step_count
-        solved_stress = macroscopic_deviatoric_stress_MPa[:stress_step_count]
-        for component, (color, marker, label) in enumerate(deviatoric_stress_component_styles):
-            stress_axis.plot(load_steps[:stress_step_count], solved_stress[:, component], color=color, marker=marker,
-                             markersize=4, linewidth=2, label=label)
-        stress_axis.legend(loc='center left', bbox_to_anchor=(1.01, 0.5), frameon=False)
+        for solver_name, style in ((new_solver_name, new_method_stress_style),
+                                   (reference_solver_name, reference_stress_style)):
+            stress = deviatoric_stress_MPa_per_solver[solver_name]
+            completed_step_count = steps_per_solver[solver_name].completed_step_count
+            for component, (color, marker, _) in enumerate(deviatoric_stress_component_styles):
+                stress_axis.plot(load_steps[:completed_step_count], stress[:completed_step_count, component],
+                                 color=color, **style)
+                if style is new_method_stress_style:
+                    stress_axis.plot(load_steps[:completed_step_count], stress[:completed_step_count, component],
+                                     color=color, marker=marker, **new_method_marker_style)
+                mark_solver_failure(stress_axis, load_steps, stress[:, component], completed_step_count, color)
+        add_stress_legend(stress_axis, reference_solver_name, new_solver_name)
         stress_axis.set_ylabel("Deviatoric stress (MPa)")
 
         for solver_index, (solver_name, solver_steps) in enumerate(steps_per_solver.items()):
@@ -239,3 +287,58 @@ def plot_cross_section(cross_section_material_ids, element_number_per_side, plot
     figure.savefig(plot_path)
     plt.close(figure)
     print(f"cross section plot saved to {plot_path}")
+
+## ------- von Mises Stress Maps ------- ##
+
+von_mises_style = {'font.size': 13, 'axes.titlesize': 15, 'figure.titlesize': 14}
+von_mises_panel_size = 4.2
+
+def draw_inclusion_outline(axis, cross_section_material_ids, color):
+    # The partition edges between inclusion and matrix, in a colour that stands out from the map underneath.
+    partition_number_per_side = cross_section_material_ids.shape[0]
+    edge_length = 1 / partition_number_per_side
+    rows, columns = np.nonzero(cross_section_material_ids != np.roll(cross_section_material_ids, 1, axis=0))
+    axis.hlines(rows * edge_length, columns * edge_length, (columns + 1) * edge_length, color=color, linewidth=2.5)
+    rows, columns = np.nonzero(cross_section_material_ids != np.roll(cross_section_material_ids, 1, axis=1))
+    axis.vlines(columns * edge_length, rows * edge_length, (rows + 1) * edge_length, color=color, linewidth=2.5)
+
+def draw_stress_map(axis, stress_map_MPa, cross_section_material_ids, element_number_per_side, title, outline_color,
+                    **imshow_kwargs):
+    image = axis.imshow(stress_map_MPa, origin='lower', extent=(0, 1, 0, 1), **imshow_kwargs)
+    draw_element_and_partition_edges(axis, element_number_per_side, cross_section_material_ids.shape[0])
+    draw_inclusion_outline(axis, cross_section_material_ids, outline_color)
+    axis.set_title(title)
+    axis.set_axis_off()
+    return image
+
+def plot_von_mises_stress(von_mises_stress_MPa_per_solver, cross_section_material_ids, element_number_per_side,
+                          load_step, strain_increment_count, stress_min_MPa, stress_max_MPa, plot_path):
+    # One map per solver on a shared colour scale, between the given limits or, where a limit is None, the maps' own.
+    # With two solvers, a third map shows the second minus the first, on a diverging scale centred on zero.
+    solver_names = list(von_mises_stress_MPa_per_solver)
+    stress_maps_MPa = list(von_mises_stress_MPa_per_solver.values())
+    panel_count = len(stress_maps_MPa) + (len(stress_maps_MPa) == 2)
+
+    with plt.rc_context(von_mises_style):
+        figure, axes = plt.subplots(1, panel_count, figsize=(von_mises_panel_size * panel_count + 1.2,
+                                                             von_mises_panel_size), layout='constrained', squeeze=False)
+        axes = axes[0]
+        stress_limits = {'vmin': min(map(np.min, stress_maps_MPa)) if stress_min_MPa is None else stress_min_MPa,
+                         'vmax': max(map(np.max, stress_maps_MPa)) if stress_max_MPa is None else stress_max_MPa}
+        for axis, solver_name, stress_map_MPa in zip(axes, solver_names, stress_maps_MPa):
+            image = draw_stress_map(axis, stress_map_MPa, cross_section_material_ids, element_number_per_side,
+                                    solver_name, 'white', cmap='jet', **stress_limits)
+        figure.colorbar(image, ax=axes[:len(stress_maps_MPa)], label="von Mises stress (MPa)", shrink=0.85)
+
+        if len(stress_maps_MPa) == 2:
+            difference_MPa = stress_maps_MPa[1] - stress_maps_MPa[0]
+            largest_difference = max(np.abs(difference_MPa).max(), np.finfo(float).tiny)
+            image = draw_stress_map(axes[2], difference_MPa, cross_section_material_ids, element_number_per_side,
+                                    f"{solver_names[1]} − {solver_names[0]}", 'black', cmap='RdBu_r',
+                                    vmin=-largest_difference, vmax=largest_difference)
+            figure.colorbar(image, ax=axes[2], label="Difference (MPa)", shrink=0.85)
+
+        figure.suptitle(f"Load step {load_step} of {strain_increment_count}", color='0.3')
+        figure.savefig(plot_path)
+    plt.close(figure)
+    print(f"von Mises stress plot saved to {plot_path}")

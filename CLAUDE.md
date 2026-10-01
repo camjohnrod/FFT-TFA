@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A research codebase for FFT-accelerated Transformation Field Analysis (TFA): a reduced-order homogenization
 method for elastoplastic composites (stiff circular/square inclusions in a softer J2-plastic matrix). Two reduced
-models are solved by two strategies, one entry point each:
+models (TFA, LS) are each solved by two strategies (fixed point, Newton), giving four entry points:
 
 | Entry point | Solvers | Outputs prefix |
 |---|---|---|
@@ -33,21 +33,26 @@ onto the notes' symbols and numbered equations (ER-*, LS-*), which code comments
 
 ```bash
 python code/MAIN_TFA_FP.py        # any of the four, from any directory
-python code/check_code.py         # after any change: static checks plus a ~30 s smoke run of all four
+python code/check_code.py         # after any change: static checks plus a smoke run of all four (1-5 min)
 ```
 
-There is no pytest suite; `code/check_code.py` is the test to run after changing code. It fails on anything unused
-(including `NamedTuple` fields and config constants), overlong lines, retired names, or any entry point that
-exits with an error or prints a FAIL or SKIPPED check on a small copy of the problem. It checks consistency, not
-results: compare numbers against a baseline by hand when a change is meant to leave them alone.
+There is no pytest suite and no way to run a single test; `code/check_code.py` is the test to run after changing
+code. It fails on anything unused (including `NamedTuple` fields and config constants), lines over 120 characters,
+trailing whitespace, retired names (`retired_names`), or any entry point that exits with an error or prints a FAIL
+or SKIPPED check. The smoke run works on a temporary copy of `code/` whose `config.py` is shrunk
+(`smoke_run_overrides`: 9 partitions, 27 elements, 12 steps, 1 repeat) and runs the entry points in cross-check
+order (TFA FP, LS FP, TFA Newton, LS Newton). It never touches this folder's config, cache or outputs, so it is safe
+to run with a local study configuration. Running one entry point by hand at those settings is the quick loop for
+a single solver. It checks consistency, not results: compare numbers against a baseline by hand when a change is
+meant to leave them alone.
 
 No package manifest or virtualenv. The default `python` (miniforge `base` conda env) has the
 dependencies (`numpy`, `scipy`, `matplotlib`, `tqdm`); the `fenics-env`/`fenicsx-env` envs are unrelated.
 
 **All configuration is `code/config.py`**, shared by every entry point and grouped by topic: geometry, materials,
-load path, convergence (`convergence_tolerance` applies to every solver), `tfa_*`, `ls_*` and `newton_*` solver
-settings, verification, timing. There are no CLI arguments. Check `git diff` before committing, since it is often
-left at a local study configuration.
+reference stiffness, load path, convergence (`convergence_tolerance` applies to every solver), `tfa_*`, `ls_*`
+and `newton_*` solver settings, verification, timing. There are no CLI arguments. Check `git diff` before
+committing, since it is often left at a local study configuration.
 
 Runs are slow: `main()` does `timing_repeat_count` interleaved full load paths per solver. LS FP needs ~55,000
 iterations per path at the default 25×25 grid (~25 s per path). Estimate cost before running and background large
@@ -68,11 +73,13 @@ configurations.
 
 **Cache and output.** The offline step (factorizing the global stiffness to build `E`, `P`, `P0`) is cached in
 `code/cache/` (gitignored), shared by all entry points, one file per parameter set named by a hash of its
-parameters (`offline.get_cache_path`). Bump `offline.cache_version` whenever a code change alters the offline
+parameters (`offline.get_cache_path`). `P0` is cached under the reference stiffness itself, so each
+`reference_stiffness` choice gets its own file. Bump `offline.cache_version` whenever a code change alters the offline
 operators, since parameters alone cannot detect that. `code/output/` is **tracked**: each run first deletes its own
-`<prefix>*` files, then writes `<prefix>load_path_summary.png`, `<prefix>time_breakdown.png` and
-`<prefix>results.npz` (per-solver results plus the problem parameters, read by the cross-checks), plus the shared
-`cross_section.png`. Any run therefore shows up in `git status`.
+`<prefix>*` files, then writes `<prefix>load_path_summary.png`, `<prefix>time_breakdown.png`,
+`<prefix>von_mises_stress.png` (partition von Mises stress at the last completed step: the TFA FFT solver, and in the
+LS files also LS and LS − TFA FFT) and `<prefix>results.npz` (per-solver results plus the problem parameters, read by
+the cross-checks), plus the shared `cross_section.png`. Any run therefore shows up in `git status`.
 
 ## Architecture
 
@@ -136,6 +143,12 @@ Non-obvious points:
 - **"Reference" means two things.** In `tfa_solvers.py` it is the FFT reference medium used to precondition TFA
   (`M0`, `H_μ,0`, `get_reference_fourier_inverse`). In `ls_solvers.py` it is the LS model itself, which the
   LS note calls the reference model (`ReferenceSolver`, `get_reference_state`). Identifiers follow the notes.
+- **One reference stiffness C0 for both models.** `config.reference_stiffness` (`"homogenized"` ⟨L E⟩, `"voigt"`
+  ⟨L⟩, or `"matrix"`) sets `Problem.reference_L`, from which the single `P0` is built (`offline.get_reference_L`).
+  C0 is part of the LS model, so it changes the LS answer; for TFA it only preconditions the FFT solvers, so the
+  plain TFA solvers are bit-identical under every choice and the FFT ones agree to solver tolerance. P0 is
+  unchanged by scaling C0, so with equal phase Poisson ratios `"voigt"` and `"matrix"` give the same P0 and differ
+  only through C0⁻¹ in the LS equivalent eigenstrain.
 
 Measured at the default configuration (2026-09-30), useful before trying to speed things up: P products dominate
 every TFA solver. TFA Newton needs ~5× fewer iterations than TFA FP but about as many P products, so it is not

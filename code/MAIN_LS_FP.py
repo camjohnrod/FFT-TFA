@@ -5,8 +5,8 @@
 # agree too. The problem and every solver setting are read from config.py.
 #
 # Run from anywhere: python code/MAIN_LS_FP.py
-# Outputs, in code/output: LS_FP_load_path_summary.png, LS_FP_time_breakdown.png, LS_FP_results.npz and the shared
-# cross_section.png.
+# Outputs, in code/output: LS_FP_load_path_summary.png, LS_FP_time_breakdown.png, LS_FP_von_mises_stress.png,
+# LS_FP_results.npz and the shared cross_section.png.
 
 import functools
 
@@ -14,14 +14,18 @@ import config
 from load_path import run_interleaved_repeats
 from ls_solvers import get_ls_fixed_point_solver, get_reference_relaxation_factor, get_reference_stability_limit
 from offline import get_problem
-from report import (check_matched_stiffness, check_solver_agreement, get_comparable_step_count,
-                    get_most_complete_solver_name, print_comparison, print_independent_check, print_model_difference,
-                    remove_old_outputs, save_cross_section_plot, save_load_path_plots, save_results)
+from report import (check_matched_stiffness, check_solver_agreement, get_comparable_step_count, print_comparison,
+                    print_independent_check, print_model_difference, remove_old_outputs, save_cross_section_plot,
+                    save_load_path_plots, save_results, save_von_mises_stress_plot)
 from tfa_solvers import get_tfa_fixed_point_solvers
 from verification import run_verification
 
 run_name = "LS_FP"
 ls_solver_name = "LS FP"
+# The stress plot compares the LS model against the plain TFA solver of the same strategy.
+reference_solver_name = "TFA Standard FP"
+# The von Mises stress maps compare the LS model against the FFT-preconditioned TFA solver.
+fft_tfa_solver_name = "TFA FFT FP"
 
 def get_solvers(problem, ls_relaxation):
     return {**get_tfa_fixed_point_solvers(problem.P0_transformed),
@@ -44,14 +48,12 @@ def main():
                                       problem.partition_materials)
     comparable_step_count = get_comparable_step_count(results)
     tfa_solver_names = [solver_name for solver_name in results if solver_name != ls_solver_name]
-    # Stresses are plotted from the TFA solver that got furthest, since the LS solver solves a different model.
-    actual_solver_name = get_most_complete_solver_name({solver_name: results[solver_name]
-                                                        for solver_name in tfa_solver_names})
     print_comparison(results, comparable_step_count)
-    print_model_difference(results, actual_solver_name, ls_solver_name, comparable_step_count)
+    print_model_difference(results, reference_solver_name, ls_solver_name, comparable_step_count)
     print_independent_check(results)
     save_results(results, run_name)
-    save_load_path_plots(results, comparable_step_count, actual_solver_name, run_name)
+    save_load_path_plots(results, comparable_step_count, reference_solver_name, ls_solver_name, run_name)
+    save_von_mises_stress_plot(results, [fft_tfa_solver_name, ls_solver_name], problem.partition_material_ids, run_name)
     check_solver_agreement(results, tfa_solver_names, comparable_step_count)
     if config.matched_stiffness_control:
         check_matched_stiffness(results, tfa_solver_names[0], ls_solver_name, comparable_step_count)

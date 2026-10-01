@@ -232,6 +232,15 @@ def get_homogenized_L(E, L_per_partition):
     E_blocks = E.reshape(config.partition_count, 6, 6)
     return np.mean(L_per_partition @ E_blocks, axis=0)
 
+def get_reference_L(E, L_per_partition, L_matrix):
+    # The homogeneous reference stiffness C0 chosen by config.reference_stiffness. Every partition has the same volume,
+    # so the averages are plain means over the partitions.
+    if config.reference_stiffness == "homogenized":
+        return get_homogenized_L(E, L_per_partition)
+    if config.reference_stiffness == "voigt":
+        return np.mean(L_per_partition, axis=0)
+    return L_matrix
+
 def get_P0_offset_blocks(B, reference_L_per_element, mesh, A):
     # The reference response to eigenstrain in partition 0 alone. Reference interactions depend only on the offset
     # between partitions (ER-6e), so block B of this response is P0[B - 0] and one solve gives the whole kernel.
@@ -271,9 +280,7 @@ def save_cache(cache_path, parameters, **arrays):
     config.cache_folder.mkdir(exist_ok=True)
     np.savez(cache_path, **arrays, **parameters)
 
-def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_partition):
-    A = get_partition_averaging_operator(B, mesh.element_nodes, mesh.element_partition_ids)
-
+def get_E_and_P(mesh, B, L_per_element, L_matrix, L_inclusion, A):
     E_P_parameters = {"cache_version": cache_version,
                       "domain_side_length": config.domain_side_length,
                       "inclusion_shape": config.inclusion_shape,
@@ -293,10 +300,12 @@ def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_p
         save_cache(E_P_cache_path, E_P_parameters, E=E, P=P)
     else:
         E, P = cached_E_P["E"], cached_E_P["P"]
+    # Column-major, so the columns of a run of consecutive partitions are contiguous and P products can read just the
+    # yielding partitions' columns without copying them (tfa_solvers.apply_P_to_partitions).
+    return E, np.asfortranarray(P)
 
-    reference_L = get_homogenized_L(E, L_per_partition)
-    reference_L_per_element = np.tile(reference_L, (config.element_count, 1, 1))
-
+def get_reference_kernel(mesh, B, reference_L, A):
+    # P0 for the given reference stiffness, cached under that stiffness, so each reference choice has its own file.
     P0_parameters = {"cache_version": cache_version,
                      "domain_side_length": config.domain_side_length,
                      "element_number_per_side": config.element_number_per_side,
@@ -307,16 +316,14 @@ def get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, L_per_p
     cached_P0 = load_cache(P0_cache_path, P0_parameters)
     if cached_P0 is None:
         start_time = time.perf_counter()
+        reference_L_per_element = np.tile(reference_L, (config.element_count, 1, 1))
         P0_offset_blocks = get_P0_offset_blocks(B, reference_L_per_element, mesh, A)
         print(f"P0 offline solve (for the FFT reference and the LS model): {time.perf_counter() - start_time:.2f} "
               "seconds.")
         save_cache(P0_cache_path, P0_parameters, P0_offset_blocks=P0_offset_blocks)
     else:
         P0_offset_blocks = cached_P0["P0_offset_blocks"]
-
-    # Column-major, so the columns of a run of consecutive partitions are contiguous and P products can read just the
-    # yielding partitions' columns without copying them (tfa_solvers.apply_P_to_partitions).
-    return E, np.asfortranarray(P), get_P0_transformed(P0_offset_blocks)
+    return get_P0_transformed(P0_offset_blocks)
 
 ## ------- Problem Setup ------- ##
 
@@ -328,7 +335,8 @@ class Problem(NamedTuple):
     E: np.ndarray
     P: np.ndarray
     P0_transformed: np.ndarray
-    # The homogeneous reference stiffness C0 (the homogenized stiffness of the actual composite) and its inverse.
+    # The homogeneous reference stiffness C0 chosen by config.reference_stiffness, from which P0 is built, and its
+    # inverse. Shared by the LS model and the TFA FFT reference.
     reference_L: np.ndarray
     reference_compliance: np.ndarray
 
@@ -346,7 +354,10 @@ def get_problem():
     mesh = get_periodic_mesh(partition_material_ids)
     B = get_B()
     L_per_element = get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids)
-    E, P, P0_transformed = get_offline_operators(mesh, B, L_per_element, L_matrix, L_inclusion, partition_materials.L)
-    reference_L = get_homogenized_L(E, partition_materials.L)
+    A = get_partition_averaging_operator(B, mesh.element_nodes, mesh.element_partition_ids)
+    E, P = get_E_and_P(mesh, B, L_per_element, L_matrix, L_inclusion, A)
+    reference_L = get_reference_L(E, partition_materials.L, L_matrix)
+    print(f"reference stiffness C0: {config.reference_stiffness}, C0_1111 = {reference_L[0, 0] / 1e6:.2f} MPa")
+    P0_transformed = get_reference_kernel(mesh, B, reference_L, A)
     return Problem(partition_material_ids, partition_materials, mesh, B, E, P, P0_transformed, reference_L,
                    np.linalg.inv(reference_L))

@@ -23,7 +23,7 @@ import tempfile
 
 code_folder = pathlib.Path(__file__).resolve().parent
 entry_points = ["MAIN_TFA_FP", "MAIN_LS_FP", "MAIN_TFA_Newton", "MAIN_LS_Newton"]
-retired_names = ["MAIN_Testing", "plots_testing", "output_testing", "cache_testing", "von_mises", "post_process",
+retired_names = ["MAIN_Testing", "plots_testing", "output_testing", "cache_testing", "post_process",
                  "reference_solver_method", "fixed_point_tolerance", "divergence_residual_limit",
                  "fixed_point_max_iterations", "operator_applications"]
 # Small enough to run in seconds, and 9 partitions per side suits both inclusion shapes at their default sizes.

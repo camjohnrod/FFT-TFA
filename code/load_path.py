@@ -36,6 +36,8 @@ def check_residual_independently(solver_name, step, recomputed_residual, macro_s
 
 class LoadPathResult(NamedTuple):
     macroscopic_stress: np.ndarray
+    # Every partition's stress, per step, for the von Mises stress maps.
+    partition_stress_per_step: np.ndarray
     # Residual evaluations per step, the same unit for every solver: a fixed point's corrections plus one, or a
     # Newton solver's Newton steps plus one.
     iterations_per_step: np.ndarray
@@ -64,6 +66,7 @@ def run_strain_path(solver_name, solver, E, P, partition_materials):
     load_fractions = np.linspace(1 / step_count, 1, step_count)
     applied_macro_strain = np.outer(load_fractions, config.max_macro_strain)
     macroscopic_stress = np.zeros((step_count, 6))
+    partition_stress_per_step = np.zeros((step_count, config.partition_count, 6))
     iterations_per_step = np.zeros(step_count, dtype=int)
     yielding_per_step = np.zeros(step_count, dtype=bool)
     recomputed_residual_per_step = np.zeros(step_count)
@@ -102,10 +105,11 @@ def run_strain_path(solver_name, solver, E, P, partition_materials):
         yielding_per_step[step] = np.any(step_result.plastic_state.accumulated_plastic_strain
                                          > plastic_history.accumulated_plastic_strain)
         macroscopic_stress[step] = get_macroscopic_stress(step_result.stress)
+        partition_stress_per_step[step] = step_result.stress
         plastic_history = step_result.plastic_state
 
-    return LoadPathResult(macroscopic_stress, iterations_per_step, yielding_per_step, recomputed_residual_per_step,
-                          solve_time_per_step, group_time_per_step, group_calls_per_step,
+    return LoadPathResult(macroscopic_stress, partition_stress_per_step, iterations_per_step, yielding_per_step,
+                          recomputed_residual_per_step, solve_time_per_step, group_time_per_step, group_calls_per_step,
                           nested_operator_time_per_group_per_step, plastic_history.plastic_strain,
                           completed_step_count, failure_reason)
 
