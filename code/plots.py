@@ -23,10 +23,8 @@ load_path_summary_figure_size = (10, 10)
 deviatoric_stress_component_styles = [('red', 'o', r"$\bar{\mathbf{S}}_{11}$"),
                                       ('blue', 's', r"$\bar{\mathbf{S}}_{22}$"),
                                       ('green', '^', r"$\bar{\mathbf{S}}_{33}$")]
-# The stress panel draws the method being tested as a wide translucent line and the reference as a thin dashed line
-# of the same colour on top, so where they agree the dashes run inside the band.
-# The band carries no markers; they are drawn opaque on top of it, so they stay visible.
-new_method_stress_style = {'linewidth': 3, 'alpha': 0.35}
+# The stress panel draws the method being tested as markers only and the reference as a thin dashed line of the same
+# colour, so where they agree the markers sit on the dashes.
 new_method_marker_style = {'linestyle': 'none', 'markersize': 4}
 reference_stress_style = {'linewidth': 1.5, 'linestyle': (0, (4, 2)), 'zorder': 3}
 # One colour per solver, in the order the solvers are given. Their legends are stacked beside the iterations panel.
@@ -108,10 +106,6 @@ def get_time_per_iteration_ms(solver_steps):
                                      / solver_steps.iterations_per_step[solved])
     return time_per_iteration_ms
 
-def get_new_method_stress_handle(color, marker):
-    return (matplotlib.lines.Line2D([], [], color=color, **new_method_stress_style),
-            matplotlib.lines.Line2D([], [], color=color, marker=marker, **new_method_marker_style))
-
 class ColumnTitle(NamedTuple):
     text: str
 
@@ -125,8 +119,9 @@ class HandlerColumnTitle(matplotlib.legend_handler.HandlerBase):
 
 def add_stress_legend(axis, reference_solver_name, new_solver_name):
     # A grid: one row per component, one column per solver, each column headed by the solver's name.
-    new_handles = [ColumnTitle(new_solver_name)] + [get_new_method_stress_handle(color, marker)
-                                                    for color, marker, _ in deviatoric_stress_component_styles]
+    new_handles = [ColumnTitle(new_solver_name)] + [
+        matplotlib.lines.Line2D([], [], color=color, marker=marker, **new_method_marker_style)
+        for color, marker, _ in deviatoric_stress_component_styles]
     reference_handles = [ColumnTitle(reference_solver_name)] + [
         matplotlib.lines.Line2D([], [], color=color, **reference_stress_style)
         for color, _, _ in deviatoric_stress_component_styles]
@@ -136,8 +131,7 @@ def add_stress_legend(axis, reference_solver_name, new_solver_name):
                          [new_solver_name] + component_labels + [reference_solver_name] + component_labels,
                          ncols=2, loc='center left', bbox_to_anchor=(1.01, 0.5), frameon=False, fontsize=13,
                          handlelength=2.2, columnspacing=1.2,
-                         handler_map={tuple: matplotlib.legend_handler.HandlerTuple(ndivide=1),
-                                      ColumnTitle: HandlerColumnTitle()})
+                         handler_map={ColumnTitle: HandlerColumnTitle()})
     for text in (legend.get_texts()[0], legend.get_texts()[4]):
         text.set_visible(False)
 
@@ -161,16 +155,14 @@ def plot_load_path_summary(deviatoric_stress_MPa_per_solver, reference_solver_na
         for axis in (stress_axis, iterations_axis, time_per_iteration_axis):
             shade_elastic_steps(axis, load_steps, elastic_steps)
 
-        for solver_name, style in ((new_solver_name, new_method_stress_style),
-                                   (reference_solver_name, reference_stress_style)):
+        for solver_name in (new_solver_name, reference_solver_name):
             stress = deviatoric_stress_MPa_per_solver[solver_name]
             completed_step_count = steps_per_solver[solver_name].completed_step_count
             for component, (color, marker, _) in enumerate(deviatoric_stress_component_styles):
+                style = ({'marker': marker, **new_method_marker_style} if solver_name == new_solver_name
+                         else reference_stress_style)
                 stress_axis.plot(load_steps[:completed_step_count], stress[:completed_step_count, component],
                                  color=color, **style)
-                if style is new_method_stress_style:
-                    stress_axis.plot(load_steps[:completed_step_count], stress[:completed_step_count, component],
-                                     color=color, marker=marker, **new_method_marker_style)
                 mark_solver_failure(stress_axis, load_steps, stress[:, component], completed_step_count, color)
         add_stress_legend(stress_axis, reference_solver_name, new_solver_name)
         stress_axis.set_ylabel("Deviatoric stress (MPa)")
