@@ -61,9 +61,10 @@ def get_dense_reference_checks(problem, dense_P0):
             ("FFT convolution equals the dense product", convolution_error, config.verification_tolerance)]
 
 def get_ls_jacobian_checks(problem):
-    # Central-difference check of the LS-20 Jacobian-vector product against the residual it differentiates. This is
-    # the only test of the plastic branch of H_mu, so it has to be taken at a partly yielded state, and the active
-    # yield set must not move across the perturbation or the one-sided branch derivative is not the true one.
+    # Central-difference check of the LS-20 Jacobian-vector product against the residual it differentiates. With
+    # get_tfa_jacobian_checks it is the only test of the plastic branch of H_μ, so it has to be taken at a partly
+    # yielded state, and the active yield set must not move across the perturbation or the one-sided branch
+    # derivative is not the true one.
     partition_materials, P0_transformed = problem.partition_materials, problem.P0_transformed
     reference_compliance = problem.reference_compliance
     no_plastic_history = PlasticState(np.zeros((config.partition_count, 6)), np.zeros(config.partition_count))
@@ -152,7 +153,7 @@ def get_tfa_jacobian_checks(problem):
             ("TFA Jacobian check active yield set is fixed", 1.0 if active_set_moved else 0.0, 0.5)]
 
 def get_model_elastic_stiffness(dense_P0, L_per_partition, reference_compliance):
-    # Solves the purely elastic reduced model [I + P0 (C0^-1 L - I)] e = 1 x I_6 directly, so the measured model
+    # Solves the purely elastic reduced model [I + P0 (C0⁻¹ L - I)] e = 1 ⊗ I_6 directly, so the measured model
     # error carries no iterative solver tolerance, then homogenizes exactly as get_homogenized_L does.
     stiffness_ratio = scipy.linalg.block_diag(*(reference_compliance @ L_per_partition))
     identity = np.eye(6 * config.partition_count)

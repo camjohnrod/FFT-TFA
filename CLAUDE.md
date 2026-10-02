@@ -33,7 +33,7 @@ onto the notes' symbols and numbered equations (ER-*, LS-*), which code comments
 
 ```bash
 python code/MAIN_TFA_FP.py        # any of the four, from any directory
-python code/check_code.py         # after any change: static checks plus a smoke run of all four (1-5 min)
+python code/check_code.py         # after any change: static checks plus a smoke run of all four (about a minute)
 ```
 
 There is no pytest suite and no way to run a single test; `code/check_code.py` is the test to run after changing
@@ -79,13 +79,16 @@ operators, since parameters alone cannot detect that. `code/output/` is **tracke
 `<prefix>*` files, then writes `<prefix>load_path_summary.png`, `<prefix>time_breakdown.png`,
 `<prefix>von_mises_stress.png` (partition von Mises stress at the last completed step: the TFA FFT solver, and in the
 LS files also LS and LS − TFA FFT) and `<prefix>results.npz` (per-solver results plus the problem parameters, read by
-the cross-checks), plus the shared `cross_section.png`. Any run therefore shows up in `git status`.
+the cross-checks), plus the shared `cross_section.png`. Any run therefore shows up in `git status`: changed files for an entry point
+whose outputs are committed, untracked ones for an entry point whose outputs never were.
 
 ## Architecture
 
 The entry points are thin (`main()` reads as an outline); the pipeline lives in modules under `code/`, imported in
 one direction: `config` → `lattice_fft`, `offline`, `online_timing`, `material` → `convergence` → `load_path` →
-`tfa_solvers` → `ls_solvers` → `verification`, `report`, `plots`. Every module reads inputs as `config.<name>`.
+`tfa_solvers` → `ls_solvers` → `verification`, `report` → `plots`. Every module reads inputs as `config.<name>`,
+except `plots.py`, which imports no project module and takes everything as arguments (`report.py` passes the config
+values in).
 
 | Module | Contents |
 |---|---|
@@ -100,7 +103,7 @@ one direction: `config` → `lattice_fft`, `offline`, `online_timing`, `material
 | `ls_solvers.py` | LS residual, fixed point and Newton, and the warm-starting `ReferenceSolver` |
 | `verification.py` | kernel, dense and Jacobian checks, `run_verification` |
 | `report.py` | timing aggregation, printed comparison, agreement and cross-checks, saved results, plot saving |
-| `plots.py` | load-path summary and time breakdown for any number of solvers, cross-section |
+| `plots.py` | load-path summary and time breakdown for up to four solvers, cross-section, von Mises stress maps |
 
 Non-obvious points:
 - **Strain convention (ER-2):** engineering shear, `(ε11, ε22, ε33, 2ε12, 2ε23, 2ε13)`. `get_relative_residual`

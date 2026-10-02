@@ -1,4 +1,5 @@
-# Turns load-path results into the printed comparison, the saved results, the plots and the solver agreement check.
+# Turns load-path results into the printed comparison, the saved results, the plots and the checks on them: solver
+# agreement, agreement with another entry point's saved results, and the matched-stiffness control.
 # Times are the fastest repeat per step, summed over the steps every solver completed. Every output file is written to
 # config.output_folder and named after the entry point's run name.
 

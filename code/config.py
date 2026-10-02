@@ -13,7 +13,7 @@ inclusion_shape             = "circle"
 inclusion_side_length       = (5/9) * 1e-3
 inclusion_radius            = 0.35e-3
 element_number_per_side     = 75
-element_number_along_z      = 3
+element_number_along_z      = 5
 partition_number_per_side   = 25
 
 # Materials. matched_stiffness_control = True gives the inclusion the matrix's elastic stiffness; the TFA and LS models
@@ -62,7 +62,7 @@ ls_divergence_limit         = 1e3
 # Newton-GMRES, shared by every Newton solver so they are compared at identical settings.
 newton_max_steps            = 50
 newton_krylov_tolerance     = 1e-3
-newton_krylov_restart       = 30
+newton_krylov_restart       = 50
 
 # Checks run before solving, by the LS and Newton entry points.
 verification_enabled        = True

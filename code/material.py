@@ -1,5 +1,5 @@
 # J2 plasticity with linear isotropic hardening: closed-form radial return for all partitions at once, and its
-# eigenstrain sensitivity H_mu.
+# eigenstrain sensitivity H_μ.
 
 from typing import NamedTuple
 import numpy as np

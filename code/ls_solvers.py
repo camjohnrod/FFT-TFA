@@ -45,8 +45,8 @@ def get_reference_model_residual(E, P, macro_strain, strain, partition_materials
 ## ------- Fixed Point ------- ##
 
 def get_reference_stiffness_ratio_bounds(partition_materials, reference_L):
-    # eig(P0) in [0, 1] makes the Jacobian I - P0(I - C0^-1 L_t) similar to a symmetric matrix with spectrum
-    # inside [lambda_min, lambda_max] of C0^-1 L. The elastic L is used because the plastic tangent is softer.
+    # eig(P0) in [0, 1] makes the Jacobian I - P0(I - C0⁻¹ L_t) similar to a symmetric matrix with spectrum
+    # inside [λ_min, λ_max] of C0⁻¹ L. The elastic L is used because the plastic tangent is softer.
     stiffness_ratio = np.linalg.eigvals(np.linalg.inv(reference_L) @ partition_materials.L).real
     return np.min(stiffness_ratio), np.max(stiffness_ratio)
 

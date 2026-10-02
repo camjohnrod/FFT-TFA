@@ -1,6 +1,6 @@
 # Every figure the entry points save: the load-path summary (stress, iterations and time per iteration per step) and
-# the time breakdown per timing group, for any number of solvers, the partition cross-section and the von Mises stress
-# maps on it. No solver logic.
+# the time breakdown per timing group, for up to four solvers (one colour each in solver_colors), the partition
+# cross-section and the von Mises stress maps on it. No solver logic.
 
 from typing import NamedTuple
 import numpy as np
