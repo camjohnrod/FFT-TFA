@@ -256,7 +256,7 @@ cache_version = 1
 
 def get_cache_path(kind, parameters):
     # One file per parameter set, so switching between configurations or entry points reuses each one's operators
-    # instead of overwriting a single file. The parameters are also stored in the file and checked on load.
+    # instead of overwriting a single file. The name is a hash of every parameter, so a file that exists matches them.
     digest = hashlib.sha256()
     for name in sorted(parameters):
         value = np.asarray(parameters[name])
@@ -264,21 +264,19 @@ def get_cache_path(kind, parameters):
         digest.update(value.tobytes())
     return config.cache_folder / f"{kind}_{digest.hexdigest()[:12]}.npz"
 
-def load_cache(cache_path, parameters):
-    if not cache_path.exists():
-        print(f"{cache_path.name}: no cache found, computing.")
-        return None
-    with np.load(cache_path) as cached:
-        for name, value in parameters.items():
-            if name not in cached.files or not np.array_equal(cached[name], value):
-                print(f"{cache_path.name}: {name} missing or changed, recomputing.")
-                return None
+def get_cached(kind, parameters, compute):
+    # The arrays compute() returns, as a dict by name, from the cache file for these parameters when it exists,
+    # otherwise computed and saved there.
+    cache_path = get_cache_path(kind, parameters)
+    if cache_path.exists():
         print(f"{cache_path.name}: loaded from cache.")
-        return {name: cached[name] for name in cached.files}
-
-def save_cache(cache_path, parameters, **arrays):
+        with np.load(cache_path) as cached:
+            return {name: cached[name] for name in cached.files}
+    print(f"{cache_path.name}: no cache found, computing.")
+    arrays = compute()
     config.cache_folder.mkdir(exist_ok=True)
-    np.savez(cache_path, **arrays, **parameters)
+    np.savez(cache_path, **arrays)
+    return arrays
 
 def get_E_and_P(mesh, B, L_per_element, L_matrix, L_inclusion, A):
     E_P_parameters = {"cache_version": cache_version,
@@ -293,16 +291,15 @@ def get_E_and_P(mesh, B, L_per_element, L_matrix, L_inclusion, A):
         E_P_parameters["inclusion_side_length"] = config.inclusion_side_length
     else:
         E_P_parameters["inclusion_radius"] = config.inclusion_radius
-    E_P_cache_path = get_cache_path("E_P", E_P_parameters)
-    cached_E_P = load_cache(E_P_cache_path, E_P_parameters)
-    if cached_E_P is None:
+
+    def compute():
         E, P = get_influence_functions(B, L_per_element, mesh, A)
-        save_cache(E_P_cache_path, E_P_parameters, E=E, P=P)
-    else:
-        E, P = cached_E_P["E"], cached_E_P["P"]
+        return {"E": E, "P": P}
+
+    E_P = get_cached("E_P", E_P_parameters, compute)
     # Column-major, so the columns of a run of consecutive partitions are contiguous and P products can read just the
     # yielding partitions' columns without copying them (tfa_solvers.apply_P_to_partitions).
-    return E, np.asfortranarray(P)
+    return E_P["E"], np.asfortranarray(E_P["P"])
 
 def get_reference_kernel(mesh, B, reference_L, A):
     # P0 for the given reference stiffness, cached under that stiffness, so each reference choice has its own file.
@@ -312,18 +309,16 @@ def get_reference_kernel(mesh, B, reference_L, A):
                      "element_number_along_z": config.element_number_along_z,
                      "partition_number_per_side": config.partition_number_per_side,
                      "reference_L": reference_L}
-    P0_cache_path = get_cache_path("P0_offset_blocks", P0_parameters)
-    cached_P0 = load_cache(P0_cache_path, P0_parameters)
-    if cached_P0 is None:
+
+    def compute():
         start_time = time.perf_counter()
         reference_L_per_element = np.tile(reference_L, (config.element_count, 1, 1))
         P0_offset_blocks = get_P0_offset_blocks(B, reference_L_per_element, mesh, A)
         print(f"P0 offline solve (for the FFT reference and the LS model): {time.perf_counter() - start_time:.2f} "
               "seconds.")
-        save_cache(P0_cache_path, P0_parameters, P0_offset_blocks=P0_offset_blocks)
-    else:
-        P0_offset_blocks = cached_P0["P0_offset_blocks"]
-    return get_P0_transformed(P0_offset_blocks)
+        return {"P0_offset_blocks": P0_offset_blocks}
+
+    return get_P0_transformed(get_cached("P0_offset_blocks", P0_parameters, compute)["P0_offset_blocks"])
 
 ## ------- Problem Setup ------- ##
 

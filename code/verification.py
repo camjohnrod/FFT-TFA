@@ -1,4 +1,4 @@
-# Tolerance checks run before the LS and Newton entry points solve anything: the structure of the reference kernel
+# Tolerance checks run before either entry point solves anything: the structure of the reference kernel
 # P0, finite-difference checks of the Newton Jacobians, and, when the grid is small enough for dense matrices, P0
 # against a direct reference solve and the LS elastic model error. Every check prints PASS or FAIL, and any failure
 # stops the run.
@@ -8,8 +8,9 @@ import scipy.linalg
 
 import config
 from lattice_fft import get_P0_offset_blocks_from_transformed
-from ls_solvers import get_reference_induced_strain, get_reference_jacobian_blocks, get_reference_state
-from material import PlasticState, get_eigenstrain_sensitivity, get_plastic_eigenstrain
+from ls_solvers import get_P0_induced_strain, get_ls_jacobian_blocks, get_ls_state
+from material import (get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_unloaded_plastic_state,
+                      get_yielding_partitions)
 from offline import get_homogenized_L, get_influence_functions, get_partition_averaging_operator
 from tfa_solvers import get_actual_residual, get_induced_strain
 
@@ -52,7 +53,7 @@ def get_dense_reference_checks(problem, dense_P0):
 
     partition_field = np.random.default_rng(0).standard_normal((config.partition_count, 6))
     dense_induced_strain = (dense_P0 @ partition_field.reshape(-1)).reshape(config.partition_count, 6)
-    fft_induced_strain = get_reference_induced_strain(problem.P0_transformed, partition_field)
+    fft_induced_strain = get_P0_induced_strain(problem.P0_transformed, partition_field)
     convolution_error = (np.max(np.abs(fft_induced_strain - dense_induced_strain))
                          / np.max(np.abs(dense_induced_strain)))
 
@@ -60,97 +61,83 @@ def get_dense_reference_checks(problem, dense_P0):
             ("dense P0 equals the translated kernel", translation_error, config.verification_tolerance),
             ("FFT convolution equals the dense product", convolution_error, config.verification_tolerance)]
 
-def get_ls_jacobian_checks(problem):
-    # Central-difference check of the LS-20 Jacobian-vector product against the residual it differentiates. With
-    # get_tfa_jacobian_checks it is the only test of the plastic branch of H_μ, so it has to be taken at a partly
-    # yielded state, and the active yield set must not move across the perturbation or the one-sided branch
-    # derivative is not the true one.
-    partition_materials, P0_transformed = problem.partition_materials, problem.P0_transformed
-    reference_compliance = problem.reference_compliance
-    no_plastic_history = PlasticState(np.zeros((config.partition_count, 6)), np.zeros(config.partition_count))
+def get_jacobian_checks(model_name, equation_label, partition_materials, get_base_strain, get_residual,
+                        apply_jacobian):
+    # Central-difference check of a Newton Jacobian-vector product against the residual it differentiates, with no
+    # plastic history. get_base_strain(ε̄) is the strain the check is taken at, get_residual(ε̄, ε) the model residual
+    # and apply_jacobian(ε, v) the analytic product. These checks are the only test of the plastic branch of H_μ, so
+    # the state has to be partly yielded, and the active yield set must not move across the perturbation or the
+    # one-sided branch derivative is not the true one.
+    no_plastic_history = get_unloaded_plastic_state()
 
     def get_yielding(trial_strain):
         plastic_state, _ = get_plastic_eigenstrain(trial_strain, partition_materials, no_plastic_history)
-        return plastic_state.accumulated_plastic_strain > 0
+        return get_yielding_partitions(plastic_state, no_plastic_history)
 
     # Probe at the smallest of these load fractions that actually yields something. A fixed fraction is fragile:
     # at 0.4 of the default path nothing has yielded yet, which silently reduces this to an elastic-only test.
     load_fraction = next((fraction for fraction in (1.0, 2.0, 4.0, 8.0)
-                          if get_yielding(np.tile(fraction * config.max_macro_strain,
-                                                  (config.partition_count, 1))).any()), 1.0)
+                          if get_yielding(get_base_strain(fraction * config.max_macro_strain)).any()), 1.0)
     macro_strain = load_fraction * config.max_macro_strain
-    b = np.tile(macro_strain, (config.partition_count, 1))
-    strain = b.copy()
+    strain = get_base_strain(macro_strain)
 
-    def get_residual(trial_strain):
-        _, _, residual = get_reference_state(trial_strain, b, P0_transformed, reference_compliance,
-                                             partition_materials, no_plastic_history)
+    direction = np.random.default_rng(1).standard_normal((config.partition_count, 6))
+    direction /= np.linalg.norm(direction)
+    step = 1e-6 * np.linalg.norm(strain)
+
+    analytic_product = apply_jacobian(strain, direction)
+    finite_difference = (get_residual(macro_strain, strain + step * direction)
+                         - get_residual(macro_strain, strain - step * direction)) / (2 * step)
+
+    yielding = get_yielding(strain)
+    active_set_moved = not (np.array_equal(get_yielding(strain - step * direction), yielding)
+                            and np.array_equal(get_yielding(strain + step * direction), yielding))
+    print(f"  {model_name} Jacobian check state: load fraction {load_fraction:g}, {int(yielding.sum())} of "
+          f"{config.partition_count} partitions yielding")
+    return [(f"{equation_label} Jacobian matches a central difference",
+             np.max(np.abs(analytic_product - finite_difference)) / np.max(np.abs(analytic_product)),
+             config.jacobian_check_tolerance),
+            (f"{model_name} Jacobian check reaches the plastic branch", 0.0 if yielding.any() else 1.0, 0.5),
+            (f"{model_name} Jacobian check active yield set is fixed", 1.0 if active_set_moved else 0.0, 0.5)]
+
+def get_ls_jacobian_checks(problem):
+    # The LS-20 product J v = v - P0 [(I - C0⁻¹ L_t) v], at the uniform strain ε̄ in every partition.
+    partition_materials, P0_transformed = problem.partition_materials, problem.P0_transformed
+    reference_compliance = problem.reference_compliance
+    no_plastic_history = get_unloaded_plastic_state()
+
+    def get_base_strain(macro_strain):
+        return np.tile(macro_strain, (config.partition_count, 1))
+
+    def get_residual(macro_strain, strain):
+        _, _, residual = get_ls_state(strain, get_base_strain(macro_strain), P0_transformed,
+                                             reference_compliance, partition_materials, no_plastic_history)
         return residual
 
-    direction = np.random.default_rng(1).standard_normal((config.partition_count, 6))
-    direction /= np.linalg.norm(direction)
-    step = 1e-6 * np.linalg.norm(strain)
+    def apply_jacobian(strain, direction):
+        jacobian_blocks = get_ls_jacobian_blocks(strain, partition_materials, no_plastic_history,
+                                                        reference_compliance)
+        return direction - get_P0_induced_strain(P0_transformed,
+                                                        np.einsum('pij,pj->pi', jacobian_blocks, direction))
 
-    jacobian_blocks = get_reference_jacobian_blocks(strain, partition_materials, no_plastic_history,
-                                                    reference_compliance)
-    analytic_product = direction - get_reference_induced_strain(
-        P0_transformed, np.einsum('pij,pj->pi', jacobian_blocks, direction))
-    finite_difference = (get_residual(strain + step * direction)
-                         - get_residual(strain - step * direction)) / (2 * step)
-
-    yielding = get_yielding(strain)
-    active_set_moved = not (np.array_equal(get_yielding(strain - step * direction), yielding)
-                            and np.array_equal(get_yielding(strain + step * direction), yielding))
-    print(f"  LS Jacobian check state: load fraction {load_fraction:g}, {int(yielding.sum())} of "
-          f"{config.partition_count} partitions yielding")
-    return [("LS-20 Jacobian matches a central difference",
-             np.max(np.abs(analytic_product - finite_difference)) / np.max(np.abs(analytic_product)),
-             config.jacobian_check_tolerance),
-            ("LS Jacobian check reaches the plastic branch", 0.0 if yielding.any() else 1.0, 0.5),
-            ("LS Jacobian check active yield set is fixed", 1.0 if active_set_moved else 0.0, 0.5)]
+    return get_jacobian_checks("LS", "LS-20", partition_materials, get_base_strain, get_residual, apply_jacobian)
 
 def get_tfa_jacobian_checks(problem):
-    # Central-difference check of the ER-18 Jacobian product J v = v - P (H_μ v), used by the TFA Newton solvers,
-    # against the actual residual ER-4 it differentiates. As for the LS-20 check, it is taken at a partly yielded
-    # state, here the elastic predictor E ε̄ with no plastic history, and the active yield set must not move across
-    # the perturbation.
+    # The ER-18 product J v = v - P (H_μ v) of the TFA Newton solvers, at the elastic predictor E ε̄.
     partition_materials, E, P = problem.partition_materials, problem.E, problem.P
-    no_plastic_history = PlasticState(np.zeros((config.partition_count, 6)), np.zeros(config.partition_count))
+    no_plastic_history = get_unloaded_plastic_state()
 
-    def get_elastic_predictor(macro_strain):
+    def get_base_strain(macro_strain):
         return (E @ macro_strain).reshape(config.partition_count, 6)
 
-    def get_yielding(trial_strain):
-        plastic_state, _ = get_plastic_eigenstrain(trial_strain, partition_materials, no_plastic_history)
-        return plastic_state.accumulated_plastic_strain > 0
+    def get_residual(macro_strain, strain):
+        return get_actual_residual(E, P, macro_strain, strain, partition_materials, no_plastic_history)
 
-    load_fraction = next((fraction for fraction in (1.0, 2.0, 4.0, 8.0)
-                          if get_yielding(get_elastic_predictor(fraction * config.max_macro_strain)).any()), 1.0)
-    macro_strain = load_fraction * config.max_macro_strain
-    strain = get_elastic_predictor(macro_strain)
+    def apply_jacobian(strain, direction):
+        sensitivity = get_eigenstrain_sensitivity(strain, partition_materials, no_plastic_history)
+        return direction - get_induced_strain(P, np.einsum('pij,pj->pi', sensitivity, direction))
 
-    def get_residual(trial_strain):
-        return get_actual_residual(E, P, macro_strain, trial_strain, partition_materials, no_plastic_history)
-
-    direction = np.random.default_rng(1).standard_normal((config.partition_count, 6))
-    direction /= np.linalg.norm(direction)
-    step = 1e-6 * np.linalg.norm(strain)
-
-    sensitivity = get_eigenstrain_sensitivity(strain, partition_materials, no_plastic_history)
-    analytic_product = direction - get_induced_strain(P, np.einsum('pij,pj->pi', sensitivity, direction))
-    finite_difference = (get_residual(strain + step * direction)
-                         - get_residual(strain - step * direction)) / (2 * step)
-
-    yielding = get_yielding(strain)
-    active_set_moved = not (np.array_equal(get_yielding(strain - step * direction), yielding)
-                            and np.array_equal(get_yielding(strain + step * direction), yielding))
-    print(f"  TFA Jacobian check state: load fraction {load_fraction:g}, {int(yielding.sum())} of "
-          f"{config.partition_count} partitions yielding")
-    return [("ER-18 Jacobian matches a central difference",
-             np.max(np.abs(analytic_product - finite_difference)) / np.max(np.abs(analytic_product)),
-             config.jacobian_check_tolerance),
-            ("TFA Jacobian check reaches the plastic branch", 0.0 if yielding.any() else 1.0, 0.5),
-            ("TFA Jacobian check active yield set is fixed", 1.0 if active_set_moved else 0.0, 0.5)]
+    return get_jacobian_checks("TFA", "ER-18", partition_materials, get_base_strain, get_residual, apply_jacobian)
 
 def get_model_elastic_stiffness(dense_P0, L_per_partition, reference_compliance):
     # Solves the purely elastic reduced model [I + P0 (C0⁻¹ L - I)] e = 1 ⊗ I_6 directly, so the measured model
@@ -170,10 +157,10 @@ def print_elastic_model_error(dense_P0, problem):
     print(f"    homogenized stiffness    : {stiffness_error:.3e} relative, worst component")
     print(f"    C_1111 exact vs model MPa: {exact_stiffness[0, 0] / 1e6:.3f} vs {model_stiffness[0, 0] / 1e6:.3f}")
 
-def run_verification(problem, extra_check_functions=(), print_ls_model_error=False):
+def run_verification(problem, extra_check_functions=()):
     # Each of extra_check_functions(problem) returns further (description, error, tolerance) checks from the entry
-    # point, such as the Jacobian checks of its Newton solvers, printed and enforced with the rest. The elastic model
-    # error concerns the LS model, so only the LS entry points print it.
+    # point, such as the Jacobian checks of its Newton solvers, printed and enforced with the rest. The LS elastic
+    # model error is printed after them, from the dense P0, so only when the dense checks run.
     print("verification:")
     checks = get_reference_kernel_checks(problem.P0_transformed, problem.reference_L)
     for get_checks in extra_check_functions:
@@ -193,5 +180,5 @@ def run_verification(problem, extra_check_functions=(), print_ls_model_error=Fal
     if failed_checks:
         raise RuntimeError(f"verification failed: {'; '.join(failed_checks)}.")
 
-    if print_ls_model_error and dense_P0 is not None:
+    if dense_P0 is not None:
         print_elastic_model_error(dense_P0, problem)

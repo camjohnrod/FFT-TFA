@@ -23,10 +23,10 @@ load_path_summary_figure_size = (10, 10)
 deviatoric_stress_component_styles = [('red', 'o', r"$\bar{\mathbf{S}}_{11}$"),
                                       ('blue', 's', r"$\bar{\mathbf{S}}_{22}$"),
                                       ('green', '^', r"$\bar{\mathbf{S}}_{33}$")]
-# The stress panel draws the method being tested as markers only and the reference as a thin dashed line of the same
+# The stress panel draws the method being tested as markers only and the baseline as a thin dashed line of the same
 # colour, so where they agree the markers sit on the dashes.
 new_method_marker_style = {'linestyle': 'none', 'markersize': 4}
-reference_stress_style = {'linewidth': 1.5, 'linestyle': (0, (4, 2)), 'zorder': 3}
+baseline_stress_style = {'linewidth': 1.5, 'linestyle': (0, (4, 2)), 'zorder': 3}
 # One colour per solver, in the order the solvers are given. Their legends are stacked beside the iterations panel.
 solver_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
 iterations_log_axis_ratio = 20
@@ -36,11 +36,13 @@ class SolverSteps(NamedTuple):
     solve_time_per_step: np.ndarray
     completed_step_count: int
 
-def get_applied_strain_description(max_macro_strain, strain_increment_count):
+def get_applied_strain_description(max_macro_strain, load_path_shape, load_step_count):
     nonzero_components = [f"{label} = {value:g}"
                           for label, value in zip(macro_strain_component_labels, max_macro_strain) if value != 0]
     component_lines = [", ".join(nonzero_components[start:start + 3]) for start in range(0, len(nonzero_components), 3)]
-    return "\n".join([f"Applied Strain ({strain_increment_count} steps)"] + component_lines)
+    heading = (f"Applied Strain ({load_step_count} steps)" if load_path_shape == "monotonic"
+               else f"Cyclic Applied Strain, 0 → +max → −max → 0 ({load_step_count} steps)")
+    return "\n".join([heading] + component_lines)
 
 def shade_elastic_steps(axis, load_steps, elastic_steps):
     for load_step in load_steps[elastic_steps]:
@@ -50,7 +52,11 @@ def label_elastic_steps(axis, load_steps, elastic_steps, max_font_size=13, min_f
     elastic_load_steps = load_steps[elastic_steps]
     if len(elastic_load_steps) == 0:
         return
-    band_left, band_right = elastic_load_steps[0] - 0.5, elastic_load_steps[-1] + 0.5
+    # Only the first run of elastic steps is labelled. A cyclic path has later runs, each unloading, which are shaded
+    # but would otherwise stretch the label across the whole path.
+    first_run_breaks = np.flatnonzero(np.diff(elastic_load_steps) != 1)
+    first_run_last_step = elastic_load_steps[first_run_breaks[0]] if len(first_run_breaks) else elastic_load_steps[-1]
+    band_left, band_right = elastic_load_steps[0] - 0.5, first_run_last_step + 0.5
     label = axis.annotate("Elastic\nregime", xy=((band_left + band_right) / 2, 1), xycoords=axis.get_xaxis_transform(),
                           xytext=(0, -8), textcoords='offset points', ha='center', va='top', color='0.4',
                           fontsize=max_font_size, linespacing=1.1)
@@ -117,32 +123,36 @@ class HandlerColumnTitle(matplotlib.legend_handler.HandlerBase):
                                      fontweight='bold', horizontalalignment='left', verticalalignment='center',
                                      transform=trans)]
 
-def add_stress_legend(axis, reference_solver_name, new_solver_name):
-    # A grid: one row per component, one column per solver, each column headed by the solver's name.
-    new_handles = [ColumnTitle(new_solver_name)] + [
-        matplotlib.lines.Line2D([], [], color=color, marker=marker, **new_method_marker_style)
-        for color, marker, _ in deviatoric_stress_component_styles]
-    reference_handles = [ColumnTitle(reference_solver_name)] + [
-        matplotlib.lines.Line2D([], [], color=color, **reference_stress_style)
-        for color, _, _ in deviatoric_stress_component_styles]
+def add_stress_legend(axis, baseline_solver_name, new_solver_name):
+    # A grid: one row per component, one column per solver (none for the baseline when there is none), each column
+    # headed by the solver's name.
+    columns = [(new_solver_name, [{'marker': marker, **new_method_marker_style}
+                                  for _, marker, _ in deviatoric_stress_component_styles])]
+    if baseline_solver_name is not None:
+        columns.append((baseline_solver_name, [baseline_stress_style] * len(deviatoric_stress_component_styles)))
     component_labels = [label for _, _, label in deviatoric_stress_component_styles]
-    # The title is drawn by its handle, but the invisible label under it keeps the column wide enough to hold it.
-    legend = axis.legend(new_handles + reference_handles,
-                         [new_solver_name] + component_labels + [reference_solver_name] + component_labels,
-                         ncols=2, loc='center left', bbox_to_anchor=(1.01, 0.5), frameon=False, fontsize=13,
-                         handlelength=2.2, columnspacing=1.2,
+    handles, labels = [], []
+    for solver_name, line_styles in columns:
+        handles += [ColumnTitle(solver_name)] + [
+            matplotlib.lines.Line2D([], [], color=color, **line_style)
+            for (color, _, _), line_style in zip(deviatoric_stress_component_styles, line_styles)]
+        labels += [solver_name] + component_labels
+    legend = axis.legend(handles, labels, ncols=len(columns), loc='center left', bbox_to_anchor=(1.01, 0.5),
+                         frameon=False, fontsize=13, handlelength=2.2, columnspacing=1.2,
                          handler_map={ColumnTitle: HandlerColumnTitle()})
-    for text in (legend.get_texts()[0], legend.get_texts()[4]):
-        text.set_visible(False)
+    # The title is drawn by its handle, but the invisible label under it keeps the column wide enough to hold it.
+    for column_title in legend.get_texts()[::1 + len(component_labels)]:
+        column_title.set_visible(False)
 
-def plot_load_path_summary(deviatoric_stress_MPa_per_solver, reference_solver_name, new_solver_name, steps_per_solver,
+def plot_load_path_summary(deviatoric_stress_MPa_per_solver, baseline_solver_name, new_solver_name, steps_per_solver,
                            elastic_steps, title, plot_path):
-    # The stress panel compares the method being tested, new_solver_name, against reference_solver_name, each up to
-    # the last step it solved; deviatoric_stress_MPa_per_solver maps both names to their macroscopic deviatoric
-    # stress per step. The iteration and timing panels show every solver in steps_per_solver, a dict from solver name
-    # to SolverSteps. elastic_steps marks the steps where no partition yielded, which are shaded.
-    strain_increment_count = len(steps_per_solver[reference_solver_name].iterations_per_step)
-    load_steps = np.arange(1, strain_increment_count + 1)
+    # The stress panel compares the method being tested, new_solver_name, against baseline_solver_name (or shows it
+    # alone when that is None), each up to the last step it solved; deviatoric_stress_MPa_per_solver maps those names
+    # to their macroscopic deviatoric stress per step. The iteration and timing panels show every solver in
+    # steps_per_solver, a dict from solver name to SolverSteps. elastic_steps marks the steps where no partition
+    # yielded, which are shaded.
+    load_step_count = len(steps_per_solver[new_solver_name].iterations_per_step)
+    load_steps = np.arange(1, load_step_count + 1)
 
     with plt.rc_context(load_path_summary_style):
         figure, (stress_axis, iterations_axis, time_per_iteration_axis) = plt.subplots(
@@ -155,16 +165,15 @@ def plot_load_path_summary(deviatoric_stress_MPa_per_solver, reference_solver_na
         for axis in (stress_axis, iterations_axis, time_per_iteration_axis):
             shade_elastic_steps(axis, load_steps, elastic_steps)
 
-        for solver_name in (new_solver_name, reference_solver_name):
-            stress = deviatoric_stress_MPa_per_solver[solver_name]
+        for solver_name, stress in deviatoric_stress_MPa_per_solver.items():
             completed_step_count = steps_per_solver[solver_name].completed_step_count
             for component, (color, marker, _) in enumerate(deviatoric_stress_component_styles):
                 style = ({'marker': marker, **new_method_marker_style} if solver_name == new_solver_name
-                         else reference_stress_style)
+                         else baseline_stress_style)
                 stress_axis.plot(load_steps[:completed_step_count], stress[:completed_step_count, component],
                                  color=color, **style)
                 mark_solver_failure(stress_axis, load_steps, stress[:, component], completed_step_count, color)
-        add_stress_legend(stress_axis, reference_solver_name, new_solver_name)
+        add_stress_legend(stress_axis, baseline_solver_name, new_solver_name)
         stress_axis.set_ylabel("Deviatoric stress (MPa)")
 
         for solver_index, (solver_name, solver_steps) in enumerate(steps_per_solver.items()):
@@ -197,7 +206,7 @@ def plot_load_path_summary(deviatoric_stress_MPa_per_solver, reference_solver_na
         time_per_iteration_axis.set_ylabel("Time per iteration (ms)")
         time_per_iteration_axis.set_ylim(bottom=0)
         time_per_iteration_axis.set_xlabel("Load step", labelpad=12)
-        time_per_iteration_axis.set_xlim(0.5, strain_increment_count + 0.5)
+        time_per_iteration_axis.set_xlim(0.5, load_step_count + 0.5)
         figure.align_ylabels()
         label_elastic_steps(stress_axis, load_steps, elastic_steps)
 
@@ -304,7 +313,7 @@ def draw_stress_map(axis, stress_map_MPa, cross_section_material_ids, element_nu
     return image
 
 def plot_von_mises_stress(von_mises_stress_MPa_per_solver, cross_section_material_ids, element_number_per_side,
-                          load_step, strain_increment_count, stress_min_MPa, stress_max_MPa, plot_path):
+                          load_step, load_step_count, stress_min_MPa, stress_max_MPa, plot_path):
     # One map per solver on a shared colour scale, between the given limits or, where a limit is None, the maps' own.
     # With two solvers, a third map shows the second minus the first, on a diverging scale centred on zero.
     solver_names = list(von_mises_stress_MPa_per_solver)
@@ -330,7 +339,7 @@ def plot_von_mises_stress(von_mises_stress_MPa_per_solver, cross_section_materia
                                     vmin=-largest_difference, vmax=largest_difference)
             figure.colorbar(image, ax=axes[2], label="Difference (MPa)", shrink=0.85)
 
-        figure.suptitle(f"Load step {load_step} of {strain_increment_count}", color='0.3')
+        figure.suptitle(f"Load step {load_step} of {load_step_count}", color='0.3')
         figure.savefig(plot_path)
     plt.close(figure)
     print(f"von Mises stress plot saved to {plot_path}")

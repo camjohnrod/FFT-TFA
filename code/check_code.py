@@ -3,13 +3,13 @@
 #   python code/check_code.py
 #
 # 1. Static checks: every module imports; nothing defined goes unused (top-level definitions, NamedTuple fields,
-#    config constants); no line is longer than 120 characters; none of the names retired in the 2026-09-30
-#    restructuring is back.
-# 2. Smoke run: a copy of this folder, with the grid, step count and repeats shrunk in the copy's config.py (this
-#    folder's config, cache and outputs are never touched), runs all four entry points in the order their
-#    cross-checks need, and every check they print must PASS, none FAIL or SKIPPED.
+#    config constants); no line is longer than 120 characters.
+# 2. Smoke runs (smoke_runs: monotonic, cyclic, matched stiffness, LS only): a copy of this folder, with the grid,
+#    step count and repeats shrunk in the copy's config.py (this folder's config, cache and outputs are never
+#    touched), runs both entry points, MAIN_FP.py first for the cross-checks, and every check they print must PASS,
+#    none FAIL or SKIPPED. On the cyclic path no solver may abandon the load path either.
 #
-# Exits with status 1 if anything fails. Takes about a minute. It checks consistency, not results: a change that
+# Exits with status 1 if anything fails. Takes about three minutes. It checks consistency, not results: a change that
 # alters the numbers still passes if every solver still agrees with the others.
 
 import ast
@@ -22,13 +22,26 @@ import sys
 import tempfile
 
 code_folder = pathlib.Path(__file__).resolve().parent
-entry_points = ["MAIN_TFA_FP", "MAIN_LS_FP", "MAIN_TFA_Newton", "MAIN_LS_Newton"]
-retired_names = ["MAIN_Testing", "plots_testing", "output_testing", "cache_testing", "post_process",
-                 "reference_solver_method", "fixed_point_tolerance", "divergence_residual_limit",
-                 "fixed_point_max_iterations", "operator_applications"]
-# Small enough to run in seconds, and 9 partitions per side suits both inclusion shapes at their default sizes.
+entry_points = ["MAIN_FP", "MAIN_Newton"]
+# Small enough to run in seconds, and 9 partitions per side suits both inclusion shapes at their default sizes. The
+# model switches are set too, so a local study configuration cannot change what the smoke runs cover.
 smoke_run_overrides = {"partition_number_per_side": "9", "element_number_per_side": "27",
-                       "strain_increment_count": "12", "timing_repeat_count": "1"}
+                       "strain_increment_count": "12", "timing_repeat_count": "1", "include_tfa_model": "True",
+                       "matched_stiffness_control": "False"}
+# Each smoke run applies smoke_run_overrides and then its own, and says whether every solver must complete every
+# step.
+# - cyclic: the only test of elastic unloading, reverse yielding and passing through zero imposed strain with
+#   partitions still yielding, which a monotonic path never reaches. A solver that wrongly gives up there only
+#   abandons the path, which prints no FAIL, so the run must complete. Its hardening is fixed positive, so a local
+#   softening study in config.py cannot end the path legitimately. 4 increments per quarter still yields at both zero
+#   crossings.
+# - matched stiffness: the LS regression gate, where LS must reproduce TFA.
+# - LS only: the entry points without the TFA model.
+smoke_runs = {"monotonic": ({}, False),
+              "cyclic": ({"load_path_shape": '"cyclic"', "strain_increment_count": "4",
+                          "matrix_hardening_modulus": "10e6"}, True),
+              "matched stiffness": ({"matched_stiffness_control": "True"}, False),
+              "LS only": ({"include_tfa_model": "False"}, False)}
 maximum_line_length = 120
 
 def get_sources():
@@ -91,11 +104,7 @@ def check_formatting(sources):
                 problems.append(f"{file_name}:{line_number}: trailing whitespace")
     return problems
 
-def check_no_retired_names(sources):
-    return [f"{file_name}: retired name {name!r} is back" for file_name, source in sources.items()
-            if file_name != "check_code.py" for name in retired_names if name in source]
-
-def run_smoke_test():
+def run_smoke_test(run_name, run_overrides, require_every_step):
     problems = []
     with tempfile.TemporaryDirectory() as temporary_folder:
         copy_folder = pathlib.Path(temporary_folder)
@@ -103,22 +112,24 @@ def run_smoke_test():
             shutil.copy(path, copy_folder / path.name)
         config_path = copy_folder / "config.py"
         config_source = config_path.read_text()
-        for name, value in smoke_run_overrides.items():
+        for name, value in {**smoke_run_overrides, **run_overrides}.items():
             config_source, replaced = re.subn(rf"^{name}(\s*)= .*$", rf"{name}\g<1>= {value}", config_source, count=1,
                                               flags=re.M)
             if replaced != 1:
-                return [f"smoke run: config.py has no line setting {name}"]
+                return [f"{run_name} smoke run: config.py has no line setting {name}"]
         config_path.write_text(config_source)
 
         for entry_point in entry_points:
             run = subprocess.run([sys.executable, f"{entry_point}.py"], cwd=copy_folder, capture_output=True, text=True)
             passed = run.stdout.count("[PASS]")
-            not_passed = [line.strip() for line in run.stdout.splitlines() if "[FAIL]" in line or "[SKIPPED]" in line]
+            not_passed = [line.strip() for line in run.stdout.splitlines() if "[FAIL]" in line or "[SKIPPED]" in line
+                          or (require_every_step and "abandoned the load path" in line)]
             if run.returncode != 0:
-                problems.append(f"{entry_point}.py exited with status {run.returncode}:\n{run.stderr[-1500:]}")
-            problems += [f"{entry_point}.py: {line}" for line in not_passed]
+                problems.append(f"{run_name} {entry_point}.py exited with status {run.returncode}:\n"
+                                f"{run.stderr[-1500:]}")
+            problems += [f"{run_name} {entry_point}.py: {line}" for line in not_passed]
             print(f"  {entry_point}.py: exit status {run.returncode}, {passed} checks passed, "
-                  f"{len(not_passed)} failed or skipped")
+                  f"{len(not_passed)} failed, skipped or abandoned")
     return problems
 
 def main():
@@ -126,15 +137,15 @@ def main():
     problems = []
     for description, check in [("modules import", check_modules_import),
                                ("nothing unused", lambda: check_nothing_unused(sources)),
-                               ("formatting", lambda: check_formatting(sources)),
-                               ("no retired names", lambda: check_no_retired_names(sources))]:
+                               ("formatting", lambda: check_formatting(sources))]:
         found = check()
         print(f"[{'PASS' if not found else 'FAIL'}] {description}")
         problems += found
-    print("smoke run of every entry point on a small copy of the problem:")
-    found = run_smoke_test()
-    print(f"[{'PASS' if not found else 'FAIL'}] smoke run")
-    problems += found
+    for run_name, (run_overrides, require_every_step) in smoke_runs.items():
+        print(f"{run_name} smoke run of every entry point on a small copy of the problem:")
+        found = run_smoke_test(run_name, run_overrides, require_every_step)
+        print(f"[{'PASS' if not found else 'FAIL'}] {run_name} smoke run")
+        problems += found
 
     if problems:
         print("\nproblems:\n" + "\n".join(f"  {problem}" for problem in problems))

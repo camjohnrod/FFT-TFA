@@ -12,6 +12,15 @@ class PlasticState(NamedTuple):
     plastic_strain: np.ndarray
     accumulated_plastic_strain: np.ndarray
 
+def get_unloaded_plastic_state():
+    # The plastic history before the first load step: no plastic strain anywhere.
+    return PlasticState(np.zeros((config.partition_count, 6)), np.zeros(config.partition_count))
+
+def get_yielding_partitions(plastic_state, plastic_history):
+    # The partitions that flow plastically in a candidate state: those that accumulate plastic strain beyond the
+    # accepted history.
+    return plastic_state.accumulated_plastic_strain > plastic_history.accumulated_plastic_strain
+
 class TrialState(NamedTuple):
     stress: np.ndarray
     mean_stress: np.ndarray
@@ -77,6 +86,7 @@ def get_plastic_eigenstrain(strain, partition_materials, plastic_history):
 
     return PlasticState(plastic_strain, accumulated_plastic_strain), stress
 
+@timed_online("sensitivity")
 def get_eigenstrain_sensitivity(strain, partition_materials, plastic_history):
     # H_μ = ∂μ/∂ε at the current strain (ER-8), zero in partitions that stay elastic.
     trial = get_trial_state(strain, partition_materials, plastic_history)

@@ -12,21 +12,25 @@ domain_side_length          = 1e-3
 inclusion_shape             = "circle"
 inclusion_side_length       = (5/9) * 1e-3
 inclusion_radius            = 0.35e-3
-element_number_per_side     = 75
-element_number_along_z      = 5
-partition_number_per_side   = 25
+element_number_per_side     = 64
+element_number_along_z      = 3
+partition_number_per_side   = 32
 
 # Materials. matched_stiffness_control = True gives the inclusion the matrix's elastic stiffness; the TFA and LS models
 # are then the same equation, which is the regression gate for the LS solvers.
 elastic_modulus_inclusion   = 10e9
 elastic_modulus_matrix      = 100e6
 poisson_ratio_inclusion     = 0.3
-poisson_ratio_matrix        = 0.3
+poisson_ratio_matrix        = 0.19
 inclusion_yield_stress      = np.inf
 matrix_yield_stress         = 1.0e6
 inclusion_hardening_modulus = 0.0
 matrix_hardening_modulus    = 10e6
 matched_stiffness_control   = False
+
+# Models. The LS model is always solved. include_tfa_model also solves the actual E/P TFA model by the same strategy,
+# as the baseline LS is compared against; matched_stiffness_control, the regression gate between the two, needs it.
+include_tfa_model           = True
 
 # Reference medium: the homogeneous stiffness C0 from which the P0 kernel is built. It is part of the LS model, so it
 # changes the LS answer; for TFA it only preconditions the FFT solvers, changing their convergence, not their answer.
@@ -39,8 +43,12 @@ reference_stiffness         = "homogenized"
 #   np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])      uniaxial
 #   np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])  mixed mode tension
 #   np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])  mixed mode with shear
+# load_path_shape "monotonic" stops at max_macro_strain; "cyclic" continues 0 -> +max -> -max -> 0 at the same
+# increment, 4 * strain_increment_count steps in all, unloading elastically, yielding in reverse and passing through
+# zero imposed strain twice.
 max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
 strain_increment_count      = 60
+load_path_shape             = "monotonic"
 
 # Convergence, shared by every solver: relative residual (Formulation.md section 12) below convergence_tolerance.
 convergence_tolerance       = 1e-6
@@ -48,7 +56,9 @@ residual_strain_scale_floor = 1e-4
 solver_agreement_tolerance  = 1e-4
 independent_check_round_off = 1e-12
 
-# TFA solvers. The relaxation applies to the fixed points; the divergence limit to fixed point and Newton.
+# TFA solvers. The relaxation applies to the fixed points; the divergence limit to fixed point and Newton. A solver
+# diverges when its relative residual exceeds the limit times the larger of 1 and the step's first relative residual
+# (convergence.has_converged), here and for LS.
 tfa_relaxation_factor       = 1.0
 tfa_max_iterations          = 1000
 tfa_divergence_limit        = 1.0
@@ -64,7 +74,7 @@ newton_max_steps            = 50
 newton_krylov_tolerance     = 1e-3
 newton_krylov_restart       = 50
 
-# Checks run before solving, by the LS and Newton entry points.
+# Checks run before solving, by both entry points (the Jacobian checks by MAIN_Newton.py only).
 verification_enabled        = True
 verification_tolerance      = 1e-9
 jacobian_check_tolerance    = 1e-6
@@ -87,6 +97,30 @@ if von_mises_min_MPa is not None and von_mises_max_MPa is not None and von_mises
     raise ValueError("The von Mises colour-scale minimum must be below its maximum.")
 if element_number_per_side % partition_number_per_side != 0:
     raise ValueError("The number of elements per side must be divisible by the number of partitions per side.")
+
+# The radial return divides by 3G + H. At or below zero it has no admissible solution: the plastic multiplier is
+# infinite or negative, so plastic work runs backwards while the flow stress stays positive, and nothing downstream
+# would notice. Checked for every phase that can yield, with the stiffness it actually gets.
+inclusion_shear_modulus = (elastic_modulus_matrix / (2 * (1 + poisson_ratio_matrix)) if matched_stiffness_control
+                           else elastic_modulus_inclusion / (2 * (1 + poisson_ratio_inclusion)))
+for phase, shear_modulus, yield_stress, hardening_modulus in (
+        ("matrix", elastic_modulus_matrix / (2 * (1 + poisson_ratio_matrix)), matrix_yield_stress,
+         matrix_hardening_modulus),
+        ("inclusion", inclusion_shear_modulus, inclusion_yield_stress, inclusion_hardening_modulus)):
+    if np.isfinite(yield_stress) and 3 * shear_modulus + hardening_modulus <= 0:
+        raise ValueError(f"The {phase} hardening modulus must be above -3G = {-3 * shear_modulus:.4g} Pa, or the "
+                         f"return map has no admissible solution. Got {hardening_modulus:.4g} Pa.")
+
+if load_path_shape == "monotonic":
+    load_fractions = np.linspace(1 / strain_increment_count, 1, strain_increment_count)
+elif load_path_shape == "cyclic":
+    load_fractions = np.concatenate([np.arange(1, strain_increment_count + 1),
+                                     strain_increment_count - np.arange(1, 2 * strain_increment_count + 1),
+                                     np.arange(1 - strain_increment_count, 1)]) / strain_increment_count
+else:
+    raise ValueError(f"load_path_shape must be \"monotonic\" or \"cyclic\". Got {load_path_shape!r}.")
+applied_macro_strain = np.outer(load_fractions, max_macro_strain)
+load_step_count = len(applied_macro_strain)
 
 elements_per_partition_side = element_number_per_side // partition_number_per_side
 element_count = element_number_per_side**2 * element_number_along_z
@@ -122,6 +156,9 @@ elif inclusion_shape == "circle":
 else:
     raise ValueError(f"inclusion_shape must be \"square\" or \"circle\". Got {inclusion_shape!r}.")
 
+if matched_stiffness_control and not include_tfa_model:
+    raise ValueError("matched_stiffness_control checks the LS model against TFA, so it needs include_tfa_model = True.")
+
 if reference_stiffness not in ("homogenized", "voigt", "matrix"):
     raise ValueError("reference_stiffness must be \"homogenized\", \"voigt\" or \"matrix\". "
                      f"Got {reference_stiffness!r}.")
@@ -133,7 +170,7 @@ problem_parameter_names = ("domain_side_length", "inclusion_shape", "inclusion_s
                            "elastic_modulus_inclusion", "elastic_modulus_matrix", "poisson_ratio_inclusion",
                            "poisson_ratio_matrix", "inclusion_yield_stress", "matrix_yield_stress",
                            "inclusion_hardening_modulus", "matrix_hardening_modulus", "matched_stiffness_control",
-                           "reference_stiffness", "max_macro_strain", "strain_increment_count")
+                           "reference_stiffness", "max_macro_strain", "strain_increment_count", "load_path_shape")
 
 # Shared by every entry point. Cache files are named by a hash of the parameters that produced them, and output files
 # are prefixed with the entry point's run name.

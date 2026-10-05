@@ -1,4 +1,7 @@
-# Wall-clock time per named phase of an online solve, accumulated per load step. Timed calls must not nest.
+# Wall-clock time per named phase of an online solve, accumulated per load step. Timed calls may nest: each group is
+# charged only its own time, with the time of every timed call made inside it charged to that call's group instead.
+# So the P products inside a Newton step's Krylov solve count as induced strain, not as correction solve, and the
+# groups never count the same time twice.
 
 import functools
 import time
@@ -7,18 +10,25 @@ online_time_groups = ("material_update", "induced_strain", "sensitivity", "refer
 
 class OnlineTimer:
     def __init__(self):
-        self.open_group = None
+        # One [group index, start time, time of the timed calls nested inside it] per timed call in progress,
+        # innermost last.
+        self.open_calls = []
         self.reset()
 
     def reset(self):
+        if self.open_calls:
+            raise RuntimeError("the online timer was reset inside a timed call.")
         self.time_per_group = [0.0] * len(online_time_groups)
-        self.calls_per_group = [0] * len(online_time_groups)
-        # Time of operator applications made inside another group, which only a Newton solver's Krylov solve does.
-        # It is kept separately so the time breakdown can show all operator work as one segment.
-        self.nested_operator_time_per_group = [0.0] * len(online_time_groups)
 
-    def record_nested_operator_application(self, elapsed_time):
-        self.nested_operator_time_per_group[online_time_groups.index(self.open_group)] += elapsed_time
+    def start(self, group_id):
+        self.open_calls.append([group_id, time.perf_counter(), 0.0])
+
+    def stop(self):
+        group_id, start_time, nested_time = self.open_calls.pop()
+        elapsed_time = time.perf_counter() - start_time
+        self.time_per_group[group_id] += elapsed_time - nested_time
+        if self.open_calls:
+            self.open_calls[-1][2] += elapsed_time
 
 online_timer = OnlineTimer()
 
@@ -27,32 +37,10 @@ def timed_online(group):
     def decorator(function):
         @functools.wraps(function)
         def timed_function(*args, **kwargs):
-            if online_timer.open_group is not None:
-                raise RuntimeError(f"online time group {group!r} started inside {online_timer.open_group!r}, "
-                                   "so its time would be counted twice.")
-            online_timer.open_group = group
-            start_time = time.perf_counter()
+            online_timer.start(group_id)
             try:
                 return function(*args, **kwargs)
             finally:
-                online_timer.time_per_group[group_id] += time.perf_counter() - start_time
-                online_timer.calls_per_group[group_id] += 1
-                online_timer.open_group = None
+                online_timer.stop()
         return timed_function
     return decorator
-
-def get_online_timer_overhead_per_call(call_count=100_000):
-    def untimed_function():
-        pass
-    timed_function = timed_online(online_time_groups[0])(untimed_function)
-
-    start_time = time.perf_counter()
-    for _ in range(call_count):
-        timed_function()
-    timed_duration = time.perf_counter() - start_time
-    start_time = time.perf_counter()
-    for _ in range(call_count):
-        untimed_function()
-    untimed_duration = time.perf_counter() - start_time
-    online_timer.reset()
-    return max(timed_duration - untimed_duration, 0) / call_count

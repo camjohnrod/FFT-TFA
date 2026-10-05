@@ -42,10 +42,15 @@ def get_relative_residual(residual, macro_strain):
     strain_scale = max(get_strain_norm(macro_strain), config.residual_strain_scale_floor)
     return get_strain_norm(residual) / strain_scale
 
-def has_converged(relative_residual, iteration_count, divergence_limit=config.tfa_divergence_limit,
+def has_converged(residual_history, divergence_limit=config.tfa_divergence_limit,
                   max_iterations=config.tfa_max_iterations):
+    # residual_history holds the step's relative residuals so far, the latest last. Divergence is growth past the
+    # limit times the larger of the imposed strain and the step's first residual. The imposed strain alone is not
+    # enough: where a non-monotonic path passes through zero strain while partitions still yield, the first residual
+    # legitimately exceeds it, and every solver would be stopped before its first correction.
     # The failure messages name no solver: run_strain_path prefixes the solver's name when it reports them.
-    if not np.isfinite(relative_residual) or relative_residual > divergence_limit:
+    relative_residual, iteration_count = residual_history[-1], len(residual_history)
+    if not np.isfinite(relative_residual) or relative_residual > divergence_limit * max(1.0, residual_history[0]):
         raise SolverDidNotConverge(f"diverged after {iteration_count} iterations (relative residual "
                                    f"{relative_residual:.3e})")
     if relative_residual < config.convergence_tolerance:
