@@ -87,7 +87,7 @@ parameters (`offline.get_cache_path`). `P0` is cached under the reference stiffn
 operators, since parameters alone cannot detect that. `code/output/` is **tracked**: each run first deletes its own
 `<prefix>*` files, then writes `<prefix>load_path_summary.png`, `<prefix>time_breakdown.png`,
 `<prefix>von_mises_stress.png` (partition von Mises stress at the last completed step: LS, and with TFA also the
-TFA FFT solver and LS − TFA FFT) and `<prefix>results.npz` (per-solver results plus the problem parameters, read by
+plain TFA solver and LS − TFA) and `<prefix>results.npz` (per-solver results plus the problem parameters, read by
 the cross-checks; written last, only once every check has passed, so a failed run leaves none), plus the shared
 `cross_section.png`. Any run therefore shows up in `git status`.
 

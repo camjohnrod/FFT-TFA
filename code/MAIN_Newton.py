@@ -25,8 +25,8 @@ from verification import get_ls_jacobian_checks, get_tfa_jacobian_checks, run_ve
 
 run_name = "Newton"
 ls_solver_name = "LS Newton"
-# With TFA included, the stress plot and the checks compare LS against the plain TFA solver, and the von Mises maps
-# against the FFT-preconditioned one.
+# With TFA included, every plot and check compares LS against the plain TFA solver, the baseline; the
+# FFT-preconditioned TFA solver is checked against it.
 tfa_baseline_solver_name = "TFA Newton"
 tfa_fft_solver_name = "TFA FFT Newton"
 
@@ -56,8 +56,8 @@ def main():
     if config.include_tfa_model:
         print_model_difference(results, tfa_baseline_solver_name, ls_solver_name, comparable_step_count)
         save_load_path_plots(results, comparable_step_count, tfa_baseline_solver_name, ls_solver_name, run_name)
-        save_von_mises_stress_plot(results, [tfa_fft_solver_name, ls_solver_name], problem.partition_material_ids,
-                                   run_name)
+        save_von_mises_stress_plot(results, [tfa_baseline_solver_name, ls_solver_name],
+                                   problem.partition_material_ids, run_name)
         check_solver_agreement(results, [tfa_baseline_solver_name, tfa_fft_solver_name], comparable_step_count)
         if config.matched_stiffness_control:
             check_matched_stiffness(results, tfa_baseline_solver_name, ls_solver_name, comparable_step_count)
