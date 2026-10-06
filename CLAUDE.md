@@ -64,8 +64,10 @@ every result alone (a refactor), run `check_code.py save` before it and `check_c
 the run, entry point, solver and array; a `problem/` difference means `config.py`'s inputs changed since the baseline
 was saved.
 
-No package manifest or virtualenv. The default `python` (miniforge `base` conda env) has the
-dependencies (`numpy`, `scipy`, `matplotlib`, `tqdm`); the `fenics-env`/`fenicsx-env` envs are unrelated.
+No package manifest. The dependencies (`numpy`, `scipy`, `matplotlib`, `tqdm`) are in the miniforge `base` conda env
+and in the repo's untracked `.venv/` (Python 3.12, not gitignored), which is what `python` runs when it is
+activated; `check_code.py` runs its smoke runs with whichever interpreter launched it (`sys.executable`). The
+`fenics-env`/`fenicsx-env` envs are unrelated.
 
 **All configuration is `code/config.py`**, shared by every entry point and grouped by topic: geometry, materials,
 reference stiffness, load path (`load_path_shape`: monotonic ramp, or cyclic 0 → +max → −max → 0 in
@@ -262,7 +264,8 @@ Next steps, in the order agreed:
    "homogenized" C0) and P0. Split the E and P solves and caches in `offline.get_E_and_P`; verify with
    `check_code.py compare` (results with TFA should match to round-off, since the solve batches change).
 2. Check whether `element_number_along_z = 1` reproduces `= 3` to round-off. The geometry and loading do not vary
-   through the thickness, so it should, which would make every offline solve and fine-LS run about 3× cheaper.
+   through the thickness, so it should. The default is already 1 (since commit `4e1d747`), but the comparison has
+   not been recorded; until it is, results at 1 rest on that expectation.
 3. Cost study: time and memory against resolution for partitioned LS, fine LS, coarse LS and TFA. This is the cost
    half of the research claim, and it can be measured now.
 4. A gold-standard reference: a separate FE-consistent FFT solver (Ladecký et al., `references/`; displacement

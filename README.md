@@ -91,7 +91,7 @@ computed against it.
 Next, in order:
 1. Build TFA's dense P only when TFA is included, so LS-only runs at fine resolution stop paying for it.
 2. Check whether one element layer through the thickness gives the same results as three (it should, since nothing
-   varies through the thickness), for about 3× cheaper offline solves.
+   varies through the thickness). One layer is already the default, for about 3× cheaper offline solves.
 3. A cost study: time and memory against resolution for partitioned, fine and coarse LS and TFA.
 4. A gold-standard reference: an FE-consistent FFT solver (Ladecký et al., in `references/`), and then the accuracy
    study, splitting each field error into what any one-value-per-partition scheme must miss and what the scheme adds.
