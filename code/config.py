@@ -19,7 +19,7 @@ inclusion_shape             = "square"
 inclusion_side_length       = 0.5e-3
 inclusion_radius            = 0.35e-3
 element_number_per_side     = 64
-element_number_along_z      = 3
+element_number_along_z      = 1
 partition_number_per_side   = 32
 
 # Materials. matched_stiffness_control = True gives the inclusion the matrix's elastic stiffness; the TFA and LS models
@@ -48,7 +48,7 @@ include_non_partitioned_ls  = True
 #   "homogenized"  the homogenized stiffness of the actual composite, <L E> over the partitions
 #   "voigt"        the Voigt average <L> over the partitions
 #   "matrix"       the matrix stiffness
-reference_stiffness         = "homogenized"
+reference_stiffness         = "matrix"
 
 # Load path: max_macro_strain reached linearly over strain_increment_count steps. Alternatives:
 #   np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])      uniaxial
@@ -57,7 +57,7 @@ reference_stiffness         = "homogenized"
 # load_path_shape "monotonic" stops at max_macro_strain; "cyclic" continues 0 -> +max -> -max -> 0 at the same
 # increment, 4 * strain_increment_count steps in all, unloading elastically, yielding in reverse and passing through
 # zero imposed strain twice.
-max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
+max_macro_strain            = np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])
 strain_increment_count      = 60
 load_path_shape             = "monotonic"
 
