@@ -16,7 +16,7 @@ from online_timing import timed_online
 
 @timed_online("induced_strain")
 def get_induced_strain(P, eigenstrain):
-    return (P @ eigenstrain.reshape(-1)).reshape(config.partition_count, 6)
+    return (P @ eigenstrain.reshape(-1)).reshape(-1, 6)
 
 def get_partition_runs(partitions):
     # (first, stop) of every run of consecutive partitions in the mask, in partition order.
@@ -28,10 +28,10 @@ def apply_P_to_partitions(P, partition_field, partitions):
     # P times a partition field that is zero outside the given partitions, from only those partitions' columns of P.
     # P is column-major, so each run of consecutive partitions is one contiguous block of columns, used without a
     # copy.
-    product = np.zeros(6 * config.partition_count)
+    product = np.zeros(P.shape[0])
     for first, stop in get_partition_runs(partitions):
         product += P[:, 6 * first:6 * stop] @ partition_field[first:stop].reshape(-1)
-    return product.reshape(config.partition_count, 6)
+    return product.reshape(-1, 6)
 
 def get_induced_strain_reusing_history(P, plastic_state, plastic_history, induced_strain_history):
     # Pμ = Pμₙ + PΔμ, where Δμ is zero outside the partitions yielding in this step, so only their columns of P
@@ -68,7 +68,7 @@ def get_actual_residual(E, P, macro_strain, strain, partition_materials, plastic
     # ER-4 recomputed from scratch at a converged strain, for the independent check in run_strain_path: a fresh
     # material update and the full product P μ, sharing none of the solvers' bookkeeping (the elastic reset, the
     # incremental P products, the reused history product).
-    b = (E @ macro_strain).reshape(config.partition_count, 6)
+    b = (E @ macro_strain).reshape(-1, 6)
     plastic_state, _ = get_plastic_eigenstrain(strain, partition_materials, plastic_history)
     return strain - b - get_induced_strain(P, plastic_state.plastic_strain)
 
@@ -113,7 +113,7 @@ def fixed_point_iteration(E, P, macro_strain, partition_materials, plastic_histo
     # Strategy 1: relaxed fixed-point iteration on the actual residual ER-4, preconditioned by the FFT reference
     # when P0_transformed is given.
     reference = None if P0_transformed is None else FFTReference(P0_transformed)
-    b = (E @ macro_strain).reshape(config.partition_count, 6)
+    b = (E @ macro_strain).reshape(-1, 6)
     induced_strain_history = get_induced_strain(P, plastic_history.plastic_strain)
     strain = b + induced_strain_history
 
@@ -136,11 +136,13 @@ def fixed_point_iteration(E, P, macro_strain, partition_materials, plastic_histo
 
     return StepResult(strain, stress, plastic_state, np.array(residual_history))
 
-def get_tfa_fixed_point_solvers(P0_transformed):
+def get_tfa_fixed_point_solvers(E, P, P0_transformed, partition_materials):
     # The two fixed-point solvers for actual E/P, by the names every entry point and output file uses.
-    return {"TFA Standard FP": Solver(fixed_point_iteration, get_actual_residual),
-            "TFA FFT FP": Solver(functools.partial(fixed_point_iteration, P0_transformed=P0_transformed),
-                                 get_actual_residual)}
+    get_residual = functools.partial(get_actual_residual, E, P)
+    return {"TFA Standard FP": Solver(functools.partial(fixed_point_iteration, E, P), get_residual,
+                                      partition_materials),
+            "TFA FFT FP": Solver(functools.partial(fixed_point_iteration, E, P, P0_transformed=P0_transformed),
+                                 get_residual, partition_materials)}
 
 ## ------- Newton-Krylov (Strategy 2) ------- ##
 
@@ -160,10 +162,10 @@ def get_newton_krylov_correction(P, sensitivity, residual, reference):
         return vector if reference is None else reference.solve(vector)
 
     def apply_preconditioned_jacobian(flat_vector):
-        vector = flat_vector.reshape(config.partition_count, 6)
+        vector = flat_vector.reshape(-1, 6)
         return apply_jacobian(apply_preconditioner(vector)).reshape(-1)
 
-    system_size = 6 * config.partition_count
+    system_size = residual.size
     operator = scipy.sparse.linalg.LinearOperator((system_size, system_size), matvec=apply_preconditioned_jacobian)
     preconditioned_correction, info = scipy.sparse.linalg.gmres(operator, -residual.reshape(-1),
                                                                 rtol=config.newton_krylov_tolerance,
@@ -171,14 +173,14 @@ def get_newton_krylov_correction(P, sensitivity, residual, reference):
     if info != 0:
         raise SolverDidNotConverge(f"GMRES did not converge inside the TFA Newton step (info {info}). Loosen "
                                    "newton_krylov_tolerance or raise newton_krylov_restart")
-    return apply_preconditioner(preconditioned_correction.reshape(config.partition_count, 6))
+    return apply_preconditioner(preconditioned_correction.reshape(-1, 6))
 
 def newton_krylov_iteration(E, P, macro_strain, partition_materials, plastic_history, P0_transformed=None):
     # Strategy 2: Newton on the actual residual ER-4, each correction solved by GMRES, preconditioned by the FFT
     # reference when P0_transformed is given. The residual is evaluated exactly as in fixed_point_iteration, elastic
     # reset included, from the same starting strain, so all TFA solvers solve the same equation from the same start.
     reference = None if P0_transformed is None else FFTReference(P0_transformed)
-    b = (E @ macro_strain).reshape(config.partition_count, 6)
+    b = (E @ macro_strain).reshape(-1, 6)
     induced_strain_history = get_induced_strain(P, plastic_history.plastic_strain)
     strain = b + induced_strain_history
 
@@ -201,8 +203,9 @@ def newton_krylov_iteration(E, P, macro_strain, partition_materials, plastic_his
 
     return StepResult(strain, stress, plastic_state, np.array(residual_history))
 
-def get_tfa_newton_solvers(P0_transformed):
+def get_tfa_newton_solvers(E, P, P0_transformed, partition_materials):
     # The two Newton-Krylov solvers for actual E/P, by the names every entry point and output file uses.
-    return {"TFA Newton": Solver(newton_krylov_iteration, get_actual_residual),
-            "TFA FFT Newton": Solver(functools.partial(newton_krylov_iteration, P0_transformed=P0_transformed),
-                                     get_actual_residual)}
+    get_residual = functools.partial(get_actual_residual, E, P)
+    return {"TFA Newton": Solver(functools.partial(newton_krylov_iteration, E, P), get_residual, partition_materials),
+            "TFA FFT Newton": Solver(functools.partial(newton_krylov_iteration, E, P, P0_transformed=P0_transformed),
+                                     get_residual, partition_materials)}

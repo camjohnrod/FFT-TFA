@@ -4,7 +4,6 @@
 from typing import NamedTuple
 import numpy as np
 
-import config
 from online_timing import timed_online
 
 class PlasticState(NamedTuple):
@@ -12,9 +11,9 @@ class PlasticState(NamedTuple):
     plastic_strain: np.ndarray
     accumulated_plastic_strain: np.ndarray
 
-def get_unloaded_plastic_state():
+def get_unloaded_plastic_state(partition_count):
     # The plastic history before the first load step: no plastic strain anywhere.
-    return PlasticState(np.zeros((config.partition_count, 6)), np.zeros(config.partition_count))
+    return PlasticState(np.zeros((partition_count, 6)), np.zeros(partition_count))
 
 def get_yielding_partitions(plastic_state, plastic_history):
     # The partitions that flow plastically in a candidate state: those that accumulate plastic strain beyond the
@@ -91,7 +90,7 @@ def get_eigenstrain_sensitivity(strain, partition_materials, plastic_history):
     # H_μ = ∂μ/∂ε at the current strain (ER-8), zero in partitions that stay elastic.
     trial = get_trial_state(strain, partition_materials, plastic_history)
 
-    sensitivity = np.zeros((config.partition_count, 6, 6))
+    sensitivity = np.zeros((len(strain), 6, 6))
 
     yielding = trial.yield_function > 0
     yielding_deviatoric_stress = trial.deviatoric_stress[yielding]

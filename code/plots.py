@@ -1,5 +1,5 @@
 # Every figure the entry points save: the load-path summary (stress, iterations and time per iteration per step) and
-# the time breakdown per timing group, for up to four solvers (one colour each in solver_colors), the partition
+# the time breakdown per timing group, for up to five solvers (one colour each in solver_colors), the partition
 # cross-section and the von Mises stress maps on it. No solver logic.
 
 from typing import NamedTuple
@@ -28,7 +28,7 @@ deviatoric_stress_component_styles = [('red', 'o', r"$\bar{\mathbf{S}}_{11}$"),
 new_method_marker_style = {'linestyle': 'none', 'markersize': 4}
 baseline_stress_style = {'linewidth': 1.5, 'linestyle': (0, (4, 2)), 'zorder': 3}
 # One colour per solver, in the order the solvers are given. Their legends are stacked beside the iterations panel.
-solver_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+solver_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple']
 iterations_log_axis_ratio = 20
 
 class SolverSteps(NamedTuple):
@@ -82,8 +82,9 @@ def label_elastic_steps(axis, load_steps, elastic_steps, max_font_size=13, min_f
 
 def add_solver_legend(axis, line, solver_name, solver_steps, vertical_anchor):
     no_line = matplotlib.lines.Line2D([], [], linestyle='none')
-    totals_label = (f"  {solver_steps.iterations_per_step.sum()} iterations,\n"
-                    f"  {solver_steps.solve_time_per_step.sum():.2f} s total time")
+    # One line of totals, so that up to five solvers' legends fit beside the iterations panel.
+    totals_label = (f"  {solver_steps.iterations_per_step.sum()} iterations, "
+                    f"{solver_steps.solve_time_per_step.sum():.2f} s in total")
     if solver_steps.completed_step_count < len(solver_steps.iterations_per_step):
         totals_label += f"\n  (stopped at step {solver_steps.completed_step_count + 1})"
     solver_legend = matplotlib.legend.Legend(axis, [line, no_line], [f"{solver_name}:", totals_label],
@@ -269,12 +270,15 @@ def plot_time_per_iteration_breakdown(time_per_iteration_per_group_ms_per_solver
 cross_section_figure_size = (5, 5)
 
 def draw_element_and_partition_edges(axis, element_number_per_side, partition_number_per_side):
+    # Element edges thin and light, partition edges darker. With one partition per element only the light grid is
+    # drawn, which would otherwise bury a fine map under dark lines.
     element_edges = np.linspace(0, 1, element_number_per_side + 1)
-    partition_edges = np.linspace(0, 1, partition_number_per_side + 1)
     axis.vlines(element_edges, 0, 1, color='0.75', linewidth=0.5)
     axis.hlines(element_edges, 0, 1, color='0.75', linewidth=0.5)
-    axis.vlines(partition_edges, 0, 1, color='0.25', linewidth=1.2, clip_on=False)
-    axis.hlines(partition_edges, 0, 1, color='0.25', linewidth=1.2, clip_on=False)
+    if partition_number_per_side < element_number_per_side:
+        partition_edges = np.linspace(0, 1, partition_number_per_side + 1)
+        axis.vlines(partition_edges, 0, 1, color='0.25', linewidth=1.2, clip_on=False)
+        axis.hlines(partition_edges, 0, 1, color='0.25', linewidth=1.2, clip_on=False)
 
 def plot_cross_section(cross_section_material_ids, element_number_per_side, plot_path):
     partition_number_per_side = cross_section_material_ids.shape[0]
@@ -294,51 +298,44 @@ def plot_cross_section(cross_section_material_ids, element_number_per_side, plot
 von_mises_style = {'font.size': 13, 'axes.titlesize': 15, 'figure.titlesize': 14}
 von_mises_panel_size = 4.2
 
-def draw_inclusion_outline(axis, cross_section_material_ids, color):
-    # The partition edges between inclusion and matrix, in a colour that stands out from the map underneath.
+def draw_inclusion_outline(axis, cross_section_material_ids):
+    # The partition edges between inclusion and matrix, in white, which stands out from the stress map underneath.
     partition_number_per_side = cross_section_material_ids.shape[0]
     edge_length = 1 / partition_number_per_side
     rows, columns = np.nonzero(cross_section_material_ids != np.roll(cross_section_material_ids, 1, axis=0))
-    axis.hlines(rows * edge_length, columns * edge_length, (columns + 1) * edge_length, color=color, linewidth=2.5)
+    axis.hlines(rows * edge_length, columns * edge_length, (columns + 1) * edge_length, color='white', linewidth=2.5)
     rows, columns = np.nonzero(cross_section_material_ids != np.roll(cross_section_material_ids, 1, axis=1))
-    axis.vlines(columns * edge_length, rows * edge_length, (rows + 1) * edge_length, color=color, linewidth=2.5)
+    axis.vlines(columns * edge_length, rows * edge_length, (rows + 1) * edge_length, color='white', linewidth=2.5)
 
-def draw_stress_map(axis, stress_map_MPa, cross_section_material_ids, element_number_per_side, title, outline_color,
-                    **imshow_kwargs):
+def draw_stress_map(axis, stress_map_MPa, cross_section_material_ids, element_number_per_side, title, **imshow_kwargs):
     image = axis.imshow(stress_map_MPa, origin='lower', extent=(0, 1, 0, 1), **imshow_kwargs)
     draw_element_and_partition_edges(axis, element_number_per_side, cross_section_material_ids.shape[0])
-    draw_inclusion_outline(axis, cross_section_material_ids, outline_color)
+    draw_inclusion_outline(axis, cross_section_material_ids)
     axis.set_title(title)
     axis.set_axis_off()
     return image
 
-def plot_von_mises_stress(von_mises_stress_MPa_per_solver, cross_section_material_ids, element_number_per_side,
-                          load_step, load_step_count, stress_min_MPa, stress_max_MPa, plot_path):
-    # One map per solver on a shared colour scale, between the given limits or, where a limit is None, the maps' own.
-    # With two solvers, a third map shows the second minus the first, on a diverging scale centred on zero.
-    solver_names = list(von_mises_stress_MPa_per_solver)
-    stress_maps_MPa = list(von_mises_stress_MPa_per_solver.values())
-    panel_count = len(stress_maps_MPa) + (len(stress_maps_MPa) == 2)
+class StressMap(NamedTuple):
+    # One solver's map, on its own lattice: von Mises stress per partition (MPa) and phase per partition, both
+    # (side × side), and the side of its element grid.
+    title: str
+    von_mises_MPa: np.ndarray
+    material_ids: np.ndarray
+    element_number_per_side: int
 
+def plot_von_mises_stress(stress_maps, load_step, load_step_count, stress_min_MPa, stress_max_MPa, plot_path):
+    # One map per solver, side by side on one colour scale, between the given limits or, where a limit is None, the
+    # maps' own. Maps may sit on different lattices, since each is drawn over the whole cross-section.
     with plt.rc_context(von_mises_style):
-        figure, axes = plt.subplots(1, panel_count, figsize=(von_mises_panel_size * panel_count + 1.2,
-                                                             von_mises_panel_size), layout='constrained', squeeze=False)
-        axes = axes[0]
-        stress_limits = {'vmin': min(map(np.min, stress_maps_MPa)) if stress_min_MPa is None else stress_min_MPa,
-                         'vmax': max(map(np.max, stress_maps_MPa)) if stress_max_MPa is None else stress_max_MPa}
-        for axis, solver_name, stress_map_MPa in zip(axes, solver_names, stress_maps_MPa):
-            image = draw_stress_map(axis, stress_map_MPa, cross_section_material_ids, element_number_per_side,
-                                    solver_name, 'white', cmap='jet', **stress_limits)
-        figure.colorbar(image, ax=axes[:len(stress_maps_MPa)], label="von Mises stress (MPa)", shrink=0.85)
-
-        if len(stress_maps_MPa) == 2:
-            difference_MPa = stress_maps_MPa[1] - stress_maps_MPa[0]
-            largest_difference = max(np.abs(difference_MPa).max(), np.finfo(float).tiny)
-            image = draw_stress_map(axes[2], difference_MPa, cross_section_material_ids, element_number_per_side,
-                                    f"{solver_names[1]} − {solver_names[0]}", 'black', cmap='RdBu_r',
-                                    vmin=-largest_difference, vmax=largest_difference)
-            figure.colorbar(image, ax=axes[2], label="Difference (MPa)", shrink=0.85)
-
+        figure, axes = plt.subplots(1, len(stress_maps), squeeze=False, layout='constrained',
+                                    figsize=(von_mises_panel_size * len(stress_maps) + 1.2, von_mises_panel_size))
+        all_maps_MPa = [stress_map.von_mises_MPa for stress_map in stress_maps]
+        stress_limits = {'vmin': min(map(np.min, all_maps_MPa)) if stress_min_MPa is None else stress_min_MPa,
+                         'vmax': max(map(np.max, all_maps_MPa)) if stress_max_MPa is None else stress_max_MPa}
+        for axis, stress_map in zip(axes[0], stress_maps):
+            image = draw_stress_map(axis, stress_map.von_mises_MPa, stress_map.material_ids,
+                                    stress_map.element_number_per_side, stress_map.title, cmap='jet', **stress_limits)
+        figure.colorbar(image, ax=axes[0], label="von Mises stress (MPa)", shrink=0.85)
         figure.suptitle(f"Load step {load_step} of {load_step_count}", color='0.3')
         figure.savefig(plot_path)
     plt.close(figure)

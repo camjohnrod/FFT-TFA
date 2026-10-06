@@ -11,11 +11,15 @@ from material import get_flow_stress, get_unloaded_plastic_state, get_yielding_p
 from online_timing import online_time_groups, online_timer
 
 class Solver(NamedTuple):
-    # solve_step(E, P, macro_strain, partition_materials, plastic_history) returns a StepResult.
-    # get_model_residual(E, P, macro_strain, strain, partition_materials, plastic_history) recomputes the residual of
-    # the equation the solver solves, from scratch, for the independent check after every step.
+    # One solver, complete with its model's operators and the partition lattice it lives on:
+    #   solve_step(macro_strain, partition_materials, plastic_history) returns a StepResult;
+    #   get_model_residual(macro_strain, strain, partition_materials, plastic_history) recomputes the residual of the
+    #   equation it solves, from scratch, for the independent check after every step;
+    #   partition_materials (an offline.PartitionMaterials) are its partitions' materials, which run_strain_path
+    #   passes to both.
     solve_step: Callable
     get_model_residual: Callable
+    partition_materials: tuple
 
 def check_flow_stress_is_positive(partition_materials, plastic_state):
     # Linear softening drives the flow stress to zero at finite plastic strain. Past that point the return map
@@ -34,8 +38,12 @@ def check_residual_independently(solver_name, step, recomputed_residual, macro_s
                            f"scratch is {relative_residual:.3e} (tolerance {config.convergence_tolerance:.0e}).")
 
 class LoadPathResult(NamedTuple):
+    # Which phase each partition of the solver's lattice is (0 matrix, 1 inclusion).
+    partition_material_ids: np.ndarray
     macroscopic_stress: np.ndarray
-    # Every partition's stress, per step, for the von Mises stress maps.
+    # Every partition's stress at every step, (load steps, partitions, 6), for the stress maps and the laminate check.
+    # Only a solver's last repeat keeps it (None otherwise): every repeat solves the same steps to the same result, and
+    # on the fine lattice it is large.
     partition_stress_per_step: np.ndarray
     # Residual evaluations per step, the same unit for every solver: a fixed point's corrections plus one, or a
     # Newton solver's Newton steps plus one.
@@ -54,12 +62,14 @@ def get_macroscopic_stress(stress):
     # ER-5. Every partition has the same volume, so the volume-weighted sum is a plain mean.
     return np.mean(stress, axis=0)
 
-def run_strain_path(solver_name, solver, E, P, partition_materials):
-    plastic_history = get_unloaded_plastic_state()
+def run_strain_path(solver_name, solver, keep_partition_stress):
+    partition_materials = solver.partition_materials
+    partition_count = len(partition_materials.L)
+    plastic_history = get_unloaded_plastic_state(partition_count)
 
     step_count = config.load_step_count
     macroscopic_stress = np.zeros((step_count, 6))
-    partition_stress_per_step = np.zeros((step_count, config.partition_count, 6))
+    partition_stress_per_step = np.zeros((step_count, partition_count, 6))
     iterations_per_step = np.zeros(step_count, dtype=int)
     yielding_per_step = np.zeros(step_count, dtype=bool)
     solve_time_per_step = np.zeros(step_count)
@@ -71,7 +81,7 @@ def run_strain_path(solver_name, solver, E, P, partition_materials):
         online_timer.reset()
         start_time = time.perf_counter()
         try:
-            step_result = solver.solve_step(E, P, macro_strain, partition_materials, plastic_history)
+            step_result = solver.solve_step(macro_strain, partition_materials, plastic_history)
             check_flow_stress_is_positive(partition_materials, step_result.plastic_state)
         except LoadPathAbandoned as failure:
             # Failing on the first step leaves no partial result worth keeping.
@@ -85,7 +95,7 @@ def run_strain_path(solver_name, solver, E, P, partition_materials):
 
         # The step's timings are recorded above, and the timer is reset before the next step, so the independent
         # check below adds nothing to any timing.
-        recomputed_residual = solver.get_model_residual(E, P, macro_strain, step_result.strain, partition_materials,
+        recomputed_residual = solver.get_model_residual(macro_strain, step_result.strain, partition_materials,
                                                         plastic_history)
         check_residual_independently(solver_name, step, recomputed_residual, macro_strain)
         iterations_per_step[step] = len(step_result.residual_history)
@@ -94,10 +104,12 @@ def run_strain_path(solver_name, solver, E, P, partition_materials):
         partition_stress_per_step[step] = step_result.stress
         plastic_history = step_result.plastic_state
 
-    return LoadPathResult(macroscopic_stress, partition_stress_per_step, iterations_per_step, yielding_per_step,
-                          solve_time_per_step, group_time_per_step, completed_step_count, failure_reason)
+    return LoadPathResult(partition_materials.material_ids, macroscopic_stress,
+                          partition_stress_per_step if keep_partition_stress else None,
+                          iterations_per_step, yielding_per_step, solve_time_per_step, group_time_per_step,
+                          completed_step_count, failure_reason)
 
-def run_interleaved_repeats(get_solvers_for_one_path, E, P, partition_materials):
+def run_interleaved_repeats(get_solvers_for_one_path):
     # Every solver runs once per repeat, and the one that runs first rotates between repeats. Taking the fastest
     # repeat per step removes random noise, but not a bias that recurs every repeat, such as the first solver
     # paying the first-touch cost of the dense P. Solvers are built fresh for every load path, so none carries
@@ -108,5 +120,6 @@ def run_interleaved_repeats(get_solvers_for_one_path, E, P, partition_materials)
         for position in range(len(solver_names)):
             solver_name = solver_names[(repeat + position) % len(solver_names)]
             solver = get_solvers_for_one_path()[solver_name]
-            results[solver_name].append(run_strain_path(solver_name, solver, E, P, partition_materials))
+            is_last_repeat = repeat == config.timing_repeat_count - 1
+            results[solver_name].append(run_strain_path(solver_name, solver, keep_partition_stress=is_last_repeat))
     return results

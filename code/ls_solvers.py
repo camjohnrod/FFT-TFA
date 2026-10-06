@@ -30,14 +30,12 @@ def get_ls_state(strain, b, P0_transformed, reference_compliance, partition_mate
     residual = strain - b - get_P0_induced_strain(P0_transformed, equivalent_eigenstrain)
     return plastic_state, stress, residual
 
-def get_ls_residual(E, P, macro_strain, strain, partition_materials, plastic_history, P0_transformed,
-                                 reference_compliance):
+def get_ls_residual(macro_strain, strain, partition_materials, plastic_history, P0_transformed, reference_compliance):
     # LS-18 at a converged strain, for the independent check in run_strain_path. The LS solvers keep no bookkeeping
-    # between iterations, so evaluating the residual afresh is the whole check. E and P belong to the actual model and
-    # go unused.
-    b = np.tile(macro_strain, (config.partition_count, 1))
+    # between iterations, so evaluating the residual afresh is the whole check.
+    b = np.tile(macro_strain, (len(strain), 1))
     _, _, residual = get_ls_state(strain, b, P0_transformed, reference_compliance, partition_materials,
-                                         plastic_history)
+                                  plastic_history)
     return residual
 
 ## ------- Fixed Point ------- ##
@@ -55,7 +53,7 @@ def get_ls_relaxation_factor(partition_materials, reference_L):
 
 def ls_fixed_point_iteration(macro_strain, initial_strain, partition_materials, plastic_history, P0_transformed,
                                     reference_compliance, relaxation):
-    b = np.tile(macro_strain, (config.partition_count, 1))
+    b = np.tile(macro_strain, (len(initial_strain), 1))
     strain = initial_strain
 
     residual_history = []
@@ -87,24 +85,24 @@ def get_ls_newton_correction(P0_transformed, jacobian_blocks, residual):
     # Solves the LS-20 Newton system J δε = -r by unpreconditioned GMRES. Timed as one correction solve, apart from
     # its P0 applications, which count as induced strain.
     def apply_jacobian(flat_vector):
-        vector = flat_vector.reshape(config.partition_count, 6)
+        vector = flat_vector.reshape(-1, 6)
         coupled_strain = get_P0_induced_strain(P0_transformed, np.einsum('pij,pj->pi', jacobian_blocks, vector))
         return (vector - coupled_strain).reshape(-1)
 
-    system_size = 6 * config.partition_count
+    system_size = residual.size
     jacobian = scipy.sparse.linalg.LinearOperator((system_size, system_size), matvec=apply_jacobian)
     correction, info = scipy.sparse.linalg.gmres(jacobian, -residual.reshape(-1), rtol=config.newton_krylov_tolerance,
                                                  restart=config.newton_krylov_restart)
     if info != 0:
         raise SolverDidNotConverge(f"GMRES did not converge inside the LS Newton step (info {info}). Loosen "
                                    "newton_krylov_tolerance, raise newton_krylov_restart, or use MAIN_FP.py")
-    return correction.reshape(config.partition_count, 6)
+    return correction.reshape(-1, 6)
 
 def ls_newton_iteration(macro_strain, initial_strain, partition_materials, plastic_history, P0_transformed,
                                reference_compliance):
     # A Newton step costs a whole Krylov solve, so it gets a far smaller cap than the fixed point: without one, a
     # stagnating solve would grind through hundreds of thousands of convolutions instead of failing.
-    b = np.tile(macro_strain, (config.partition_count, 1))
+    b = np.tile(macro_strain, (len(initial_strain), 1))
     strain = initial_strain
 
     residual_history = []
@@ -129,13 +127,12 @@ class LSSolver:
     # the macrostrain increment, so the solver keeps that strain between steps; the get_ls_*_solver functions build a
     # fresh one for every load path. iterate(macro_strain, initial_strain, partition_materials, plastic_history)
     # solves one step.
-    def __init__(self, iterate):
+    def __init__(self, iterate, partition_count):
         self.iterate = iterate
-        self.previous_strain = np.zeros((config.partition_count, 6))
+        self.previous_strain = np.zeros((partition_count, 6))
         self.previous_macro_strain = np.zeros(6)
 
-    def __call__(self, E, P, macro_strain, partition_materials, plastic_history):
-        # E and P describe the actual heterogeneous model, which the LS model replaces, so they go unused.
+    def __call__(self, macro_strain, partition_materials, plastic_history):
         initial_strain = self.previous_strain + (macro_strain - self.previous_macro_strain)
         step_result = self.iterate(macro_strain, initial_strain, partition_materials, plastic_history)
         self.previous_strain, self.previous_macro_strain = step_result.strain, macro_strain
@@ -145,12 +142,16 @@ def get_ls_residual_function(P0_transformed, reference_compliance):
     return functools.partial(get_ls_residual, P0_transformed=P0_transformed,
                              reference_compliance=reference_compliance)
 
-def get_ls_fixed_point_solver(P0_transformed, reference_compliance, relaxation):
+def get_ls_fixed_point_solver(P0_transformed, reference_compliance, relaxation, partition_materials):
+    # An LS solver on the lattice that P0_transformed and partition_materials describe.
     iterate = functools.partial(ls_fixed_point_iteration, P0_transformed=P0_transformed,
                                 reference_compliance=reference_compliance, relaxation=relaxation)
-    return Solver(LSSolver(iterate), get_ls_residual_function(P0_transformed, reference_compliance))
+    return Solver(LSSolver(iterate, len(partition_materials.L)),
+                  get_ls_residual_function(P0_transformed, reference_compliance), partition_materials)
 
-def get_ls_newton_solver(P0_transformed, reference_compliance):
+def get_ls_newton_solver(P0_transformed, reference_compliance, partition_materials):
+    # An LS solver on the lattice that P0_transformed and partition_materials describe.
     iterate = functools.partial(ls_newton_iteration, P0_transformed=P0_transformed,
                                 reference_compliance=reference_compliance)
-    return Solver(LSSolver(iterate), get_ls_residual_function(P0_transformed, reference_compliance))
+    return Solver(LSSolver(iterate, len(partition_materials.L)),
+                  get_ls_residual_function(P0_transformed, reference_compliance), partition_materials)

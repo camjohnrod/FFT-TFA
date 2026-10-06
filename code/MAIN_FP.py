@@ -3,7 +3,9 @@
 # iteration with and without the FFT reference preconditioner (Formulation.md Strategy 1). The two TFA solvers solve
 # the same equation and must agree to solver tolerance. LS is a different model, so its difference from TFA is
 # modelling error, printed as such; only under matched_stiffness_control are the two models the same equation, and
-# then they must agree too. The problem and every solver setting are read from config.py.
+# then they must agree too. The problem and every solver setting are read from config.py. The non-partitioned LS
+# solvers (config.include_non_partitioned_ls) run in MAIN_Newton.py only: the LS fixed point at fine resolution takes
+# too long.
 #
 # Run from anywhere: python code/MAIN_FP.py
 # Outputs, in code/output: FP_load_path_summary.png, FP_time_breakdown.png, FP_von_mises_stress.png, FP_results.npz
@@ -15,31 +17,26 @@ import config
 from load_path import run_interleaved_repeats
 from ls_solvers import get_ls_fixed_point_solver, get_ls_relaxation_factor
 from offline import get_problem
-from report import (check_matched_stiffness, check_solver_agreement, get_comparable_step_count, print_comparison,
-                    print_model_difference, remove_old_outputs, save_cross_section_plot, save_load_path_plots,
-                    save_results, save_von_mises_stress_plot)
+from report import (check_results, get_solver_roles, remove_old_outputs, report_problem, report_results,
+                    save_results)
 from tfa_solvers import get_tfa_fixed_point_solvers
 from verification import run_verification
 
 run_name = "FP"
-ls_solver_name = "LS FP"
-# With TFA included, every plot and check compares LS against the plain TFA solver, the baseline; the
-# FFT-preconditioned TFA solver is checked against it.
-tfa_baseline_solver_name = "TFA Standard FP"
-tfa_fft_solver_name = "TFA FFT FP"
+solver_roles = get_solver_roles(ls="LS FP", tfa_baseline="TFA Standard FP", tfa_fft="TFA FFT FP")
 
 def get_solvers(problem, ls_relaxation):
-    solvers = {ls_solver_name: get_ls_fixed_point_solver(problem.P0_transformed, problem.reference_compliance,
-                                                         ls_relaxation)}
+    solvers = {solver_roles.ls: get_ls_fixed_point_solver(problem.P0_transformed, problem.reference_compliance,
+                                                          ls_relaxation, problem.partition_materials)}
     if config.include_tfa_model:
-        solvers.update(get_tfa_fixed_point_solvers(problem.P0_transformed))
+        solvers.update(get_tfa_fixed_point_solvers(problem.E, problem.P, problem.P0_transformed,
+                                                   problem.partition_materials))
     return solvers
 
 def main():
     remove_old_outputs(run_name)
     problem = get_problem()
-    print(f"inclusion volume fraction on the partition grid: {problem.partition_material_ids.mean():.4f}")
-    save_cross_section_plot(problem.partition_material_ids)
+    report_problem(problem)
     if config.verification_enabled:
         run_verification(problem)
 
@@ -47,21 +44,9 @@ def main():
     print(f"LS fixed point: relaxation {ls_relaxation:.4g}")
     if config.include_tfa_model:
         print(f"TFA fixed point: relaxation {config.tfa_relaxation_factor}")
-    results = run_interleaved_repeats(functools.partial(get_solvers, problem, ls_relaxation), problem.E, problem.P,
-                                      problem.partition_materials)
-    comparable_step_count = get_comparable_step_count(results)
-    print_comparison(results, comparable_step_count)
-    if config.include_tfa_model:
-        print_model_difference(results, tfa_baseline_solver_name, ls_solver_name, comparable_step_count)
-        save_load_path_plots(results, comparable_step_count, tfa_baseline_solver_name, ls_solver_name, run_name)
-        save_von_mises_stress_plot(results, [tfa_baseline_solver_name, ls_solver_name],
-                                   problem.partition_material_ids, run_name)
-        check_solver_agreement(results, [tfa_baseline_solver_name, tfa_fft_solver_name], comparable_step_count)
-        if config.matched_stiffness_control:
-            check_matched_stiffness(results, tfa_baseline_solver_name, ls_solver_name, comparable_step_count)
-    else:
-        save_load_path_plots(results, comparable_step_count, None, ls_solver_name, run_name)
-        save_von_mises_stress_plot(results, [ls_solver_name], problem.partition_material_ids, run_name)
+    results = run_interleaved_repeats(functools.partial(get_solvers, problem, ls_relaxation))
+    report_results(results, solver_roles, run_name)
+    check_results(results, problem, solver_roles)
     # Saved only after every check has passed, so MAIN_Newton.py never cross-checks against a failed run.
     save_results(results, run_name)
 

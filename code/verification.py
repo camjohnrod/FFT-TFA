@@ -1,17 +1,19 @@
-# Tolerance checks run before either entry point solves anything: the structure of the reference kernel
-# P0, finite-difference checks of the Newton Jacobians, and, when the grid is small enough for dense matrices, P0
-# against a direct reference solve and the LS elastic model error. Every check prints PASS or FAIL, and any failure
-# stops the run.
+# Tolerance checks run before either entry point solves anything: the structure of every reference kernel P0 (main,
+# fine and coarse lattices), the partitioned P0 rebuilt from the fine one, finite-difference checks of the Newton
+# Jacobians, the FE homogenized stiffness against the laminate's exact one, and, when the grid is small enough for
+# dense matrices, P0 against a direct reference solve and the LS elastic model error. Every check prints PASS or FAIL,
+# and any failure stops the run.
 
 import numpy as np
 import scipy.linalg
 
 import config
+from laminate import get_laminate_elastic_stiffness
 from lattice_fft import get_P0_offset_blocks_from_transformed
 from ls_solvers import get_P0_induced_strain, get_ls_jacobian_blocks, get_ls_state
 from material import (get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_unloaded_plastic_state,
                       get_yielding_partitions)
-from offline import get_homogenized_L, get_influence_functions, get_partition_averaging_operator
+from offline import get_homogenized_L, get_influence_functions
 from tfa_solvers import get_actual_residual, get_induced_strain
 
 def get_dense_P0(P0_offset_blocks):
@@ -26,9 +28,10 @@ def get_dense_P0(P0_offset_blocks):
     blocks = offset_lattice[offsets[:, None, :, None], offsets[None, :, None, :]]
     return blocks.transpose(0, 1, 4, 2, 3, 5).reshape(6 * config.partition_count, 6 * config.partition_count)
 
-def get_reference_kernel_checks(P0_transformed, reference_L):
-    # P0_transformed holds half the frequencies. That covers them all: the block at -ξ is the complex conjugate of
-    # the one at ξ, so it passes each check below exactly when the block at ξ does.
+def get_reference_kernel_checks(P0_transformed, reference_L, kernel_name="P0"):
+    # The structure every reference kernel must have, on any lattice. P0_transformed holds half the frequencies. That
+    # covers them all: the block at -ξ is the complex conjugate of the one at ξ, so it passes each check below exactly
+    # when the block at ξ does.
     zero_frequency_error = np.max(np.abs(P0_transformed[0, 0])) / np.max(np.abs(P0_transformed))
 
     D0_transformed = P0_transformed @ np.linalg.inv(reference_L)
@@ -36,17 +39,50 @@ def get_reference_kernel_checks(P0_transformed, reference_L):
     hermitian_error = np.max(np.abs(hermitian_difference)) / np.max(np.abs(D0_transformed))
 
     eigenvalues = np.linalg.eigvals(P0_transformed)
-    return [("zero-frequency block vanishes", zero_frequency_error, config.verification_tolerance),
-            ("P0(xi) C0^-1 is Hermitian", hermitian_error, config.verification_tolerance),
-            ("P0(xi) eigenvalues are real", np.max(np.abs(eigenvalues.imag)), config.verification_tolerance),
-            ("P0(xi) eigenvalues lie in [0, 1]",
+    return [(f"{kernel_name} zero-frequency block vanishes", zero_frequency_error, config.verification_tolerance),
+            (f"{kernel_name}(xi) C0^-1 is Hermitian", hermitian_error, config.verification_tolerance),
+            (f"{kernel_name}(xi) eigenvalues are real", np.max(np.abs(eigenvalues.imag)),
+             config.verification_tolerance),
+            (f"{kernel_name}(xi) eigenvalues lie in [0, 1]",
              max(-np.min(eigenvalues.real), np.max(eigenvalues.real) - 1, 0.0), config.verification_tolerance)]
+
+def get_partitioned_P0_from_fine(fine_P0_offset_blocks, discretization):
+    # The partitioned kernel rebuilt from the fine one (one partition per element column of the same mesh), by
+    # linearity. Unit eigenstrain in a partition is unit eigenstrain in each of its k × k element columns, and a
+    # partition's average strain is the mean over its columns, so P0[D] = (1/k²) Σ_receiver s Σ_source t
+    # p0_fine[k D + s - t]. Grouped by d = s - t, which k - |d_x| times k - |d_y| pairs (s, t) share:
+    #   P0[D] = Σ_d (k - |d_x|)(k - |d_y|) / k² · p0_fine[k D + d].
+    # Offsets are periodic, and both lattices are indexed [j, i], as get_grid_id orders them.
+    k = discretization.elements_per_partition_side
+    fine_side, partition_side = discretization.element_number_per_side, discretization.partition_number_per_side
+    fine_P0 = fine_P0_offset_blocks.reshape(fine_side, fine_side, 6, 6)
+    partition_offsets = k * np.arange(partition_side)
+    rebuilt_P0 = np.zeros((partition_side, partition_side, 6, 6))
+    for d_j in range(1 - k, k):
+        for d_i in range(1 - k, k):
+            weight = (k - abs(d_j)) * (k - abs(d_i)) / k**2
+            rebuilt_P0 += weight * fine_P0[np.ix_((partition_offsets + d_j) % fine_side,
+                                                  (partition_offsets + d_i) % fine_side)]
+    return rebuilt_P0.reshape(-1, 6)
+
+def get_fine_and_coarse_kernel_checks(problem):
+    # The kernels of the fine and coarse non-partitioned LS lattices, with the same C0. Each gets the structural
+    # checks, and the partitioned P0 rebuilt from the fine one must equal the one solved directly: that tests the fine
+    # kernel, the lattice indexing and the partition averaging at once, since the two come from separate FE solves.
+    fine_P0_transformed = problem.fine_lattice.P0_transformed
+    coarse_P0_transformed = problem.coarse_lattice.P0_transformed
+    direct_P0 = get_P0_offset_blocks_from_transformed(problem.P0_transformed)
+    rebuilt_P0 = get_partitioned_P0_from_fine(get_P0_offset_blocks_from_transformed(fine_P0_transformed),
+                                              problem.mesh.discretization)
+    rebuild_error = np.abs(rebuilt_P0 - direct_P0).max() / np.abs(direct_P0).max()
+    return ([("partitioned P0 rebuilt from the fine P0", rebuild_error, config.verification_tolerance)]
+            + get_reference_kernel_checks(fine_P0_transformed, problem.reference_L, "fine P0")
+            + get_reference_kernel_checks(coarse_P0_transformed, problem.reference_L, "coarse P0"))
 
 def get_dense_reference_checks(problem, dense_P0):
     print(f"  dense reference influence functions ({6 + 6 * config.partition_count} load columns):")
-    reference_L_per_element = np.tile(problem.reference_L, (config.element_count, 1, 1))
-    A = get_partition_averaging_operator(problem.B, problem.mesh.element_nodes, problem.mesh.element_partition_ids)
-    E_reference, P_reference = get_influence_functions(problem.B, reference_L_per_element, problem.mesh, A)
+    reference_L_per_element = np.tile(problem.reference_L, (problem.mesh.discretization.element_count, 1, 1))
+    E_reference, P_reference = get_influence_functions(problem.mesh, reference_L_per_element)
 
     identity_error = np.max(np.abs(E_reference.reshape(config.partition_count, 6, 6) - np.eye(6)))
     translation_error = np.max(np.abs(P_reference - dense_P0)) / np.max(np.abs(P_reference))
@@ -68,7 +104,7 @@ def get_jacobian_checks(model_name, equation_label, partition_materials, get_bas
     # and apply_jacobian(ε, v) the analytic product. These checks are the only test of the plastic branch of H_μ, so
     # the state has to be partly yielded, and the active yield set must not move across the perturbation or the
     # one-sided branch derivative is not the true one.
-    no_plastic_history = get_unloaded_plastic_state()
+    no_plastic_history = get_unloaded_plastic_state(config.partition_count)
 
     def get_yielding(trial_strain):
         plastic_state, _ = get_plastic_eigenstrain(trial_strain, partition_materials, no_plastic_history)
@@ -104,7 +140,7 @@ def get_ls_jacobian_checks(problem):
     # The LS-20 product J v = v - P0 [(I - C0⁻¹ L_t) v], at the uniform strain ε̄ in every partition.
     partition_materials, P0_transformed = problem.partition_materials, problem.P0_transformed
     reference_compliance = problem.reference_compliance
-    no_plastic_history = get_unloaded_plastic_state()
+    no_plastic_history = get_unloaded_plastic_state(config.partition_count)
 
     def get_base_strain(macro_strain):
         return np.tile(macro_strain, (config.partition_count, 1))
@@ -125,7 +161,7 @@ def get_ls_jacobian_checks(problem):
 def get_tfa_jacobian_checks(problem):
     # The ER-18 product J v = v - P (H_μ v) of the TFA Newton solvers, at the elastic predictor E ε̄.
     partition_materials, E, P = problem.partition_materials, problem.E, problem.P
-    no_plastic_history = get_unloaded_plastic_state()
+    no_plastic_history = get_unloaded_plastic_state(config.partition_count)
 
     def get_base_strain(macro_strain):
         return (E @ macro_strain).reshape(config.partition_count, 6)
@@ -157,14 +193,24 @@ def print_elastic_model_error(dense_P0, problem):
     print(f"    homogenized stiffness    : {stiffness_error:.3e} relative, worst component")
     print(f"    C_1111 exact vs model MPa: {exact_stiffness[0, 0] / 1e6:.3f} vs {model_stiffness[0, 0] / 1e6:.3f}")
 
+def get_laminate_stiffness_check(problem):
+    # The FE homogenized stiffness <L E> against the laminate's exact elastic stiffness (laminate.py).
+    exact_stiffness = get_laminate_elastic_stiffness(problem.partition_materials)
+    homogenized_L = get_homogenized_L(problem.E, problem.partition_materials.L)
+    stiffness_error = np.abs(homogenized_L - exact_stiffness).max() / np.abs(exact_stiffness).max()
+    return ("homogenized L is the exact laminate stiffness", stiffness_error, config.verification_tolerance)
+
 def run_verification(problem, extra_check_functions=()):
     # Each of extra_check_functions(problem) returns further (description, error, tolerance) checks from the entry
     # point, such as the Jacobian checks of its Newton solvers, printed and enforced with the rest. The LS elastic
     # model error is printed after them, from the dense P0, so only when the dense checks run.
     print("verification:")
     checks = get_reference_kernel_checks(problem.P0_transformed, problem.reference_L)
+    checks += get_fine_and_coarse_kernel_checks(problem)
     for get_checks in extra_check_functions:
         checks += get_checks(problem)
+    if config.inclusion_shape == "laminate":
+        checks.append(get_laminate_stiffness_check(problem))
     dense_P0 = None
     if config.partition_count <= config.verification_max_partitions:
         dense_P0 = get_dense_P0(get_P0_offset_blocks_from_transformed(problem.P0_transformed))

@@ -17,30 +17,33 @@ import config
 from load_path import run_interleaved_repeats
 from ls_solvers import get_ls_newton_solver
 from offline import get_problem
-from report import (check_against_saved_results, check_matched_stiffness, check_solver_agreement,
-                    get_comparable_step_count, print_comparison, print_model_difference, remove_old_outputs,
-                    save_cross_section_plot, save_load_path_plots, save_results, save_von_mises_stress_plot)
+from report import (check_against_saved_results, check_results, get_solver_roles, remove_old_outputs, report_problem,
+                    report_results, save_results)
 from tfa_solvers import get_tfa_newton_solvers
 from verification import get_ls_jacobian_checks, get_tfa_jacobian_checks, run_verification
 
 run_name = "Newton"
-ls_solver_name = "LS Newton"
-# With TFA included, every plot and check compares LS against the plain TFA solver, the baseline; the
-# FFT-preconditioned TFA solver is checked against it.
-tfa_baseline_solver_name = "TFA Newton"
-tfa_fft_solver_name = "TFA FFT Newton"
+solver_roles = get_solver_roles(ls="LS Newton", tfa_baseline="TFA Newton", tfa_fft="TFA FFT Newton",
+                                ls_fine="LS Newton, fine", ls_coarse="LS Newton, coarse")
 
 def get_solvers(problem):
-    solvers = {ls_solver_name: get_ls_newton_solver(problem.P0_transformed, problem.reference_compliance)}
+    solvers = {solver_roles.ls: get_ls_newton_solver(problem.P0_transformed, problem.reference_compliance,
+                                                     problem.partition_materials)}
+    if solver_roles.ls_fine is not None:
+        # The same LS scheme on the fine and coarse lattices, with the same C0 (config.include_non_partitioned_ls).
+        for solver_name, lattice in ((solver_roles.ls_fine, problem.fine_lattice),
+                                     (solver_roles.ls_coarse, problem.coarse_lattice)):
+            solvers[solver_name] = get_ls_newton_solver(lattice.P0_transformed, problem.reference_compliance,
+                                                        lattice.partition_materials)
     if config.include_tfa_model:
-        solvers.update(get_tfa_newton_solvers(problem.P0_transformed))
+        solvers.update(get_tfa_newton_solvers(problem.E, problem.P, problem.P0_transformed,
+                                              problem.partition_materials))
     return solvers
 
 def main():
     remove_old_outputs(run_name)
     problem = get_problem()
-    print(f"inclusion volume fraction on the partition grid: {problem.partition_material_ids.mean():.4f}")
-    save_cross_section_plot(problem.partition_material_ids)
+    report_problem(problem)
     if config.verification_enabled:
         jacobian_checks = [get_ls_jacobian_checks]
         if config.include_tfa_model:
@@ -49,24 +52,14 @@ def main():
 
     print(f"Newton: GMRES rtol {config.newton_krylov_tolerance:.0e}, restart {config.newton_krylov_restart}, "
           f"at most {config.newton_max_steps} Newton steps")
-    results = run_interleaved_repeats(functools.partial(get_solvers, problem), problem.E, problem.P,
-                                      problem.partition_materials)
-    comparable_step_count = get_comparable_step_count(results)
-    print_comparison(results, comparable_step_count)
+    results = run_interleaved_repeats(functools.partial(get_solvers, problem))
+    report_results(results, solver_roles, run_name)
+    check_results(results, problem, solver_roles)
+    # Every solver against the fixed-point result of the same model, saved by MAIN_FP.py.
+    check_against_saved_results(results, solver_roles.ls, "FP", "LS FP")
     if config.include_tfa_model:
-        print_model_difference(results, tfa_baseline_solver_name, ls_solver_name, comparable_step_count)
-        save_load_path_plots(results, comparable_step_count, tfa_baseline_solver_name, ls_solver_name, run_name)
-        save_von_mises_stress_plot(results, [tfa_baseline_solver_name, ls_solver_name],
-                                   problem.partition_material_ids, run_name)
-        check_solver_agreement(results, [tfa_baseline_solver_name, tfa_fft_solver_name], comparable_step_count)
-        if config.matched_stiffness_control:
-            check_matched_stiffness(results, tfa_baseline_solver_name, ls_solver_name, comparable_step_count)
-        for solver_name in (tfa_baseline_solver_name, tfa_fft_solver_name):
+        for solver_name in (solver_roles.tfa_baseline, solver_roles.tfa_fft):
             check_against_saved_results(results, solver_name, "FP", "TFA Standard FP")
-    else:
-        save_load_path_plots(results, comparable_step_count, None, ls_solver_name, run_name)
-        save_von_mises_stress_plot(results, [ls_solver_name], problem.partition_material_ids, run_name)
-    check_against_saved_results(results, ls_solver_name, "FP", "LS FP")
     # Saved only after every check has passed, so a failed run leaves no results behind.
     save_results(results, run_name)
 
