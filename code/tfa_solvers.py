@@ -1,5 +1,5 @@
 # The online solvers for the actual E/P model (ER-4): standard and FFT-preconditioned fixed-point iteration
-# (Formulation.md Strategy 1), and Newton-Krylov with and without the FFT reference preconditioner (Strategy 2).
+# (3_tfa_baseline.md Strategy 1), and Newton-Krylov with and without the FFT reference preconditioner (Strategy 2).
 
 import functools
 import numpy as np
@@ -151,7 +151,7 @@ def get_newton_krylov_correction(P, sensitivity, residual, reference):
     # Solves J δε = -r (ER-18) by GMRES, with the matrix-free product J v = v - P (H_μ v) of ER-21. H_μ is zero
     # outside the yielding partitions, so each product reads only their columns of P. Given the FFT reference,
     # GMRES solves the right-preconditioned system J M0⁻¹ y = -r and returns δε = M0⁻¹ y: the same Newton correction
-    # as ER-20, but GMRES then monitors the actual linear residual -r - J δε, as Formulation.md section 12 asks.
+    # as ER-20, but GMRES then monitors the actual linear residual -r - J δε, as 3_tfa_baseline.md section 12 asks.
     # Timed as one correction solve, apart from its P products, which count as induced strain.
     yielding_partitions = np.any(sensitivity != 0, axis=(1, 2))
 

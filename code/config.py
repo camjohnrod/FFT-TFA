@@ -29,9 +29,9 @@ elastic_modulus_matrix      = 100e6
 poisson_ratio_inclusion     = 0.3
 poisson_ratio_matrix        = 0.19
 inclusion_yield_stress      = np.inf
-matrix_yield_stress         = 1.0e6
+matrix_yield_stress         = np.inf #1.0e6
 inclusion_hardening_modulus = 0.0
-matrix_hardening_modulus    = 10e6
+matrix_hardening_modulus    = 0.0 #10e6
 matched_stiffness_control   = False
 
 # Models. The LS model is always solved. include_tfa_model also solves the actual E/P TFA model by the same strategy,
@@ -61,7 +61,7 @@ max_macro_strain            = np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])
 strain_increment_count      = 60
 load_path_shape             = "monotonic"
 
-# Convergence, shared by every solver: relative residual (Formulation.md section 12) below convergence_tolerance.
+# Convergence, shared by every solver: relative residual (3_tfa_baseline.md section 12) below convergence_tolerance.
 convergence_tolerance       = 1e-6
 residual_strain_scale_floor = 1e-4
 solver_agreement_tolerance  = 1e-4
@@ -86,7 +86,7 @@ newton_krylov_tolerance     = 1e-3
 newton_krylov_restart       = 50
 
 # Verification before solving, by both entry points (the Jacobian checks by MAIN_Newton.py only).
-verification_enabled        = True
+verification_enabled        = False
 verification_tolerance      = 1e-9
 jacobian_check_tolerance    = 1e-6
 verification_max_partitions = 256

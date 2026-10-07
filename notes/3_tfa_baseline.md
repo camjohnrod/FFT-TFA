@@ -1,4 +1,4 @@
-# Two reference solvers for actual E/P transformation field analysis
+# The TFA baseline: the E/P model and its fixed-point and Newton solvers
 
 ## Purpose and route
 
@@ -703,7 +703,7 @@ The next experiment should keep actual E/P and the loading history fixed, check 
 ## Source anchors and attribution
 
 1. **Fish, J.; Cui, J. (2026), “Eigenstate based homogenization,” CMAME 452, 118718.** [Local paper](../references/Fish_Cui_Eigenstate_Based_Homogenization.pdf), Section 2.2, Eqs. (7)–(10), PDF pp. 4–5. These equation passages were visually checked for the E/P starting relation and its actual heterogeneous influences. This lecture does not assess or reproduce the paper's complete EBH/CFP/TFP algorithms. ER-1 translates its tensor-index notation; the specific partition-strain solver construction is developed here.
-2. **Moulinec, H.; Suquet, P. (1994), “A fast numerical method for computing the linear and nonlinear mechanical properties of composites,” C. R. Acad. Sci. Paris, Série II, 318, 1417–1423.** [Local paper](../references/Moulinec_Suquet_Original_Paper.pdf), read completely, including the French summary and examples. Printed p. 1419, Eqs. (3)–(6); p. 1420, algorithm (8). Supports the full-field reference split, convolution, and material-update iteration. It does not contain ER-9–ER-12 for reduced E/P.
+2. **Moulinec, H.; Suquet, P. (1998), “A numerical method for computing the overall response of nonlinear composites with complex microstructure,” CMAME 157, 69–94.** [Local paper](../references/Moulinec_Suquet_Original_Paper.pdf), read completely. Pp. 70–71, Eqs. (1)–(8): auxiliary problem, Green operator, periodic Lippmann–Schwinger equation and basic scheme. Supports the full-field reference split, convolution, and material-update iteration. It does not contain ER-9–ER-12 for reduced E/P.
 3. **Ladecký, M. et al. (2023), “An optimal preconditioned FFT-accelerated finite element solver for homogenization,” Applied Mathematics and Computation 446, 127835.** [Local paper](../references/An-optimal-preconditioned-FFT-accelerated-finite-element-solver-for-homogenization.pdf), read completely, including numerical examples and the thermal appendix. Eqs. (9)–(15), Algorithm 1, Sections 4.3 and 5.1 support the FE Newton system, reference inverse, conditional spectral estimates, and local stiffness products. Section 6.1 connects its displacement and strain formulations. Its reduced E/P adaptation and the deductions in Section 11 are developed here, not results claimed by that paper.
 
-The constitutive convention follows the existing [J2 update notes](verified_notes/07_complete_j2_return_mapping_algorithm.md). The two new solver derivations are algebraically checked candidate methods. No literature-novelty claim is made.
+The constitutive convention follows the existing [J2 update notes](background_influence_functions_and_J2/07_complete_j2_return_mapping_algorithm.md). The two new solver derivations are algebraically checked candidate methods. No literature-novelty claim is made.

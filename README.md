@@ -7,12 +7,16 @@ state. Two reduced models are compared:
 
 - **LS**, the model under development: a partition-averaged Lippmann–Schwinger equation in which partitions interact
   only through a homogeneous reference medium (stiffness C0), so the nonlocal operator is one FFT convolution with a
-  kernel P0 (`notes/Partition_Lippmann_Schwinger_New_9_28_2026`).
+  kernel P0 (`notes/2_ls_model.md`).
 - **TFA**, the baseline: Transformation Field Analysis, whose interaction operator P is computed exactly from the
-  real composite but is dense, so its cost grows with the square of the number of partitions (`notes/Formulation.md`).
+  real composite but is dense, so its cost grows with the square of the number of partitions (`notes/3_tfa_baseline.md`).
 
-The research question is whether partitioned LS approaches the accuracy of a fine, non-partitioned solve at the
-cost of a coarse one.
+**Research question.** On identical uniform partitions, how does the interaction operator decide accuracy and cost?
+TFA uses the real composite's operator: exact in elasticity, but dense. LS replaces it with a reference-medium
+operator applied by FFT, built either exactly (the consistent partition average of the Green operator) or
+approximately (Moulinec–Suquet, or the FE kernel used now). The aim is to measure each against a full-field
+reference, and to find the exact relation between the TFA and LS operators. `notes/1_research_context.md` places this in the
+literature.
 
 ## Quick start
 
@@ -24,8 +28,8 @@ python code/check_code.py     # after any code change: static checks and seven s
 
 Dependencies: `numpy`, `scipy`, `matplotlib`, `tqdm` (no package file; the miniforge `base` environment has them).
 Every setting is in `code/config.py`; there are no command-line options. The first run of a configuration factorizes
-the global stiffness and caches the result in `code/cache/` (gitignored), which takes minutes and, for TFA, a dense
-matrix of (6 × partitions)² doubles: 0.3 GB at the default 32 × 32 partitions.
+the global stiffness and caches the result in `code/cache/` (gitignored), which takes minutes and, only when TFA is
+included, a dense matrix of (6 × partitions)² doubles: 0.3 GB at the default 32 × 32 partitions.
 
 ## What a run does
 
@@ -75,8 +79,8 @@ tests. For a change that must leave every result unchanged, run `python code/che
 | `code/load_path.py`, `code/convergence.py`, `code/online_timing.py` | stepping a solver along the path, convergence, timing |
 | `code/verification.py`, `code/report.py`, `code/plots.py` | pre-solve checks, reports and post-solve checks, figures |
 | `code/check_code.py` | the test script |
-| `notes/` | derivations: `Formulation.md` (TFA, equations ER-*), the LS note (LS-*), `verified_notes/` |
-| `references/` | the papers the notes cite |
+| `notes/` | in reading order: `1_research_context.md` (research question, P0 operators, literature), `2_ls_model.md` (LS, equations LS-*), `3_tfa_baseline.md` (TFA and its solvers, ER-*), `background_influence_functions_and_J2/` (derivations of E, P and the J2 return map) |
+| `references/` | the papers the notes cite; `reading_notes/` has one note per paper read cover to cover |
 
 `CLAUDE.md` holds the detailed conventions and design decisions (strain convention, half-spectrum FFT, timing rules,
 naming).
@@ -88,12 +92,22 @@ solution: it rings along high-contrast interfaces (an element-to-element alterna
 about ±30 %, which refinement does not remove and which element-level TFA does not show), so no accuracy figures are
 computed against it.
 
-Next, in order:
-1. Build TFA's dense P only when TFA is included, so LS-only runs at fine resolution stop paying for it.
-2. Check whether one element layer through the thickness gives the same results as three (it should, since nothing
-   varies through the thickness). One layer is already the default, for about 3× cheaper offline solves.
-3. A cost study: time and memory against resolution for partitioned, fine and coarse LS and TFA.
-4. A gold-standard reference: an FE-consistent FFT solver (Ladecký et al., in `references/`), and then the accuracy
-   study, splitting each field error into what any one-value-per-partition scheme must miss and what the scheme adds.
-5. Later: a rule for LS partitions holding both phases (circles on coarse partitions), a Moulinec–Suquet kernel option
-   for LS, and a Newton line search for strongly softening materials.
+**Position in the literature** (details in `notes/1_research_context.md`). LS is the clustered Lippmann–Schwinger equation
+that self-consistent clustering analysis (SCA) also solves, here on uniform partitions so that it runs by FFT. For
+linear elasticity this is Brisard–Dormieux's scheme (2010, 2012). With plasticity, no numerical study on uniform
+partitions was found among the papers read, and no numerical comparison of LS and TFA on identical partitions.
+
+Roadmap, in order:
+1. **Thickness check.** Confirm that one element layer through the thickness reproduces three to round-off. One layer
+   is already the default, so every later result rests on this.
+2. **Analytic P0 kernels.** Build P0 from the partition lattice alone: the consistent operator (the exact partition
+   average, LS-7), Moulinec–Suquet and filtered. The FE kernel stays as an option. With the consistent kernel,
+   partitioned and coarse LS coincide.
+3. **Gold-standard reference.** A full-field FE-consistent FFT solver (Ladecký et al., in `references/`) with
+   plasticity at the Gauss points, so that errors become absolute rather than relative to another model.
+4. **TFA–LS study.** Derive the exact relation between TFA's P and the consistent LS operator, and measure TFA and
+   every LS kernel on identical partitions against the reference, across contrast, partition count and load path.
+5. **Cost at equal accuracy.** Time and memory against resolution for each operator, compared at the same error.
+
+Later: a rule for LS partitions holding both phases (circles on coarse partitions), a reference stiffness that
+follows plastic softening (as in SCA), and a Newton line search for strongly softening materials.

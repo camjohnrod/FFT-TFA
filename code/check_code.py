@@ -31,12 +31,26 @@ import numpy as np
 code_folder = pathlib.Path(__file__).resolve().parent
 baseline_path = code_folder / "cache" / "check_code_baseline.npz"
 entry_points = ["MAIN_FP", "MAIN_Newton"]
-# Small enough to run in seconds. The geometry and model switches are set too, so a local study configuration cannot
-# change what the smoke runs cover: the square leaves 2 whole matrix partitions on each side, 3 elements per partition.
-smoke_run_overrides = {"partition_number_per_side": "9", "element_number_per_side": "27",
-                       "strain_increment_count": "12", "timing_repeat_count": "1", "inclusion_shape": '"square"',
-                       "inclusion_side_length": "(5/9) * 1e-3", "include_tfa_model": "True",
-                       "include_non_partitioned_ls": "True", "matched_stiffness_control": "False"}
+# Small enough to run in seconds: the square leaves 2 whole matrix partitions on each side, 3 elements per partition.
+# Every other input that shapes the problem, the solvers or the checks is pinned to its committed value too, so a local
+# study configuration cannot change what the smoke runs cover, nor their results compared against a saved baseline.
+smoke_run_overrides = {
+    # Geometry and mesh.
+    "domain_side_length": "1e-3", "partition_number_per_side": "9", "element_number_per_side": "27",
+    "element_number_along_z": "1", "inclusion_shape": '"square"', "inclusion_side_length": "(5/9) * 1e-3",
+    "inclusion_radius": "0.35e-3",
+    # Materials, models and reference stiffness.
+    "elastic_modulus_inclusion": "10e9", "elastic_modulus_matrix": "100e6", "poisson_ratio_inclusion": "0.3",
+    "poisson_ratio_matrix": "0.19", "inclusion_yield_stress": "np.inf", "matrix_yield_stress": "1.0e6",
+    "inclusion_hardening_modulus": "0.0", "matrix_hardening_modulus": "10e6", "matched_stiffness_control": "False",
+    "include_tfa_model": "True", "include_non_partitioned_ls": "True", "reference_stiffness": '"matrix"',
+    # Load path, solvers and checks.
+    "max_macro_strain": "np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])", "strain_increment_count": "12",
+    "load_path_shape": '"monotonic"', "convergence_tolerance": "1e-6", "residual_strain_scale_floor": "1e-4",
+    "tfa_relaxation_factor": "1.0", "tfa_max_iterations": "1000", "tfa_divergence_limit": "1.0",
+    "ls_relaxation_factor": "None", "ls_stability_safety": "0.9", "ls_max_iterations": "20000",
+    "ls_divergence_limit": "1e3", "newton_max_steps": "50", "newton_krylov_tolerance": "1e-3",
+    "newton_krylov_restart": "50", "verification_enabled": "True", "timing_repeat_count": "1"}
 
 class SmokeRun(NamedTuple):
     # The config.py values this run changes on top of smoke_run_overrides; whether every solver must complete every

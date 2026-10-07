@@ -1,6 +1,6 @@
 # The partition-averaged Lippmann-Schwinger (LS) model solved by matrix-free Newton-GMRES on the LS-20 Jacobian. With
 # config.include_tfa_model, the actual E/P TFA model (ER-4) is solved next to it as the baseline, by Newton-Krylov
-# with GMRES, once plain and once right-preconditioned by the FFT reference M0 = I - P0 H_μ,0 (Formulation.md
+# with GMRES, once plain and once right-preconditioned by the FFT reference M0 = I - P0 H_μ,0 (3_tfa_baseline.md
 # Strategy 2). The two TFA solvers solve the same equation and must agree to solver tolerance. LS is a different
 # model, so its difference from TFA is modelling error, printed as such; only under matched_stiffness_control are the
 # two models the same equation, and then they must agree too. Every solver is also checked against the fixed-point

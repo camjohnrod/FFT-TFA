@@ -542,6 +542,25 @@ The distinction between $N$ and $M$ is computational, not a guarantee of retaine
 
 **Summary:** the framework combines local actual-material updates with homogeneous, partition-averaged interactions. It uses actual stiffness for partition-average deformation and reference stiffness for within-partition fluctuations. Regular translated partitions permit an online $M$-grid FFT and linear-size kernel storage. These structural properties do not imply an accuracy advantage over other coarse discretizations.
 
+## 9. Open points
+
+These were found while implementing and testing the model, and are not yet resolved in the sections above.
+
+- **Reference stiffness.** Section 7.1's midpoint reference measured worst of five candidates (55 % plastic error).
+  It is a convergence heuristic for the linear elastic scheme, not a model choice. The code offers `"homogenized"`,
+  `"voigt"` and `"matrix"`; $\mathbf C_0$ changes the LS answer (Schneider 2019 notes the same for clustered
+  Lippmann–Schwinger equations).
+- **Plastic branch of $\mathbf H_\mu$.** LS-20 needs it but this note does not state it. The code derives it and
+  checks it against a finite difference.
+- **Convergence in $M$.** Section 5.4 leaves it open. Measured convergence is first order in partition size. Schneider
+  (2019) proves convergence of clustered Lippmann–Schwinger equations as clusters are refined, for hardening
+  materials only; softening is outside that theory.
+- **The kernel of section 6 is not the operator of LS-7.** The FE-derived $\mathbf P_0$ (LS-14) averages the FE
+  reference response, so it is non-consistent in Brisard–Dormieux's sense. The exact partition average of LS-7 can be
+  computed from the partition lattice alone, as a weighted sum over aliases; see `1_research_context.md`, sections 2–3. Only
+  the FE kernel makes LS reduce to E/P TFA in the matched-stiffness limit of section 5.4, since TFA's $\mathbf P$
+  uses the same FE mesh.
+
 ## Paper references
 
 - **[MS]** Moulinec, H.; Suquet, P. (1998), "A numerical method for computing the overall response of nonlinear composites with complex microstructure," *Computer Methods in Applied Mechanics and Engineering* 157, 69-94. [Paper](https://doi.org/10.1016/S0045-7825(97)00218-1). Basis for the reference split, periodic Lippmann-Schwinger equation, basic iteration, and elastoplastic local updates.

@@ -1,4 +1,4 @@
-# The partition-averaged Lippmann-Schwinger (LS) model of notes/Partition_Lippmann_Schwinger_New_9_28_2026: a
+# The partition-averaged Lippmann-Schwinger (LS) model of notes/2_ls_model.md: a
 # partitionwise-constant polarization interacting through the homogeneous reference medium, so the whole nonlocal
 # operator is the P0 convolution (LS-17). It is a different model from actual E/P, so it matches the TFA solvers only
 # under matched phase stiffness. It is solved either by damped fixed-point iteration (LS-19) or by matrix-free

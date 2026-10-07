@@ -284,39 +284,42 @@ def get_partition_averaging_operator(mesh):
                                    get_element_dofs(mesh), (6 * discretization.partition_count,
                                                             discretization.dof_count))
 
-def solve_influence_function(mesh, K, F):
-    # The partition-average strain response A_ε K⁻¹ F to every load column of F.
+def get_influence_function_solver(mesh, K):
+    # Factorizes K once and returns solve(F), the partition-average strain response A_ε K⁻¹ F to every load column of
+    # F, so that several sets of load columns share one factorization.
     free_dofs = get_free_dofs(mesh)
     K_free = K[free_dofs][:, free_dofs].tocsc()
     print(f"  {f'factor K ({K_free.shape[0]} DOFs)':<26}: ", end="", flush=True)
     start_time = time.perf_counter()
     K_free_factorization = scipy.sparse.linalg.splu(K_free, permc_spec='MMD_AT_PLUS_A')
     print(f"{time.perf_counter() - start_time:.1f} s")
-
     A = get_partition_averaging_operator(mesh)
-    F_free = F.tocsr()[free_dofs].tocsc()
-    columns_per_solve = 100
-    average_strain = np.zeros((A.shape[0], F.shape[1]))
-    column_batches = tqdm.tqdm(range(0, F.shape[1], columns_per_solve),
-                               desc=f"  {f'solve {F.shape[1]} load columns':<26}",
-                               bar_format="{desc}: {percentage:3.0f}% |{bar:25}| {n_fmt}/{total_fmt} batches "
-                                          "[{elapsed} elapsed, {remaining} left]", file=sys.stdout)
-    for first_column in column_batches:
-        columns = slice(first_column, first_column + columns_per_solve)
-        batch_F_free = F_free[:, columns].toarray()
-        batch_displacements = np.zeros((mesh.discretization.dof_count, batch_F_free.shape[1]))
-        batch_displacements[free_dofs] = K_free_factorization.solve(batch_F_free)
-        average_strain[:, columns] = A @ batch_displacements
-    return average_strain
 
-def get_influence_functions(mesh, L_per_element):
-    K = get_K(mesh, L_per_element)
-    F_macrostrain_and_eigenstrain = scipy.sparse.hstack([get_F_macrostrain(mesh, L_per_element),
-                                                         get_F_eigenstrain(mesh, L_per_element)])
-    average_strain = solve_influence_function(mesh, K, F_macrostrain_and_eigenstrain)
+    def solve(F):
+        F_free = F.tocsr()[free_dofs].tocsc()
+        columns_per_solve = 100
+        average_strain = np.zeros((A.shape[0], F.shape[1]))
+        column_batches = tqdm.tqdm(range(0, F.shape[1], columns_per_solve),
+                                   desc=f"  {f'solve {F.shape[1]} load columns':<26}",
+                                   bar_format="{desc}: {percentage:3.0f}% |{bar:25}| {n_fmt}/{total_fmt} batches "
+                                              "[{elapsed} elapsed, {remaining} left]", file=sys.stdout)
+        for first_column in column_batches:
+            columns = slice(first_column, first_column + columns_per_solve)
+            batch_F_free = F_free[:, columns].toarray()
+            batch_displacements = np.zeros((mesh.discretization.dof_count, batch_F_free.shape[1]))
+            batch_displacements[free_dofs] = K_free_factorization.solve(batch_F_free)
+            average_strain[:, columns] = A @ batch_displacements
+        return average_strain
+
+    return solve
+
+def get_influence_functions(mesh, L_per_element, include_P):
+    # E, and P when include_P (None otherwise), from one factorization of K. E's six load columns are solved on their
+    # own, so E is the same to the last bit whether or not P is built.
+    solve = get_influence_function_solver(mesh, get_K(mesh, L_per_element))
     # ER-1: E is the applied macrostrain plus the fluctuation it causes; P is A_ε K⁻¹ F_μ (ER-24).
-    E = np.tile(np.eye(6), (mesh.discretization.partition_count, 1)) + average_strain[:, :6]
-    P = average_strain[:, 6:]
+    E = np.tile(np.eye(6), (mesh.discretization.partition_count, 1)) + solve(get_F_macrostrain(mesh, L_per_element))
+    P = solve(get_F_eigenstrain(mesh, L_per_element)) if include_P else None
     return E, P
 
 def get_homogenized_L(E, L_per_partition):
@@ -338,7 +341,7 @@ def get_P0_offset_blocks(mesh, reference_L):
     reference_L_per_element = np.tile(reference_L, (mesh.discretization.element_count, 1, 1))
     K = get_K(mesh, reference_L_per_element)
     F_eigenstrain_in_first_partition = get_F_eigenstrain(mesh, reference_L_per_element)[:, :6]
-    return solve_influence_function(mesh, K, F_eigenstrain_in_first_partition)
+    return get_influence_function_solver(mesh, K)(F_eigenstrain_in_first_partition)
 
 ## ------- Cache ------- ##
 
@@ -356,21 +359,28 @@ def get_cache_path(kind, parameters):
         digest.update(value.tobytes())
     return config.cache_folder / f"{kind}_{digest.hexdigest()[:12]}.npz"
 
-def get_cached(kind, parameters, compute):
-    # The arrays compute() returns, as a dict by name, from the cache file for these parameters when it exists,
-    # otherwise computed and saved there.
-    cache_path = get_cache_path(kind, parameters)
-    if cache_path.exists():
-        print(f"{cache_path.name}: loaded from cache.")
-        with np.load(cache_path) as cached:
-            return {name: cached[name] for name in cached.files}
-    print(f"{cache_path.name}: no cache found, computing.")
+def get_cached(names, parameters, compute):
+    # The named arrays, as a dict by name, each from its own cache file for these parameters when they all exist,
+    # otherwise computed together by compute() and each saved to its own file. One file per array lets a run load only
+    # the arrays it needs (E without P for LS alone).
+    cache_paths = {name: get_cache_path(name, parameters) for name in names}
+    if all(cache_path.exists() for cache_path in cache_paths.values()):
+        arrays = {}
+        for name, cache_path in cache_paths.items():
+            print(f"{cache_path.name}: loaded from cache.")
+            with np.load(cache_path) as cached:
+                arrays[name] = cached[name]
+        return arrays
+    print(f"{', '.join(cache_path.name for cache_path in cache_paths.values())}: no cache found, computing.")
     arrays = compute()
     config.cache_folder.mkdir(exist_ok=True)
-    np.savez(cache_path, **arrays)
+    for name, cache_path in cache_paths.items():
+        np.savez(cache_path, **{name: arrays[name]})
     return arrays
 
-def get_E_and_P(mesh, L_matrix, L_inclusion):
+def get_E_and_P(mesh, L_matrix, L_inclusion, include_P):
+    # E always: LS needs it for the homogenized C0 and the verification for the homogenized stiffness. The dense P,
+    # (6 × partitions)² doubles, only when include_P, since only TFA uses it; P is None otherwise.
     discretization = mesh.discretization
     E_P_parameters = {"cache_version": cache_version,
                       "domain_side_length": config.domain_side_length,
@@ -386,10 +396,13 @@ def get_E_and_P(mesh, L_matrix, L_inclusion):
         E_P_parameters["inclusion_radius"] = config.inclusion_radius
 
     def compute():
-        E, P = get_influence_functions(mesh, get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids))
+        E, P = get_influence_functions(mesh, get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids),
+                                       include_P)
         return {"E": E, "P": P}
 
-    E_P = get_cached("E_P", E_P_parameters, compute)
+    E_P = get_cached(("E", "P") if include_P else ("E",), E_P_parameters, compute)
+    if not include_P:
+        return E_P["E"], None
     # Column-major, so the columns of a run of consecutive partitions are contiguous and P products can read just the
     # yielding partitions' columns without copying them (tfa_solvers.apply_P_to_partitions).
     return E_P["E"], np.asfortranarray(E_P["P"])
@@ -414,7 +427,7 @@ def get_reference_kernel(mesh, reference_L):
               f"{time.perf_counter() - start_time:.2f} seconds.")
         return {"P0_offset_blocks": P0_offset_blocks}
 
-    P0_offset_blocks = get_cached("P0_offset_blocks", P0_parameters, compute)["P0_offset_blocks"]
+    P0_offset_blocks = get_cached(("P0_offset_blocks",), P0_parameters, compute)["P0_offset_blocks"]
     return get_P0_transformed(P0_offset_blocks, discretization.partition_number_per_side)
 
 ## ------- Problem Setup ------- ##
@@ -436,6 +449,7 @@ class Problem(NamedTuple):
     partition_materials: PartitionMaterials
     mesh: Mesh
     E: np.ndarray
+    # None without config.include_tfa_model: only TFA uses the dense P.
     P: np.ndarray
     P0_transformed: np.ndarray
     # The homogeneous reference stiffness C0 chosen by config.reference_stiffness, from which every P0 is built, and
@@ -458,7 +472,7 @@ def get_problem():
         print("matched-stiffness control: the inclusion elastic stiffness is overridden to the matrix value, which "
               "makes the TFA and LS models the same equation. Yield properties still differ.")
     partition_materials = get_partition_materials(L_matrix, L_inclusion, partition_material_ids)
-    E, P = get_E_and_P(mesh, L_matrix, L_inclusion)
+    E, P = get_E_and_P(mesh, L_matrix, L_inclusion, include_P=config.include_tfa_model)
     reference_L = get_reference_L(E, partition_materials.L, L_matrix)
     print(f"reference stiffness C0: {config.reference_stiffness}, C0_1111 = {reference_L[0, 0] / 1e6:.2f} MPa")
     P0_transformed = get_reference_kernel(mesh, reference_L)

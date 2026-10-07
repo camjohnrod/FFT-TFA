@@ -82,7 +82,7 @@ def get_fine_and_coarse_kernel_checks(problem):
 def get_dense_reference_checks(problem, dense_P0):
     print(f"  dense reference influence functions ({6 + 6 * config.partition_count} load columns):")
     reference_L_per_element = np.tile(problem.reference_L, (problem.mesh.discretization.element_count, 1, 1))
-    E_reference, P_reference = get_influence_functions(problem.mesh, reference_L_per_element)
+    E_reference, P_reference = get_influence_functions(problem.mesh, reference_L_per_element, include_P=True)
 
     identity_error = np.max(np.abs(E_reference.reshape(config.partition_count, 6, 6) - np.eye(6)))
     translation_error = np.max(np.abs(P_reference - dense_P0)) / np.max(np.abs(P_reference))

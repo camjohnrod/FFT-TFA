@@ -1,7 +1,7 @@
 # The partition-averaged Lippmann-Schwinger (LS) model solved by damped fixed-point iteration (LS-19). With
 # config.include_tfa_model, the actual E/P TFA model (ER-4) is solved next to it as the baseline, by fixed-point
-# iteration with and without the FFT reference preconditioner (Formulation.md Strategy 1). The two TFA solvers solve
-# the same equation and must agree to solver tolerance. LS is a different model, so its difference from TFA is
+# iteration with and without the FFT reference preconditioner (3_tfa_baseline.md Strategy 1). The two TFA solvers
+# solve the same equation and must agree to solver tolerance. LS is a different model, so its difference from TFA is
 # modelling error, printed as such; only under matched_stiffness_control are the two models the same equation, and
 # then they must agree too. The problem and every solver setting are read from config.py. The non-partitioned LS
 # solvers (config.include_non_partitioned_ls) run in MAIN_Newton.py only: the LS fixed point at fine resolution takes

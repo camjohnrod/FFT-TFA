@@ -38,7 +38,7 @@ def get_strain_norm(strain):
 
 def get_relative_residual(residual, macro_strain):
     # Scaled by the imposed strain rather than the current iterate, and never by less than a fixed floor, so the
-    # criterion stays meaningful when a load path passes through zero strain (Formulation.md section 12).
+    # criterion stays meaningful when a load path passes through zero strain (3_tfa_baseline.md section 12).
     strain_scale = max(get_strain_norm(macro_strain), config.residual_strain_scale_floor)
     return get_strain_norm(residual) / strain_scale
 
