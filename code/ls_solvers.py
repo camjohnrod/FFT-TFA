@@ -52,14 +52,14 @@ def get_ls_relaxation_factor(partition_materials, reference_L):
     return config.ls_stability_safety * 2 / (np.min(stiffness_ratio) + np.max(stiffness_ratio))
 
 def ls_fixed_point_iteration(macro_strain, initial_strain, partition_materials, plastic_history, P0_transformed,
-                                    reference_compliance, relaxation):
+                             reference_compliance, relaxation):
     b = np.tile(macro_strain, (len(initial_strain), 1))
     strain = initial_strain
 
     residual_history = []
     while True:
         plastic_state, stress, residual = get_ls_state(strain, b, P0_transformed, reference_compliance,
-                                                              partition_materials, plastic_history)
+                                                       partition_materials, plastic_history)
         residual_history.append(get_relative_residual(residual, macro_strain))
 
         if has_converged(residual_history, config.ls_divergence_limit, config.ls_max_iterations):
@@ -99,7 +99,7 @@ def get_ls_newton_correction(P0_transformed, jacobian_blocks, residual):
     return correction.reshape(-1, 6)
 
 def ls_newton_iteration(macro_strain, initial_strain, partition_materials, plastic_history, P0_transformed,
-                               reference_compliance):
+                        reference_compliance):
     # A Newton step costs a whole Krylov solve, so it gets a far smaller cap than the fixed point: without one, a
     # stagnating solve would grind through hundreds of thousands of convolutions instead of failing.
     b = np.tile(macro_strain, (len(initial_strain), 1))
@@ -108,14 +108,13 @@ def ls_newton_iteration(macro_strain, initial_strain, partition_materials, plast
     residual_history = []
     while True:
         plastic_state, stress, residual = get_ls_state(strain, b, P0_transformed, reference_compliance,
-                                                              partition_materials, plastic_history)
+                                                       partition_materials, plastic_history)
         residual_history.append(get_relative_residual(residual, macro_strain))
 
         if has_converged(residual_history, config.ls_divergence_limit, config.newton_max_steps):
             break
 
-        jacobian_blocks = get_ls_jacobian_blocks(strain, partition_materials, plastic_history,
-                                                        reference_compliance)
+        jacobian_blocks = get_ls_jacobian_blocks(strain, partition_materials, plastic_history, reference_compliance)
         strain = strain + get_ls_newton_correction(P0_transformed, jacobian_blocks, residual)
 
     return StepResult(strain, stress, plastic_state, np.array(residual_history))

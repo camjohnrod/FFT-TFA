@@ -13,10 +13,9 @@ state. Two reduced models are compared:
 
 **Research question.** On identical uniform partitions, how does the interaction operator decide accuracy and cost?
 TFA uses the real composite's operator: exact in elasticity, but dense. LS replaces it with a reference-medium
-operator applied by FFT, built either exactly (the consistent partition average of the Green operator) or
-approximately (Moulinec–Suquet, or the FE kernel used now). The aim is to measure each against a full-field
-reference, and to find the exact relation between the TFA and LS operators. `notes/1_research_context.md` places this in the
-literature.
+operator applied by FFT: the FE kernel now, a Moulinec–Suquet kernel next (roadmap step 2). The aim is to measure
+each against a full-field reference, and to find the exact relation between the TFA and LS operators.
+`notes/1_research_context.md` places this in the literature.
 
 ## Quick start
 
@@ -26,7 +25,7 @@ python code/MAIN_Newton.py    # Newton–Krylov solvers; also cross-checks again
 python code/check_code.py     # after any code change: static checks and seven small smoke runs (~5 minutes)
 ```
 
-Dependencies: `numpy`, `scipy`, `matplotlib`, `tqdm` (no package file; the miniforge `base` environment has them).
+Dependencies: `numpy`, `scipy`, `matplotlib`, `tqdm` (no package file; installed in the untracked `.venv/`).
 Every setting is in `code/config.py`; there are no command-line options. The first run of a configuration factorizes
 the global stiffness and caches the result in `code/cache/` (gitignored), which takes minutes and, only when TFA is
 included, a dense matrix of (6 × partitions)² doubles: 0.3 GB at the default 32 × 32 partitions.
@@ -43,7 +42,8 @@ each of its solvers, several times over for fair timings:
 
 Outputs, in `code/output/` (prefix `FP_` or `Newton_`): `load_path_summary.png` (macroscopic deviatoric stress,
 iterations and time per iteration per step), `time_breakdown.png` (where the time goes), `von_mises_stress.png` (one
-map per solver at the last step, finest lattice first) and `results.npz`, plus `cross_section.png`.
+map per solver at the last step, finest lattice first) and `results.npz`, plus `cross_section.png`. The folder is
+gitignored: rerun to regenerate it.
 
 ## Configuration essentials
 
@@ -87,10 +87,9 @@ naming).
 
 ## Status and roadmap
 
-All solvers, checks and figures above work and are tested. The fine LS solver is a comparison, **not** a reference
-solution: it rings along high-contrast interfaces (an element-to-element alternation near the inclusion corners of
-about ±30 %, which refinement does not remove and which element-level TFA does not show), so no accuracy figures are
-computed against it.
+All solvers, checks and figures above work and are tested. With the FE kernel, the fine LS solver is a comparison,
+**not** a reference solution: it rings along high-contrast interfaces (about ±30 % element-to-element alternation
+near the inclusion corners, not removed by refinement, absent from element-level TFA).
 
 **Position in the literature** (details in `notes/1_research_context.md`). LS is the clustered Lippmann–Schwinger equation
 that self-consistent clustering analysis (SCA) also solves, here on uniform partitions so that it runs by FFT. For
@@ -98,16 +97,21 @@ linear elasticity this is Brisard–Dormieux's scheme (2010, 2012). With plastic
 partitions was found among the papers read, and no numerical comparison of LS and TFA on identical partitions.
 
 Roadmap, in order:
-1. **Thickness check.** Confirm that one element layer through the thickness reproduces three to round-off. One layer
-   is already the default, so every later result rests on this.
-2. **Analytic P0 kernels.** Build P0 from the partition lattice alone: the consistent operator (the exact partition
-   average, LS-7), Moulinec–Suquet and filtered. The FE kernel stays as an option. With the consistent kernel,
-   partitioned and coarse LS coincide.
+1. **Thickness check (done).** One element layer through the thickness reproduces three to round-off, so one layer,
+   the default, loses nothing.
+2. **Moulinec–Suquet kernel** (decided 2026-10-12), a config choice next to the FE kernel, which stays for the
+   matched-stiffness gate. One rule for every LS lattice: Moulinec–Suquet on the element grid, averaged over
+   partitions. Fine and coarse LS (one element per partition) are then the standard Moulinec–Suquet method at element
+   and at partition resolution; partitioned LS averages the fine operator as SCA does (Liu et al. 2016). TFA keeps its
+   FE operators, so the FE-vs-MS discretization gap (fine LS against TFA on elastic steps) is reported next to every
+   LS-vs-TFA difference.
 3. **Gold-standard reference.** A full-field FE-consistent FFT solver (Ladecký et al., in `references/`) with
    plasticity at the Gauss points, so that errors become absolute rather than relative to another model.
-4. **TFA–LS study.** Derive the exact relation between TFA's P and the consistent LS operator, and measure TFA and
+4. **TFA–LS study.** Derive the exact relation between TFA's P and the LS operator, and measure TFA and
    every LS kernel on identical partitions against the reference, across contrast, partition count and load path.
 5. **Cost at equal accuracy.** Time and memory against resolution for each operator, compared at the same error.
 
 Later: a rule for LS partitions holding both phases (circles on coarse partitions), a reference stiffness that
-follows plastic softening (as in SCA), and a Newton line search for strongly softening materials.
+follows plastic softening (as in SCA), a Newton line search for strongly softening materials, a Fourier
+preconditioner for LS Newton (its GMRES is unpreconditioned), and the consistent kernel (the exact partition
+average, Brisard–Dormieux), the limit of the averaged Moulinec–Suquet kernel as the element grid is refined.

@@ -29,9 +29,9 @@ elastic_modulus_matrix      = 100e6
 poisson_ratio_inclusion     = 0.3
 poisson_ratio_matrix        = 0.19
 inclusion_yield_stress      = np.inf
-matrix_yield_stress         = np.inf #1.0e6
+matrix_yield_stress         = 1.0e6
 inclusion_hardening_modulus = 0.0
-matrix_hardening_modulus    = 0.0 #10e6
+matrix_hardening_modulus    = 10e6
 matched_stiffness_control   = False
 
 # Models. The LS model is always solved. include_tfa_model also solves the actual E/P TFA model by the same strategy,

@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A research codebase for reduced-order homogenization of elastoplastic composites (stiff circular/square inclusions,
 or a laminate, in a softer J2-plastic matrix) on uniform partitions. Two reduced models, LS and TFA, differ only in
 the operator through which partitions interact; the research question is how that operator decides accuracy and
-cost (README, "Research question"; `notes/1_research_context.md`). LS is the model under development; TFA is the baseline it
-is compared against. Each is solved by two strategies (fixed point, Newton), one entry point per strategy:
+cost (README, "Research question"; `notes/1_research_context.md`). LS is the model under development; TFA is the
+baseline it is compared against. Each is solved by two strategies (fixed point, Newton), one entry point per strategy:
 
 | Entry point | Solvers | Outputs prefix |
 |---|---|---|
@@ -28,12 +28,9 @@ is compared against. Each is solved by two strategies (fixed point, Newton), one
 - **Non-partitioned LS** (`config.include_non_partitioned_ls`, default `True`, `MAIN_Newton.py` only, since the LS
   fixed point at fine resolution takes too long): the same LS scheme on two more lattices, as comparisons. "LS
   Newton, fine" has one partition per element column, the finest lattice the mesh allows; "LS Newton, coarse" has
-  one element per partition, as cheap as partitioned LS but without the fine mesh's information (with an exact,
-  consistent P0 the two would coincide; roadmap step 2). Neither is a
-  reference solution: fine LS rings along high-contrast interfaces (element-to-element alternation near the
-  inclusion corners, absent from element-level TFA, which is exact FE elastically), so the code measures no solver
-  against it. A gold-standard reference is planned as a separate FE-consistent FFT solver (Ladecký et al.,
-  `references/`).
+  one element per partition, as cheap as partitioned LS but without the fine mesh's information. With the FE kernel
+  neither is a reference solution (see "Status"), so the code measures no solver against them; a gold-standard
+  reference is roadmap step 3.
 
 Read the relevant note before changing solver math: code names (`E`, `P`, `P0_transformed`, `M0`, and `sensitivity`
 for H_μ, …) map onto the notes' symbols and numbered equations (ER-*, LS-*), which code comments cite.
@@ -52,8 +49,9 @@ There is no pytest suite and no way to run a single test; `code/check_code.py` i
 code. It fails on anything unused (including `NamedTuple` fields and config constants, but not imports), lines over
 120 characters, trailing whitespace, or any entry point that exits with an error or prints a FAIL or SKIPPED check.
 Each smoke run works on a temporary copy of `code/` whose `config.py` is shrunk (`smoke_run_overrides`: 9 partitions,
-27 elements, 12 steps, 1 repeat, an aligned square, TFA included, no matched stiffness, and every other problem,
-solver and verification input pinned to its committed value) and runs `MAIN_FP.py` then
+27 elements, 12 steps, 1 repeat, an aligned square, TFA included, no matched stiffness, a yielding matrix (yield
+1 MPa, hardening 10 MPa), verification on, and every other problem, solver and verification input pinned to a fixed
+value, so a local study configuration cannot change what they cover) and runs `MAIN_FP.py` then
 `MAIN_Newton.py`. `smoke_runs` lists the runs, each with a comment saying why it exists: monotonic; cyclic
 (`load_path_shape = "cyclic"`, the only test of unloading, reverse yielding and zero imposed strain, where a solver
 abandoning the load path also fails, since abandoning prints no FAIL); matched stiffness (the LS regression gate); LS
@@ -67,9 +65,10 @@ every result alone (a refactor), run `check_code.py save` before it and `check_c
 the run, entry point, solver and array; a `problem/` difference means `config.py`'s inputs changed since the baseline
 was saved.
 
-No package manifest. The dependencies (`numpy`, `scipy`, `matplotlib`, `tqdm`) are in the miniforge `base` conda env
-(Python 3.12), which is what `python` runs; `check_code.py` runs its smoke runs with whichever interpreter launched it
-(`sys.executable`). The `fenics-env`/`fenicsx-env` envs are unrelated.
+No package manifest. The dependencies (`numpy`, `scipy`, `matplotlib`, `tqdm`) are installed in the repository's
+`.venv/` (Python 3.12, untracked), which is what `python` resolves to in this workspace; `check_code.py` runs its
+smoke runs with whichever interpreter launched it (`sys.executable`). The `fenics-env`/`fenicsx-env` envs are
+unrelated.
 
 **All configuration is `code/config.py`**, shared by every entry point and grouped by topic: geometry, materials,
 reference stiffness, load path (`load_path_shape`: monotonic ramp, or cyclic 0 → +max → −max → 0 in
@@ -78,6 +77,8 @@ reference stiffness, load path (`load_path_shape`: monotonic ramp, or cyclic 0 �
 and `newton_*` solver settings, verification, timing. There are no CLI arguments. Check `git diff` before
 committing, since it is often left at a local study configuration. "Default" in this file means the committed
 values (`git show HEAD:code/config.py`); read the working copy before relying on a default-dependent statement.
+A run exercises plasticity only if a phase's yield stress is finite (`np.inf` makes it elastic); the smoke runs
+always yield.
 Keep every input a single-line `name = value` at column 0: the smoke runs set inputs by regex-replacing those lines
 (`^name\s*= .*$`), so a value split over several lines breaks the copy's `config.py`, and a renamed input fails with
 "config.py has no line setting …" until `smoke_run_overrides`/`smoke_runs` are updated. A new input must be read
@@ -121,12 +122,12 @@ parameters (`offline.get_cache_path`, `get_cached`). `E` and `P` share one facto
 solved separately and cached in separate files, so E is bit-identical whether or not P is built, and an LS-only run
 neither builds nor loads P. Each `P0` is cached under its discretization and the reference stiffness itself, so each
 lattice and each `reference_stiffness` choice gets its own file. Bump `offline.cache_version` whenever a code change
-alters the offline operators, since parameters alone cannot detect that. `code/output/` is **tracked**: each run first
+alters the offline operators, since parameters alone cannot detect that. `code/output/` (gitignored): each run first
 deletes its own `<prefix>*` files, then writes `<prefix>load_path_summary.png`, `<prefix>time_breakdown.png`,
 `<prefix>von_mises_stress.png` (von Mises stress at the last step every mapped solver completed, one map per solver on
 its own lattice, from the finest LS lattice to the coarsest, then TFA) and `<prefix>results.npz` (per-solver results
 plus the problem parameters, read by the cross-checks; written last, only once every check has passed, so a failed run
-leaves none), plus the shared `cross_section.png`. Any run therefore shows up in `git status`.
+leaves none), plus the shared `cross_section.png`.
 
 ## Architecture
 
@@ -232,12 +233,6 @@ Non-obvious points:
   unchanged by scaling C0, so with equal phase Poisson ratios `"voigt"` and `"matrix"` give the same P0 and differ
   only through C0⁻¹ in the LS equivalent eigenstrain.
 
-Measured on 2026-09-30 with the then-default circle (75 elements, 25 partitions), useful before trying to speed
-things up: P products dominate
-every TFA solver. TFA Newton needs ~5× fewer iterations than TFA FP but about as many P products, so it is not
-faster (TFA FFT FP is the fastest TFA solver). The FFT reference does not reduce GMRES work for TFA Newton. With
-strong softening (`matrix_hardening_modulus = -6e7`) every TFA solver stops at step 8; Newton has no line search.
-
 ## Notes directory
 
 The notes are numbered in reading order.
@@ -263,43 +258,36 @@ The notes are numbered in reading order.
 
 The README's "Status and roadmap" section is the user-facing version of this list; keep the two in step.
 
-Findings so far (64 elements / 32 partitions square, 2026-10-05, unless stated):
-- Fine LS ("LS Newton, fine") rings along high-contrast interfaces: an element-to-element (period-2) alternation in
-  the inclusion's outer element layers near the corners, about ±30 % of the local stress, not reduced by refining
-  from 32 to 64 elements, plus a ~40 % overshoot at the corner. Element-level TFA (one partition per element column,
-  exact FE elastically) decays smoothly there. Fine LS is mirror-symmetric to round-off, and its partition averages
-  change by only 0.3–1.5 % between C0 choices. So it is not a reference solution, and the code measures nothing
-  against it; a global spectral measure misses this ringing, so inspect the fields locally.
-- Measured against fine LS (so tentative): partitioned LS beat coarse LS on stress, plastic strain and macroscopic
-  stress, but not on the elastic strain field; TFA was closest of all.
-- Rough guides from small runs (9×9 partitions, 2026-10-01; rerun before relying on them): the reference stiffness
-  matters a lot for LS. Against TFA, LS was within ~2 % with `"homogenized"`, ~4 % with `"matrix"` and ~50 % with
-  `"voigt"`, and the gap grows as plasticity spreads, since C0 stays elastic. TFA itself is too stiff in plasticity, so
-  LS-vs-TFA measures LS's extra error, not its error against full FE.
-- Scratch test (25×25, 2026-10-02, script not kept): replacing P0 by the translation average of TFA's P made LS worse
-  (1.3 % against 0.5 % macroscopic stress error vs TFA), and no C0 reproduces that average exactly. A first data point
-  for roadmap step 4.
+Finding (FE kernel, 64 elements / 32 partitions square, 2026-10-05): fine LS rings along high-contrast interfaces,
+an element-to-element alternation of about ±30 % of the local stress in the inclusion's outer layers near the corners,
+not reduced by refining from 32 to 64 elements, which element-level TFA (exact FE elastically) does not show. A global
+spectral measure misses it; inspect fields locally.
 
-Roadmap, in order (P is built only with TFA since 2026-10-06):
-1. Thickness check: `element_number_along_z = 1` should reproduce `= 3` to round-off, since geometry and loading do
-   not vary through the thickness. The default is already 1 (since commit `4e1d747`); until the comparison is
-   recorded, results at 1 rest on that expectation.
-2. Analytic P0 kernels, a config choice next to the FE kernel (LS-14): consistent (exact LS-7; its alias series needs
-   the tail correction of Brisard–Dormieux 2010, Appendix C), Moulinec–Suquet and filtered (`notes/1_research_context.md`,
-   section 2). Checks: the existing kernel checks; the consistent kernel built on the element lattice and
-   block-averaged must equal the one built on the partition lattice (`get_partitioned_P0_from_fine`); MS and
-   consistent must agree at low frequencies. Keep the FE kernel while `matched_stiffness_control` needs it: only it
-   makes LS and TFA the same equation, since TFA's P comes from the same FE mesh.
+Roadmap, in order:
+1. Thickness check: done (2026-10-12). `element_number_along_z = 1` reproduces `= 3` to round-off.
+2. Moulinec–Suquet kernel, a config choice next to the FE kernel (decided 2026-10-12). One rule for every LS lattice:
+   MS on the element grid (P̂0 = Γ̂0 C0 at the grid frequencies, zero at ξ = 0, P̂0 = I at an even grid's highest
+   frequency), averaged over partitions with the function now in `verification.get_partitioned_P0_from_fine`. Fine
+   and coarse LS are then standard MS at element and partition resolution; partitioned LS averages the fine operator
+   as SCA does (Liu et al. 2016, Schneider 2019); never call it SCA, which also clusters by k-means and updates C0.
+   The FE kernel stays: only it makes LS and TFA the same equation (`matched_stiffness_control`). TFA keeps its FE
+   operators, so report the FE-vs-MS gap (fine LS against TFA on elastic steps, where TFA is the exact FE answer)
+   next to every LS-vs-TFA difference. `"homogenized"` C0 brings FE in through E; use `"matrix"` for MS studies.
+   Tests: the structural kernel checks; a real-kernel check (rfftn/irfftn round trip); an MS laminate on an even
+   lattice (MS is exact for a laminate); FE results bit-identical (`check_code.py save` / `compare`).
 3. Gold-standard reference: a separate FE-consistent FFT solver (Ladecký et al., `references/`; displacement
    unknowns, plasticity at the Gauss points). For its error split, a derivation already checked: with every partition
    a k × k block of equal-volume reference cells and Π the block average, ‖f − g‖² = ‖f − Πg‖² + ‖g − Πg‖² at every
    step for any fixed quadratic norm (total² = scheme² + floor²); it holds per phase only while partitions are
    single-phase, and not for maxima over the load path.
 4. TFA–LS study: Schneider (2019, §4) shows formally that TFA and clustered LS differ only in the Green operator (full
-   against partition-averaged). Derive the exact relation between TFA's P and the consistent P0, and measure TFA and
+   against partition-averaged). Derive the exact relation between TFA's P and the LS operator, and measure TFA and
    every LS kernel on identical partitions against the reference.
 5. Cost at equal accuracy: time and memory against resolution for each operator, compared at the same error.
 
 Later: a mixing rule for LS partitions holding both phases (so circles run on coarse partitions; TFA will not get
 one; composite voxels and Brisard–Dormieux's rule are the precedents), a reference stiffness that follows plastic
-softening (as in SCA), and a Newton line search for strong softening.
+softening (as in SCA), a Newton line search for strong softening, a Fourier preconditioner for LS Newton (its GMRES
+is unpreconditioned), and the consistent kernel (exact LS-7, the limit of the averaged MS kernel as the element grid
+is refined; its alias series converges as 1/T, and assigning the tail to the axis directions, whose sinc² weights
+sum to one in closed form, makes it 1/T², checked in a scratch test on 2026-10-12).

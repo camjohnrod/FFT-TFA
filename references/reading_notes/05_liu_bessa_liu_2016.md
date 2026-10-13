@@ -1,6 +1,6 @@
 # Liu, Bessa, Liu (2016), CMAME 306, 319–341 — READ COVER TO COVER (arXiv/author preprint, all 24 pages, page images)
 (Preprint "submitted to CMAME", dated Sept 16, 2019 in footer; content = the SCA paper. Equation numbers are the
-preprint's; may differ from the journal version.)
+preprint's and not yet checked against the journal version, now `../Liu_SCA_2016.pdf`.)
 
 ## Method
 - Piecewise uniform approximation of all local variables in clusters (1); "every local variable β(x) within each

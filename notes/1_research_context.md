@@ -123,9 +123,8 @@ Notes on each:
 - **FE kernel.** The review lists FFT solvers for "trilinear hexahedral elements on a regular periodic grid" (its
   ref. 99) as one discretization among others; our kernel is that discretization's Green operator, averaged over
   partitions (our reading). The LS note says these operators "are not asserted to equal the continuum operators at
-  finite N". It is kept from the TFA work and will be phased out unless it shows an advantage. It is the only kernel
-  under which LS and TFA become the same equation (`matched_stiffness_control`), since TFA's $\mathbf P$ comes from the
-  same FE mesh.
+  finite N". It stays as an option because it is the only kernel under which LS and TFA become the same equation
+  (`matched_stiffness_control`), since TFA's $\mathbf P$ comes from the same FE mesh.
 
 ## 3. Consistent against non-consistent
 
@@ -246,8 +245,9 @@ Titles only flag candidates; none was read.
   fibre; Kabel et al.: relative error near 20 % at half resolution). Uniform partitions will likely need many
   partitions; the FFT is what makes many affordable.
 - What follows for the project, adopted as its research question and roadmap (README, "Status and roadmap"):
-  1. **Analytic kernels** (roadmap step 2): consistent, filtered and MS, extending Brisard–Dormieux 2012 beyond
-     elasticity.
+  1. **Moulinec–Suquet kernel** (roadmap step 2, decided 2026-10-12): MS on the element grid, averaged over
+     partitions as SCA averages its fine-grid operator over clusters ("fine grid, averaged" in the table of
+     section 2). The consistent kernel, its limit as the element grid is refined, is left for later.
   2. **The TFA–LS relationship** (step 4), the main thread: Schneider's §4 gives the formal link (full against
      averaged Green operator), and nobody in the papers read measures it. Can TFA be written as LS plus a correction
      for the strain varying inside partitions, how large is it, and do the two converge at the same rate? A first

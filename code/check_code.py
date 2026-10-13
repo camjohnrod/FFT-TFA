@@ -32,8 +32,9 @@ code_folder = pathlib.Path(__file__).resolve().parent
 baseline_path = code_folder / "cache" / "check_code_baseline.npz"
 entry_points = ["MAIN_FP", "MAIN_Newton"]
 # Small enough to run in seconds: the square leaves 2 whole matrix partitions on each side, 3 elements per partition.
-# Every other input that shapes the problem, the solvers or the checks is pinned to its committed value too, so a local
-# study configuration cannot change what the smoke runs cover, nor their results compared against a saved baseline.
+# Every other input that shapes the problem, the solvers or the checks is pinned to a fixed value too (the matrix
+# yields and hardens), so a local study configuration cannot change what the smoke runs cover, nor their results
+# compared against a saved baseline.
 smoke_run_overrides = {
     # Geometry and mesh.
     "domain_side_length": "1e-3", "partition_number_per_side": "9", "element_number_per_side": "27",
@@ -63,10 +64,9 @@ class SmokeRun(NamedTuple):
 smoke_runs = {
     "monotonic": SmokeRun({}),
     # The only test of elastic unloading, reverse yielding and passing through zero imposed strain with partitions
-    # still yielding, which a monotonic path never reaches. Its hardening is fixed positive, so a local softening
-    # study cannot end the path legitimately. 4 increments per quarter still yields at both zero crossings.
-    "cyclic": SmokeRun({"load_path_shape": '"cyclic"', "strain_increment_count": "4",
-                        "matrix_hardening_modulus": "10e6"}, require_every_step=True),
+    # still yielding, which a monotonic path never reaches. 4 increments per quarter still yields at both zero
+    # crossings.
+    "cyclic": SmokeRun({"load_path_shape": '"cyclic"', "strain_increment_count": "4"}, require_every_step=True),
     # The LS regression gate, where LS must reproduce TFA.
     "matched stiffness": SmokeRun({"matched_stiffness_control": "True"}),
     "LS only": SmokeRun({"include_tfa_model": "False"}),

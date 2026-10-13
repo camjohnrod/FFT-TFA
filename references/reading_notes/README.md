@@ -11,7 +11,7 @@ and page numbers, verbatim quotations, and its relevance to this project. Statem
 | `02_brisard_dormieux_2010.md` | Brisard, Dormieux (2010), Comput. Mater. Sci. 49 | `../brisard2010.pdf` |
 | `03_brisard_dormieux_2012.md` | Brisard, Dormieux (2012), CMAME 217–220 | `../brisard2012.pdf` |
 | `04_schneider_2019.md` | Schneider (2019), CMAME 354 (SCA foundations) | `../schneider2019_SCA.pdf` |
-| `05_liu_bessa_liu_2016.md` | Liu, Bessa, Liu (2016), CMAME 306 (SCA) | online preprint, linked in `1_research_context.md` |
+| `05_liu_bessa_liu_2016.md` | Liu, Bessa, Liu (2016), CMAME 306 (SCA) | `../Liu_SCA_2016.pdf` (journal version; the note was read from the preprint) |
 | `06_zhang_et_al_2019.md` | Zhang, Tang, Yu, Zhu, Liu (2019), Comput. Mech. 64 | online, linked in `1_research_context.md` |
 | `07_kabel_et_al_2016.md` | Kabel, Fink, Ospald, Schneider (2016), ECCOMAS Congress | online, linked in `1_research_context.md` |
 | `08_schneider_review_2021.md` | Schneider (2021), Acta Mech. 232 (review) | `../schneider2021_Review.pdf` |

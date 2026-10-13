@@ -147,14 +147,12 @@ def get_ls_jacobian_checks(problem):
 
     def get_residual(macro_strain, strain):
         _, _, residual = get_ls_state(strain, get_base_strain(macro_strain), P0_transformed,
-                                             reference_compliance, partition_materials, no_plastic_history)
+                                      reference_compliance, partition_materials, no_plastic_history)
         return residual
 
     def apply_jacobian(strain, direction):
-        jacobian_blocks = get_ls_jacobian_blocks(strain, partition_materials, no_plastic_history,
-                                                        reference_compliance)
-        return direction - get_P0_induced_strain(P0_transformed,
-                                                        np.einsum('pij,pj->pi', jacobian_blocks, direction))
+        jacobian_blocks = get_ls_jacobian_blocks(strain, partition_materials, no_plastic_history, reference_compliance)
+        return direction - get_P0_induced_strain(P0_transformed, np.einsum('pij,pj->pi', jacobian_blocks, direction))
 
     return get_jacobian_checks("LS", "LS-20", partition_materials, get_base_strain, get_residual, apply_jacobian)
 
