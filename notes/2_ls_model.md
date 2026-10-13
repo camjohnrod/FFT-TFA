@@ -380,7 +380,7 @@ Varying $\sum_A U_A^{\rm model}$ over compatible displacement fields gives the s
 
 ## 6. Construct the reference kernel offline, apply it on $M$ states online
 
-The preceding double integral defines a continuum operator. From this section onward, $\mathbf P_0$ and $\mathbf D_0$ denote their **FE-derived discrete counterparts**, using the specified mesh and quadrature; they are not asserted to equal the continuum operators at finite $N$.
+The preceding double integral defines a continuum operator. Sections 6.1–6.4 build its **FE-derived discrete counterpart**, using the specified mesh and quadrature, and section 6.5 the Moulinec–Suquet alternative; neither is asserted to equal the continuum operator at finite $N$.
 
 ### 6.1 FE derivation of $\mathbf P_0$
 
@@ -465,6 +465,30 @@ $$
 $\boldsymbol\xi$ labels coarse frequencies. Transform the six strain components over spatial lattice axes; multiply one $6\times6$ block per frequency. Use matched source/receiver ordering, FFT normalization, and engineering-shear conventions. Set/check $\widehat{\mathbf p}_0(\mathbf0)=\mathbf0$ to enforce LS-9. One **convolution application** includes forward and inverse transforms; it is not one individual FFT call.
 
 Storage of the reference kernel is $O(M)$, and application costs $O(M\log M)$. These statements assume a fixed number of tensor components. Online constitutive work is $O(M)$; no fine-grid state is advanced.
+
+### 6.5 Moulinec–Suquet kernel
+
+The alternative to LS-14 (`reference_kernel = "moulinec_suquet"`) evaluates the continuum Green operator at the frequencies $\boldsymbol\xi$ of an $N\times N$ lattice of element columns:
+
+**(LS-21) Moulinec–Suquet kernel**
+
+$$
+\widehat{\mathbf P}_0(\boldsymbol\xi)=\widehat{\boldsymbol\Gamma}_0(\mathbf n)\,\mathbf C_0,
+\qquad
+\widehat{\boldsymbol\Gamma}_0(\mathbf n)=\mathbf B(\mathbf n)\big[\mathbf B(\mathbf n)^{\mathsf T}\mathbf C_0\mathbf B(\mathbf n)\big]^{-1}\mathbf B(\mathbf n)^{\mathsf T},
+\qquad
+\mathbf n=\boldsymbol\xi/|\boldsymbol\xi|,
+$$
+
+where $\mathbf B(\mathbf n)$ ($6\times3$) is the engineering strain of a displacement varying along $\mathbf n$, per unit gradient, and $n_3=0$ because the fields do not vary through the thickness. $\widehat{\mathbf P}_0(\mathbf 0)=\mathbf 0$ (LS-9). At every other frequency $\widehat{\mathbf P}_0$ is a projection, with eigenvalues 0 and 1, for any $\mathbf C_0$. On an even lattice, $\widehat{\boldsymbol\Gamma}_0$ is not even in a component $\xi_i=N/2$, so it has no real-valued meaning there; $\widehat{\mathbf P}_0=\mathbf I$ at those frequencies, Moulinec–Suquet's $\widehat{\boldsymbol\Gamma}_0=\mathbf C_0^{-1}$ (1998, §2.4.2), which makes the stress there zero.
+
+The kernel of partitions of $k\times k$ element columns follows by linearity, exactly as the FE kernel of partitions follows from the FE kernel of element columns: a unit eigenstrain in a partition is one in each of its columns, and a partition's strain is the mean over its columns, so, with $|d_i|<k$,
+
+$$
+\mathbf P_0[\mathbf D]=\sum_{\mathbf d}\frac{(k-|d_1|)(k-|d_2|)}{k^2}\,\mathbf p_0^{\rm el}[k\mathbf D+\mathbf d].
+$$
+
+With $k=1$ (fine and coarse LS) this is the standard Moulinec–Suquet scheme at that resolution; with $k>1$ it averages the fine operator over partitions as SCA does over clusters (Liu–Bessa–Liu 2016). The average is a congruence, so its eigenvalues stay in $[0,1]$. Like LS-14 it is non-consistent; as the element grid is refined it tends to the consistent operator of LS-7 (`1_research_context.md`, section 2).
 
 ## 7. Solve the nonlinear equation without forming its Jacobian
 
@@ -555,7 +579,7 @@ These were found while implementing and testing the model, and are not yet resol
 - **Convergence in $M$.** Section 5.4 leaves it open. Measured convergence is first order in partition size. Schneider
   (2019) proves convergence of clustered Lippmann–Schwinger equations as clusters are refined, for hardening
   materials only; softening is outside that theory.
-- **The kernel of section 6 is not the operator of LS-7.** The FE-derived $\mathbf P_0$ (LS-14) averages the FE
+- **The kernels of section 6 are not the operator of LS-7.** The FE-derived $\mathbf P_0$ (LS-14) averages the FE
   reference response, so it is non-consistent in Brisard–Dormieux's sense. The exact partition average of LS-7 can be
   computed from the partition lattice alone, as a weighted sum over aliases; see `1_research_context.md`, sections 2–3. Only
   the FE kernel makes LS reduce to E/P TFA in the matched-stiffness limit of section 5.4, since TFA's $\mathbf P$

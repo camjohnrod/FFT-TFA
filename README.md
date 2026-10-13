@@ -13,7 +13,7 @@ state. Two reduced models are compared:
 
 **Research question.** On identical uniform partitions, how does the interaction operator decide accuracy and cost?
 TFA uses the real composite's operator: exact in elasticity, but dense. LS replaces it with a reference-medium
-operator applied by FFT: the FE kernel now, a Moulinec–Suquet kernel next (roadmap step 2). The aim is to measure
+operator applied by FFT: the FE kernel or a Moulinec–Suquet kernel (`reference_kernel`). The aim is to measure
 each against a full-field reference, and to find the exact relation between the TFA and LS operators.
 `notes/1_research_context.md` places this in the literature.
 
@@ -22,7 +22,7 @@ each against a full-field reference, and to find the exact relation between the 
 ```bash
 python code/MAIN_FP.py        # fixed-point solvers; run first
 python code/MAIN_Newton.py    # Newton–Krylov solvers; also cross-checks against MAIN_FP.py's saved results
-python code/check_code.py     # after any code change: static checks and seven small smoke runs (~5 minutes)
+python code/check_code.py     # after any code change: static checks and nine small smoke runs (~6 minutes)
 ```
 
 Dependencies: `numpy`, `scipy`, `matplotlib`, `tqdm` (no package file; installed in the untracked `.venv/`).
@@ -52,6 +52,7 @@ gitignored: rerun to regenerate it.
   laminate must have its edges on partition edges; a circle needs one partition per element.
 - **Reference stiffness** (`reference_stiffness`): C0 is part of the LS model, so it changes LS's answer; for TFA it
   only affects the FFT preconditioner's speed.
+- **Reference kernel** (`reference_kernel`): `"fe"` (default) or `"moulinec_suquet"`, for every LS lattice.
 - **Load path** (`max_macro_strain`, `strain_increment_count`, `load_path_shape`).
 - **Checks with a known answer**: `matched_stiffness_control = True` makes LS and TFA the same equation, so they must
   agree; `inclusion_shape = "laminate"` has an exact solution (`code/laminate.py`) that every solver must match.
@@ -61,7 +62,7 @@ gitignored: rerun to regenerate it.
 Every run prints PASS/FAIL checks and stops on a failure: the converged residual recomputed from scratch after every
 step, agreement between solvers that solve the same equation, cross-checks between the two entry points, and, before
 solving, checks of the operators (kernel structure, finite-difference Jacobians, dense reference solves on small
-grids). `code/check_code.py` runs both entry points on seven small configurations, each with a comment saying what it
+grids). `code/check_code.py` runs both entry points on nine small configurations, each with a comment saying what it
 tests. For a change that must leave every result unchanged, run `python code/check_code.py save` before it and
 `python code/check_code.py compare` after it: every solver's stress path and iteration counts must be bit-identical.
 
@@ -71,7 +72,7 @@ tests. For a change that must leave every result unchanged, run `python code/che
 |---|---|
 | `code/config.py` | every input, its checks and derived values |
 | `code/MAIN_FP.py`, `code/MAIN_Newton.py` | entry points, each `main()` an outline |
-| `code/offline.py` | mesh, materials, finite-element operators, E, P and P0 for any discretization, cache |
+| `code/offline.py` | mesh, materials, finite-element operators, E and P, the FE and Moulinec–Suquet P0 kernels, cache |
 | `code/lattice_fft.py` | FFT over the partition lattice |
 | `code/material.py` | J2 return map and its sensitivity |
 | `code/tfa_solvers.py`, `code/ls_solvers.py` | the two models' solvers |
@@ -99,12 +100,11 @@ partitions was found among the papers read, and no numerical comparison of LS an
 Roadmap, in order:
 1. **Thickness check (done).** One element layer through the thickness reproduces three to round-off, so one layer,
    the default, loses nothing.
-2. **Moulinec–Suquet kernel** (decided 2026-10-12), a config choice next to the FE kernel, which stays for the
-   matched-stiffness gate. One rule for every LS lattice: Moulinec–Suquet on the element grid, averaged over
-   partitions. Fine and coarse LS (one element per partition) are then the standard Moulinec–Suquet method at element
-   and at partition resolution; partitioned LS averages the fine operator as SCA does (Liu et al. 2016). TFA keeps its
-   FE operators, so the FE-vs-MS discretization gap (fine LS against TFA on elastic steps) is reported next to every
-   LS-vs-TFA difference.
+2. **Moulinec–Suquet kernel (done)**, `reference_kernel = "moulinec_suquet"`, next to the FE kernel, which stays
+   the default and the only one for the matched-stiffness gate. One rule for every LS lattice: Moulinec–Suquet on
+   the element grid, averaged over partitions. Fine and coarse LS are then the standard Moulinec–Suquet method at
+   element and at partition resolution; partitioned LS averages the fine operator as SCA does (Liu et al. 2016).
+   TFA keeps its FE operators, so under this kernel an LS-vs-TFA difference includes the FE-vs-MS discretization gap.
 3. **Gold-standard reference.** A full-field FE-consistent FFT solver (Ladecký et al., in `references/`) with
    plasticity at the Gauss points, so that errors become absolute rather than relative to another model.
 4. **TFA–LS study.** Derive the exact relation between TFA's P and the LS operator, and measure TFA and

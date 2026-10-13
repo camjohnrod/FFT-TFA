@@ -12,7 +12,7 @@ import scipy.sparse.linalg
 import tqdm
 
 import config
-from lattice_fft import get_P0_transformed
+from lattice_fft import get_P0_offset_blocks_from_transformed, get_P0_transformed
 
 ## ------- Discretizations ------- ##
 
@@ -335,13 +335,74 @@ def get_reference_L(E, L_per_partition, L_matrix):
         return np.mean(L_per_partition, axis=0)
     return L_matrix
 
-def get_P0_offset_blocks(mesh, reference_L):
-    # The reference response to eigenstrain in partition 0 alone. Reference interactions depend only on the offset
-    # between partitions (ER-6e), so block B of this response is P0[B - 0] and one solve gives the whole kernel.
+## ------- Reference Kernel P0 (Offline) ------- ##
+
+# Every P0 below is returned in real space, one 6 × 6 block per partition offset P0[a_B - a_A], on a lattice indexed
+# [j, i] as get_grid_id orders it, which is what get_P0_transformed takes.
+
+def get_fe_P0_offset_blocks(mesh, reference_L):
+    # The FE kernel (LS-14): the reference response to eigenstrain in partition 0 alone. Reference interactions depend
+    # only on the offset between partitions (ER-6e), so block B of this response is P0[B - 0] and one solve gives the
+    # whole kernel.
     reference_L_per_element = np.tile(reference_L, (mesh.discretization.element_count, 1, 1))
     K = get_K(mesh, reference_L_per_element)
     F_eigenstrain_in_first_partition = get_F_eigenstrain(mesh, reference_L_per_element)[:, :6]
     return get_influence_function_solver(mesh, K)(F_eigenstrain_in_first_partition)
+
+def get_direction_strain_matrix(directions):
+    # B(n), shape (..., 6, 3): the engineering strain (ER-2) of a displacement u varying along the unit direction n,
+    # per unit gradient, ε = B(n) u. The rows are those of get_B with each derivative replaced by its component of n.
+    n1, n2, n3 = np.moveaxis(directions, -1, 0)
+    zero = np.zeros_like(n1)
+    rows = [(n1, zero, zero), (zero, n2, zero), (zero, zero, n3), (n2, n1, zero), (zero, n3, n2), (n3, zero, n1)]
+    return np.stack([np.stack(row, axis=-1) for row in rows], axis=-2)
+
+def get_moulinec_suquet_P0_offset_blocks(lattice_side, reference_L):
+    # The Moulinec–Suquet kernel on a lattice_side² lattice (LS-21): P̂0(ξ) = Γ̂0(ξ) C0, with the continuum Green
+    # operator Γ̂0 = B (Bᵀ C0 B)⁻¹ Bᵀ, B = B(ξ / |ξ|), at every lattice frequency ξ, all in-plane since the fields are
+    # uniform through the thickness. P̂0 is zero at ξ = 0 (LS-9). On an even lattice, Γ̂0 is not even in a component
+    # equal to lattice_side / 2, so it has no real-valued meaning there; P̂0 is then the identity, Moulinec–Suquet's
+    # (1998, section 2.4.2) Γ̂0 = C0⁻¹, which makes the stress at those frequencies zero.
+    frequency_x = np.fft.rfftfreq(lattice_side, 1 / lattice_side)
+    frequency_y = np.fft.fftfreq(lattice_side, 1 / lattice_side)
+    # The half spectrum is indexed [ξ_y, ξ_x], like the lattice and get_P0_transformed.
+    wave_vectors = np.stack(np.broadcast_arrays(frequency_x[None, :], frequency_y[:, None], 0.0), axis=-1)
+    wave_vectors[0, 0] = [1, 0, 0]  # any direction at ξ = 0, whose block is set to zero below
+    B = get_direction_strain_matrix(wave_vectors / np.linalg.norm(wave_vectors, axis=-1, keepdims=True))
+    B_transposed = np.swapaxes(B, -1, -2)
+    P0_transformed = B @ np.linalg.inv(B_transposed @ reference_L @ B) @ B_transposed @ reference_L
+    P0_transformed[0, 0] = 0
+    if lattice_side % 2 == 0:
+        highest_frequencies = ((np.abs(frequency_y) == lattice_side / 2)[:, None]
+                               | (frequency_x == lattice_side / 2)[None, :])
+        P0_transformed[highest_frequencies] = np.eye(6)
+
+    # A half spectrum that is not the transform of a real kernel would be made into one silently by irfftn, so the
+    # round trip must give it back.
+    P0_offset_blocks = get_P0_offset_blocks_from_transformed(P0_transformed)
+    round_trip_error = np.abs(get_P0_transformed(P0_offset_blocks, lattice_side) - P0_transformed).max()
+    if round_trip_error > 1e-12 * np.abs(P0_transformed).max():
+        raise RuntimeError(f"the Moulinec–Suquet kernel is not real (round-trip error {round_trip_error:.2e}).")
+    return P0_offset_blocks
+
+def get_partition_averaged_P0_offset_blocks(element_P0_offset_blocks, discretization):
+    # The kernel of the discretization's partitions from the kernel of its element columns (one partition per column,
+    # same mesh), by linearity. Unit eigenstrain in a partition is unit eigenstrain in each of its k × k columns, and
+    # a partition's average strain is the mean over its columns, so P0[D] = (1/k²) Σ_receiver s Σ_source t
+    # p0_element[k D + s - t]. Grouped by d = s - t, which k - |d_x| times k - |d_y| pairs (s, t) share:
+    #   P0[D] = Σ_d (k - |d_x|)(k - |d_y|) / k² · p0_element[k D + d].
+    # Offsets are periodic. With one element per partition (k = 1) the kernel is returned unchanged.
+    k = discretization.elements_per_partition_side
+    element_side, partition_side = discretization.element_number_per_side, discretization.partition_number_per_side
+    element_P0 = element_P0_offset_blocks.reshape(element_side, element_side, 6, 6)
+    partition_offsets = k * np.arange(partition_side)
+    partition_P0 = np.zeros((partition_side, partition_side, 6, 6))
+    for d_j in range(1 - k, k):
+        for d_i in range(1 - k, k):
+            weight = (k - abs(d_j)) * (k - abs(d_i)) / k**2
+            partition_P0 += weight * element_P0[np.ix_((partition_offsets + d_j) % element_side,
+                                                       (partition_offsets + d_i) % element_side)]
+    return partition_P0.reshape(-1, 6)
 
 ## ------- Cache ------- ##
 
@@ -408,9 +469,20 @@ def get_E_and_P(mesh, L_matrix, L_inclusion, include_P):
     return E_P["E"], np.asfortranarray(E_P["P"])
 
 def get_reference_kernel(mesh, reference_L):
-    # P0 on the mesh's partition lattice, for the given reference stiffness, cached under both, so each discretization
-    # and each reference choice has its own file. P0 does not depend on the geometry, since the reference is
-    # homogeneous.
+    # P̂0 on the mesh's partition lattice, for the given reference stiffness, built as config.reference_kernel says.
+    # P0 does not depend on the geometry, since the reference is homogeneous. The Moulinec–Suquet kernel follows one
+    # rule on every lattice: built on the element grid, then averaged over partitions, which leaves it unchanged on a
+    # lattice of one element per partition (fine and coarse LS). It takes milliseconds, so it is not cached.
+    discretization = mesh.discretization
+    if config.reference_kernel == "moulinec_suquet":
+        P0_offset_blocks = get_partition_averaged_P0_offset_blocks(
+            get_moulinec_suquet_P0_offset_blocks(discretization.element_number_per_side, reference_L), discretization)
+    else:
+        P0_offset_blocks = get_cached_fe_P0_offset_blocks(mesh, reference_L)
+    return get_P0_transformed(P0_offset_blocks, discretization.partition_number_per_side)
+
+def get_cached_fe_P0_offset_blocks(mesh, reference_L):
+    # The FE kernel, cached under the discretization and the reference stiffness, so each has its own file.
     discretization = mesh.discretization
     P0_parameters = {"cache_version": cache_version,
                      "domain_side_length": config.domain_side_length,
@@ -421,14 +493,13 @@ def get_reference_kernel(mesh, reference_L):
 
     def compute():
         start_time = time.perf_counter()
-        P0_offset_blocks = get_P0_offset_blocks(mesh, reference_L)
+        P0_offset_blocks = get_fe_P0_offset_blocks(mesh, reference_L)
         print(f"P0 offline solve ({discretization.element_number_per_side} elements, "
               f"{discretization.partition_number_per_side} partitions per side): "
               f"{time.perf_counter() - start_time:.2f} seconds.")
         return {"P0_offset_blocks": P0_offset_blocks}
 
-    P0_offset_blocks = get_cached(("P0_offset_blocks",), P0_parameters, compute)["P0_offset_blocks"]
-    return get_P0_transformed(P0_offset_blocks, discretization.partition_number_per_side)
+    return get_cached(("P0_offset_blocks",), P0_parameters, compute)["P0_offset_blocks"]
 
 ## ------- Problem Setup ------- ##
 

@@ -40,7 +40,7 @@ for H_μ, …) map onto the notes' symbols and numbered equations (ER-*, LS-*), 
 ```bash
 python code/MAIN_FP.py            # from any directory; run before MAIN_Newton.py, which cross-checks against it
 python code/MAIN_Newton.py
-python code/check_code.py         # after any change: static checks plus seven smoke runs (~5 minutes)
+python code/check_code.py         # after any change: static checks plus nine smoke runs (~6 minutes)
 python code/check_code.py save    # the same, then save the smoke runs' results as a baseline (only if all passed)
 python code/check_code.py compare # the same, then require the results bit-identical to that baseline
 ```
@@ -55,8 +55,9 @@ value, so a local study configuration cannot change what they cover) and runs `M
 `MAIN_Newton.py`. `smoke_runs` lists the runs, each with a comment saying why it exists: monotonic; cyclic
 (`load_path_shape = "cyclic"`, the only test of unloading, reverse yielding and zero imposed strain, where a solver
 abandoning the load path also fails, since abandoning prints no FAIL); matched stiffness (the LS regression gate); LS
-only; laminate (every solver against the exact solution); circle (one partition per element); and mixed partitions, a
-negative test that must stop with the mixed-partition error (`SmokeRun.expected_error`). It never touches this
+only; laminate (every solver against the exact solution); circle (one partition per element); the Moulinec–Suquet
+kernel on a laminate (exact) and on even grids (its highest-frequency convention); and mixed partitions, a negative
+test that must stop with the mixed-partition error (`SmokeRun.expected_error`). It never touches this
 folder's config, cache or outputs, so it is safe to run with a local study configuration. Setting those values in
 `config.py` and running one entry point by hand is the quick loop for a single solver (restore them afterwards; that
 run does write this folder's cache and outputs). The checks test consistency, not results: for a change meant to leave
@@ -108,20 +109,22 @@ TFA's dense P, of (6 × partitions)² doubles: 0.3 GB at 32² partitions, 4.8 GB
   `MAIN_FP.py` (`check_against_saved_results`). SKIPPED, with the reason, when that file is missing, has no result
   for that solver (it ran without TFA), or was saved for a different problem (`config.problem_parameter_names`) or
   `convergence_tolerance`. Run `MAIN_FP.py` first.
-- With `verification_enabled`: reference-kernel checks on the main, fine and coarse kernels; the partitioned P0
-  rebuilt from the fine P0 (`get_partitioned_P0_from_fine`, exact by linearity, so it must match the direct solve to
-  round-off); finite-difference Jacobian checks in `MAIN_Newton.py`
-  (LS-20, and ER-18 with TFA), and, only when `partition_count <= verification_max_partitions` (default 256, so
-  **skipped at the default 32×32 partitions**), dense checks against a direct reference solve plus the LS elastic model
-  error. Lower `partition_number_per_side` to get them, keeping the inclusion aligned (e.g. 16 partitions with 32
+- With `verification_enabled`: structural checks on the main, fine and coarse kernels (zero at ξ = 0, D̂0 Hermitian,
+  eigenvalues real and in [0, 1]); finite-difference Jacobian checks in `MAIN_Newton.py` (LS-20, and ER-18 with TFA);
+  and, only when `partition_count <= verification_max_partitions` (default 256, so **skipped at the default 32×32
+  partitions**), the FFT convolution against the dense product, plus the LS elastic stiffness printed against the FE
+  one. FE kernel only: the partitioned P0 rebuilt from the fine one (`get_partition_averaged_P0_offset_blocks`, exact by
+  linearity) and the dense check against a direct reference solve; the MS kernel is built by that same averaging, and
+  refuses to build unless its half spectrum is the transform of a real kernel. Lower `partition_number_per_side` to get them, keeping the inclusion aligned (e.g. 16 partitions with 32
   elements for the default 0.5 mm square).
 
 **Cache and output.** The offline step (factorizing the global stiffness to build `E`, `P`, `P0`) is cached in
 `code/cache/` (gitignored), shared by both entry points, one file per array and parameter set named by a hash of its
 parameters (`offline.get_cache_path`, `get_cached`). `E` and `P` share one factorization of the stiffness but are
 solved separately and cached in separate files, so E is bit-identical whether or not P is built, and an LS-only run
-neither builds nor loads P. Each `P0` is cached under its discretization and the reference stiffness itself, so each
-lattice and each `reference_stiffness` choice gets its own file. Bump `offline.cache_version` whenever a code change
+neither builds nor loads P. Each FE `P0` is cached under its discretization and the reference stiffness itself, so
+each lattice and each `reference_stiffness` choice gets its own file; the Moulinec–Suquet kernel takes milliseconds and
+is not cached. Bump `offline.cache_version` whenever a code change
 alters the offline operators, since parameters alone cannot detect that. `code/output/` (gitignored): each run first
 deletes its own `<prefix>*` files, then writes `<prefix>load_path_summary.png`, `<prefix>time_breakdown.png`,
 `<prefix>von_mises_stress.png` (von Mises stress at the last step every mapped solver completed, one map per solver on
@@ -143,7 +146,7 @@ the config values in.
 | Module | Contents |
 |---|---|
 | `config.py` | Inputs, derived values, geometry checks, `problem_parameter_names`, folders |
-| `offline.py` | `Discretization` (main, fine, coarse), periodic hex mesh, materials, 8-node element matrices, `E`/`P`/`P0` influence functions, cache, `get_problem()` |
+| `offline.py` | `Discretization` (main, fine, coarse), periodic hex mesh, materials, 8-node element matrices, `E`/`P` influence functions, the FE and Moulinec–Suquet `P0` kernels and the partition averaging they share, cache, `get_problem()` |
 | `lattice_fft.py` | the partition-lattice FFT: `get_P0_transformed`, `apply_on_partition_lattice` and the inverse |
 | `material.py` | vectorized J2 radial return and its sensitivity `H_μ` |
 | `online_timing.py` | `timed_online` groups, each charged its own (exclusive) time |
@@ -179,7 +182,9 @@ Non-obvious points:
   along z, partitions per side, and the sizes derived from them), carried by its `Mesh` along with the element B
   matrix, so offline functions take just the mesh. There are three, one function each: the main one from `config`
   (TFA and partitioned LS), the fine one (the main mesh, one partition per element column: fine LS) and the
-  coarse one (one element per main partition). All three P0 kernels share the one C0.
+  coarse one (one element per main partition). All three P0 kernels share the one C0 and the one `reference_kernel`;
+  the Moulinec–Suquet one is built on each discretization's element grid and averaged over its partitions, so fine
+  and coarse LS (one element per partition) get the standard scheme and partitioned LS the SCA-style average.
 - **Half spectrum:** the kernel and every lattice field are real, so `P0_transformed` and `M0⁻¹` hold only the
   non-redundant half of the frequencies (`rfftn`, shape `(N, N//2 + 1, 6, 6)`), transformed back with
   `irfftn(..., s=(N, N))`. Anything new that reads `P0_transformed` must use this convention.
@@ -265,16 +270,10 @@ spectral measure misses it; inspect fields locally.
 
 Roadmap, in order:
 1. Thickness check: done (2026-10-12). `element_number_along_z = 1` reproduces `= 3` to round-off.
-2. Moulinec–Suquet kernel, a config choice next to the FE kernel (decided 2026-10-12). One rule for every LS lattice:
-   MS on the element grid (P̂0 = Γ̂0 C0 at the grid frequencies, zero at ξ = 0, P̂0 = I at an even grid's highest
-   frequency), averaged over partitions with the function now in `verification.get_partitioned_P0_from_fine`. Fine
-   and coarse LS are then standard MS at element and partition resolution; partitioned LS averages the fine operator
-   as SCA does (Liu et al. 2016, Schneider 2019); never call it SCA, which also clusters by k-means and updates C0.
-   The FE kernel stays: only it makes LS and TFA the same equation (`matched_stiffness_control`). TFA keeps its FE
-   operators, so report the FE-vs-MS gap (fine LS against TFA on elastic steps, where TFA is the exact FE answer)
-   next to every LS-vs-TFA difference. `"homogenized"` C0 brings FE in through E; use `"matrix"` for MS studies.
-   Tests: the structural kernel checks; a real-kernel check (rfftn/irfftn round trip); an MS laminate on an even
-   lattice (MS is exact for a laminate); FE results bit-identical (`check_code.py save` / `compare`).
+2. Moulinec–Suquet kernel: done (2026-10-12), `reference_kernel = "moulinec_suquet"` (LS-21, `notes/2_ls_model.md`
+   section 6.5); FE stays the default. Under MS, TFA keeps its FE operators, so an LS-vs-TFA difference includes the
+   FE-vs-MS discretization gap; it is not reported separately (fine LS against TFA on elastic steps, where TFA is the
+   exact FE answer, measures it). Never call partitioned LS "SCA", which also clusters by k-means and updates C0.
 3. Gold-standard reference: a separate FE-consistent FFT solver (Ladecký et al., `references/`; displacement
    unknowns, plasticity at the Gauss points). For its error split, a derivation already checked: with every partition
    a k × k block of equal-volume reference cells and Π the block average, ‖f − g‖² = ‖f − Πg‖² + ‖g − Πg‖² at every

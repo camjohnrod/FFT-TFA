@@ -45,6 +45,7 @@ smoke_run_overrides = {
     "poisson_ratio_matrix": "0.19", "inclusion_yield_stress": "np.inf", "matrix_yield_stress": "1.0e6",
     "inclusion_hardening_modulus": "0.0", "matrix_hardening_modulus": "10e6", "matched_stiffness_control": "False",
     "include_tfa_model": "True", "include_non_partitioned_ls": "True", "reference_stiffness": '"matrix"',
+    "reference_kernel": '"fe"',
     # Load path, solvers and checks.
     "max_macro_strain": "np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])", "strain_increment_count": "12",
     "load_path_shape": '"monotonic"', "convergence_tolerance": "1e-6", "residual_strain_scale_floor": "1e-4",
@@ -77,6 +78,15 @@ smoke_runs = {
     # A circle resolved on the elements, with one partition per element so that no partition is mixed. The three LS
     # lattices are then one lattice, so the fine and coarse LS solvers must agree with partitioned LS.
     "circle": SmokeRun({"inclusion_shape": '"circle"', "inclusion_radius": "0.35e-3", "element_number_per_side": "9"}),
+    # The Moulinec–Suquet kernel against the laminate's exact solution, which it reproduces at any resolution: a
+    # laminate field varies only normal to the layers, the one direction in which its Green operator is exact.
+    "Moulinec-Suquet laminate": SmokeRun({"reference_kernel": '"moulinec_suquet"', "inclusion_shape": '"laminate"',
+                                          "inclusion_side_length": "(3/9) * 1e-3",
+                                          "max_macro_strain": "np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.01])"}),
+    # The Moulinec–Suquet kernel on even grids (16 elements, 8 partitions), the only run that reaches its
+    # highest-frequency convention, and with an even number of elements per partition.
+    "Moulinec-Suquet even grid": SmokeRun({"reference_kernel": '"moulinec_suquet"', "partition_number_per_side": "8",
+                                           "element_number_per_side": "16", "inclusion_side_length": "(4/8) * 1e-3"}),
     # The same circle on coarser partitions cuts through some of them, which must stop the run.
     "mixed partitions": SmokeRun({"inclusion_shape": '"circle"', "inclusion_radius": "0.35e-3"},
                                  expected_error="partitions contain both phases"),

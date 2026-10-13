@@ -20,7 +20,7 @@ inclusion_side_length       = 0.5e-3
 inclusion_radius            = 0.35e-3
 element_number_per_side     = 64
 element_number_along_z      = 1
-partition_number_per_side   = 32
+partition_number_per_side   = 16
 
 # Materials. matched_stiffness_control = True gives the inclusion the matrix's elastic stiffness; the TFA and LS models
 # are then the same equation, which is the regression gate for the LS solvers.
@@ -50,6 +50,18 @@ include_non_partitioned_ls  = True
 #   "matrix"       the matrix stiffness
 reference_stiffness         = "matrix"
 
+# Reference kernel P0, the operator through which LS partitions interact, built with C0 on every LS lattice:
+#   "fe"               the FE mesh's reference response, averaged over partitions (LS-14). The only kernel under
+#                      which matched_stiffness_control makes LS and TFA the same equation, since TFA's P is built on
+#                      that mesh.
+#   "moulinec_suquet"  the continuum Green operator at the element grid's frequencies (LS-21), averaged over
+#                      partitions as SCA averages its fine-grid operator over clusters. Fine and coarse LS, one element
+#                      per partition, are then the standard Moulinec–Suquet scheme at element and partition resolution.
+#                      On an even grid its highest frequency uses Moulinec–Suquet's convention: zero stress there.
+# For TFA, P0 only preconditions the FFT solvers. "homogenized" C0 is built from the FE operator E, so with
+# "moulinec_suquet" use "matrix" or "voigt" to keep LS free of FE.
+reference_kernel            = "moulinec_suquet"
+
 # Load path: max_macro_strain reached linearly over strain_increment_count steps. Alternatives:
 #   np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])      uniaxial
 #   np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])  mixed mode tension
@@ -57,7 +69,7 @@ reference_stiffness         = "matrix"
 # load_path_shape "monotonic" stops at max_macro_strain; "cyclic" continues 0 -> +max -> -max -> 0 at the same
 # increment, 4 * strain_increment_count steps in all, unloading elastically, yielding in reverse and passing through
 # zero imposed strain twice.
-max_macro_strain            = np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0])
+max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
 strain_increment_count      = 60
 load_path_shape             = "monotonic"
 
@@ -146,6 +158,11 @@ if matched_stiffness_control and not include_tfa_model:
 if reference_stiffness not in ("homogenized", "voigt", "matrix"):
     raise ValueError("reference_stiffness must be \"homogenized\", \"voigt\" or \"matrix\". "
                      f"Got {reference_stiffness!r}.")
+if reference_kernel not in ("fe", "moulinec_suquet"):
+    raise ValueError(f"reference_kernel must be \"fe\" or \"moulinec_suquet\". Got {reference_kernel!r}.")
+if matched_stiffness_control and reference_kernel != "fe":
+    raise ValueError("matched_stiffness_control makes LS and TFA the same equation only with the FE kernel, since "
+                     "TFA's P is built on the same mesh: it needs reference_kernel = \"fe\".")
 if von_mises_min_MPa is not None and von_mises_max_MPa is not None and von_mises_min_MPa >= von_mises_max_MPa:
     raise ValueError("The von Mises colour-scale minimum must be below its maximum.")
 
@@ -171,7 +188,8 @@ problem_parameter_names = ("domain_side_length", "inclusion_shape", "inclusion_s
                            "elastic_modulus_inclusion", "elastic_modulus_matrix", "poisson_ratio_inclusion",
                            "poisson_ratio_matrix", "inclusion_yield_stress", "matrix_yield_stress",
                            "inclusion_hardening_modulus", "matrix_hardening_modulus", "matched_stiffness_control",
-                           "reference_stiffness", "max_macro_strain", "strain_increment_count", "load_path_shape")
+                           "reference_stiffness", "reference_kernel", "max_macro_strain", "strain_increment_count",
+                           "load_path_shape")
 
 # Shared by every entry point. Cache files are named by a hash of the parameters that produced them, and output files
 # are prefixed with the entry point's run name.

@@ -245,7 +245,7 @@ Titles only flag candidates; none was read.
   fibre; Kabel et al.: relative error near 20 % at half resolution). Uniform partitions will likely need many
   partitions; the FFT is what makes many affordable.
 - What follows for the project, adopted as its research question and roadmap (README, "Status and roadmap"):
-  1. **Moulinec–Suquet kernel** (roadmap step 2, decided 2026-10-12): MS on the element grid, averaged over
+  1. **Moulinec–Suquet kernel** (roadmap step 2, implemented 2026-10-12, LS-21): MS on the element grid, averaged over
      partitions as SCA averages its fine-grid operator over clusters ("fine grid, averaged" in the table of
      section 2). The consistent kernel, its limit as the element grid is refined, is left for later.
   2. **The TFA–LS relationship** (step 4), the main thread: Schneider's §4 gives the formal link (full against
