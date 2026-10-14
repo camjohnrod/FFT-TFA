@@ -40,9 +40,10 @@ each of its solvers, several times over for fair timings:
 | `MAIN_FP.py` | LS fixed point; with `include_tfa_model`, TFA fixed point plain and FFT-preconditioned |
 | `MAIN_Newton.py` | LS Newton; with `include_non_partitioned_ls`, LS on the element lattice ("fine") and on a coarse mesh with one element per partition ("coarse"); with `include_tfa_model`, TFA Newton plain and FFT-preconditioned |
 
-Outputs, in `code/output/` (prefix `FP_` or `Newton_`): `load_path_summary.png` (macroscopic deviatoric stress,
-iterations and time per iteration per step), `time_breakdown.png` (where the time goes), `von_mises_stress.png` (one
-map per solver at the last step, finest lattice first) and `results.npz`, plus `cross_section.png`. The folder is
+Outputs, in `code/output/` (prefix `FP_` or `Newton_`): `stress_strain.png` (every macroscopic stress component
+against the applied strain, one curve per solver), `solver_performance.png` (iterations and time per iteration per
+step), `time_breakdown.png` (where the time goes), `von_mises_stress.png` (one map per solver at the last step,
+finest lattice first) and `results.npz`, plus `cross_section.png`. The folder is
 gitignored: rerun to regenerate it.
 
 ## Configuration essentials
@@ -52,10 +53,11 @@ gitignored: rerun to regenerate it.
   laminate must have its edges on partition edges; a circle needs one partition per element.
 - **Reference stiffness** (`reference_stiffness`): C0 is part of the LS model, so it changes LS's answer; for TFA it
   only affects the FFT preconditioner's speed.
-- **Reference kernel** (`reference_kernel`): `"fe"` (default) or `"moulinec_suquet"`, for every LS lattice.
+- **Reference kernel** (`reference_kernel`): `"moulinec_suquet"` (default) or `"fe"`, for every LS lattice.
 - **Load path** (`max_macro_strain`, `strain_increment_count`, `load_path_shape`).
-- **Checks with a known answer**: `matched_stiffness_control = True` makes LS and TFA the same equation, so they must
-  agree; `inclusion_shape = "laminate"` has an exact solution (`code/laminate.py`) that every solver must match.
+- **Checks with a known answer**: `matched_stiffness_control = True` (with `reference_kernel = "fe"`) makes LS and TFA
+  the same equation, so they must agree; `inclusion_shape = "laminate"` has an exact solution (`code/laminate.py`)
+  that every solver must match.
 
 ## How the code is checked
 
@@ -100,8 +102,8 @@ partitions was found among the papers read, and no numerical comparison of LS an
 Roadmap, in order:
 1. **Thickness check (done).** One element layer through the thickness reproduces three to round-off, so one layer,
    the default, loses nothing.
-2. **Moulinec–Suquet kernel (done)**, `reference_kernel = "moulinec_suquet"`, next to the FE kernel, which stays
-   the default and the only one for the matched-stiffness gate. One rule for every LS lattice: Moulinec–Suquet on
+2. **Moulinec–Suquet kernel (done)**, `reference_kernel = "moulinec_suquet"`, now the default, next to the FE
+   kernel, which is the only one for the matched-stiffness gate. One rule for every LS lattice: Moulinec–Suquet on
    the element grid, averaged over partitions. Fine and coarse LS are then the standard Moulinec–Suquet method at
    element and at partition resolution; partitioned LS averages the fine operator as SCA does (Liu et al. 2016).
    TFA keeps its FE operators, so under this kernel an LS-vs-TFA difference includes the FE-vs-MS discretization gap.

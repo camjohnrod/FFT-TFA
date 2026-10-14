@@ -8,8 +8,8 @@
 # read from config.py.
 #
 # Run from anywhere: python code/MAIN_Newton.py (after MAIN_FP.py, for the cross-checks)
-# Outputs, in code/output: Newton_load_path_summary.png, Newton_time_breakdown.png, Newton_von_mises_stress.png,
-# Newton_results.npz and the shared cross_section.png.
+# Outputs, in code/output: Newton_stress_strain.png, Newton_solver_performance.png, Newton_time_breakdown.png,
+# Newton_von_mises_stress.png, Newton_results.npz and the shared cross_section.png.
 
 import functools
 

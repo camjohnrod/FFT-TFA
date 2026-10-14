@@ -1,34 +1,129 @@
-# Every figure the entry points save: the load-path summary (stress, iterations and time per iteration per step) and
-# the time breakdown per timing group, for up to five solvers (one colour each in solver_colors), the partition
-# cross-section and the von Mises stress maps on it. No solver logic.
+# Every figure the entry points save: the macroscopic stress-strain curves and the solver performance (iterations
+# and time per iteration per step), the time breakdown per timing group, the partition cross-section and the von
+# Mises stress maps on it. Every solver is drawn and named by its role, the same in every figure (solver_role_styles,
+# solver_role_labels). No solver logic.
 
 from typing import NamedTuple
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker
 import matplotlib.colors
-import matplotlib.legend
-import matplotlib.legend_handler
-import matplotlib.lines
-import matplotlib.text
 
-## ------- Load Path Summary ------- ##
+## ------- Shared Style ------- ##
+
+# Every figure's text in Computer Modern, the math included, so labels, ticks and symbols match. Tick labels go through
+# mathtext, since cmr10 has no minus sign of its own.
+figure_style = {'font.family': 'serif', 'font.serif': ['cmr10'], 'mathtext.fontset': 'cm',
+                'axes.formatter.use_mathtext': True, 'axes.formatter.useoffset': False, 'savefig.dpi': 200}
+
+# One look per solver role, keyed like report.SolverRoles and in legend order: told apart by colour (Okabe–Ito, whose
+# pairs stay distinct under simulated colour blindness) and by dash pattern. Partitioned LS, the method being tested,
+# is solid, the fine lattice dotted and the coarse one dash-dot. TFA, the baseline, is a thinner black dash drawn on
+# top, so it stays visible where the curves agree.
+solver_role_styles = {
+    "ls_fine":      {'color': '#0072B2', 'linestyle': (0, (1, 1.6)), 'dash_capstyle': 'round', 'zorder': 3},
+    "ls":           {'color': '#D55E00', 'linestyle': '-', 'zorder': 2},
+    "ls_coarse":    {'color': '#009E73', 'linestyle': (0, (7, 2, 1.5, 2)), 'zorder': 3},
+    "tfa_baseline": {'color': 'black', 'linestyle': (0, (5, 3)), 'linewidth': 1.4, 'zorder': 4},
+    "tfa_fft":      {'color': '#CC79A7', 'linestyle': (0, (3, 1.5, 1, 1.5, 1, 1.5)), 'zorder': 4},
+}
+# Short names: the strategy (fixed point or Newton) is in the file name.
+solver_role_labels = {"ls_fine": "LS fine", "ls": "LS", "ls_coarse": "LS coarse", "tfa_baseline": "TFA",
+                      "tfa_fft": "TFA FFT"}
+
+load_path_style = {**figure_style, 'font.size': 12, 'axes.labelsize': 13, 'xtick.labelsize': 11,
+                   'ytick.labelsize': 11, 'legend.fontsize': 12, 'lines.linewidth': 1.8, 'axes.spines.top': False,
+                   'axes.spines.right': False}
+legend_style = {'loc': 'outside upper center', 'frameon': False, 'handlelength': 3.2}
+
+def get_roles_in_legend_order(role_per_solver, solver_names):
+    # The named solvers, as (role, name), in the order of solver_role_styles.
+    solver_per_role = {role_per_solver[solver_name]: solver_name for solver_name in solver_names}
+    return [(role, solver_per_role[role]) for role in solver_role_styles if role in solver_per_role]
+
+def mark_solver_failure(axis, x_values, values, completed_step_count, color):
+    # An x at the step the solver gave up on, drawn level with the last value it produced so it reads as the
+    # curve stopping rather than as a data point.
+    if completed_step_count >= len(x_values) or completed_step_count == 0:
+        return
+    axis.plot(x_values[completed_step_count], values[completed_step_count - 1], marker='x', markersize=9,
+              markeredgewidth=2, color=color, linestyle='none', clip_on=False, zorder=5)
+
+## ------- Stress-Strain Curves ------- ##
 
 macro_strain_component_labels = [r"$\bar{\varepsilon}_{11}$", r"$\bar{\varepsilon}_{22}$", r"$\bar{\varepsilon}_{33}$",
                                  r"$\bar{\gamma}_{12}$", r"$\bar{\gamma}_{23}$", r"$\bar{\gamma}_{13}$"]
+# Normal stresses on the top row, shears on the bottom, each as (component in the engineering order 11, 22, 33, 12,
+# 23, 13; its subscript).
+stress_panel_rows = [[(0, "11"), (1, "22"), (2, "33")], [(4, "23"), (5, "13"), (3, "12")]]
+# A component whose stress stays below this fraction of the largest, for every solver, is zero up to solver
+# tolerance and round-off.
+zero_stress_fraction = 1e-4
+stress_strain_figure_width = 11
+stress_strain_row_height = 2.7
 
-load_path_summary_style = {'font.size': 14, 'axes.labelsize': 16, 'xtick.labelsize': 13, 'ytick.labelsize': 13,
-                           'legend.fontsize': 15, 'axes.titlesize': 22, 'lines.linewidth': 2.5}
-load_path_summary_figure_size = (10, 10)
-deviatoric_stress_component_styles = [('red', 'o', r"$\bar{\mathbf{S}}_{11}$"),
-                                      ('blue', 's', r"$\bar{\mathbf{S}}_{22}$"),
-                                      ('green', '^', r"$\bar{\mathbf{S}}_{33}$")]
-# The stress panel draws the method being tested as markers only and the baseline as a thin dashed line of the same
-# colour, so where they agree the markers sit on the dashes.
-new_method_marker_style = {'linestyle': 'none', 'markersize': 4}
-baseline_stress_style = {'linewidth': 1.5, 'linestyle': (0, (4, 2)), 'zorder': 3}
-# One colour per solver, in the order the solvers are given. Their legends are stacked beside the iterations panel.
-solver_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple']
+def get_load_axis(applied_macro_strain, max_macro_strain):
+    # The stress-strain curves' x axis, from the unloaded state, and its label: the applied strain in % when one
+    # component is loaded, otherwise the load factor t of ε̄ = t ε̄max, labelled with ε̄max.
+    loaded_components = np.flatnonzero(max_macro_strain)
+    applied_macro_strain = np.vstack([np.zeros(6), applied_macro_strain])
+    if len(loaded_components) == 1:
+        component = loaded_components[0]
+        return 100 * applied_macro_strain[:, component], f"{macro_strain_component_labels[component]} (%)"
+    largest_component = np.abs(max_macro_strain).argmax()
+    max_strain_description = ",  ".join(f"{macro_strain_component_labels[component]} = "
+                                        f"{100 * max_macro_strain[component]:g} %" for component in loaded_components)
+    return (applied_macro_strain[:, largest_component] / max_macro_strain[largest_component],
+            r"Load factor $t$,   $\bar{\varepsilon} = t\,\bar{\varepsilon}_{\max}$,   $\bar{\varepsilon}_{\max}$:  "
+            + max_strain_description)
+
+def plot_stress_strain(stress_MPa_per_solver, role_per_solver, completed_step_count_per_solver, applied_macro_strain,
+                       max_macro_strain, plot_path):
+    # Each solver's macroscopic stress (MPa, one row per step) against the applied strain, one panel per component,
+    # from the unloaded state to the last step it solved. role_per_solver maps each solver's name to its role. A row
+    # whose components are zero for every solver is left out (uniaxial loading leaves every shear at zero), and a zero
+    # panel in a kept row shows only "0".
+    load_axis, load_axis_label = get_load_axis(applied_macro_strain, max_macro_strain)
+    solved_stress_MPa = {solver_name: np.vstack([np.zeros(6), stress[:completed_step_count_per_solver[solver_name]]])
+                         for solver_name, stress in stress_MPa_per_solver.items()}
+    largest_stress = max(np.abs(stress).max() for stress in solved_stress_MPa.values())
+
+    def is_zero(components):
+        return all(np.abs(stress[:, components]).max() < zero_stress_fraction * largest_stress
+                   for stress in solved_stress_MPa.values())
+
+    panel_rows = [row for row in stress_panel_rows if not is_zero([component for component, _ in row])]
+    with plt.rc_context(load_path_style):
+        figure_height = 0.6 + stress_strain_row_height * len(panel_rows)
+        figure, axes = plt.subplots(len(panel_rows), 3, squeeze=False, sharex=True, layout='constrained',
+                                    figsize=(stress_strain_figure_width, figure_height))
+        figure.get_layout_engine().set(w_pad=0.12, h_pad=0.1)
+        for axis, (component, subscript) in zip(axes.flat, [panel for row in panel_rows for panel in row]):
+            axis.set_ylabel(rf"$\bar{{\sigma}}_{{{subscript}}}$ (MPa)")
+            axis.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(5, steps=[1, 2, 2.5, 5, 10]))
+            axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
+            if is_zero([component]):
+                axis.text(0.5, 0.5, "0", transform=axis.transAxes, ha='center', va='center', fontsize=20, color='0.6')
+                axis.set_yticks([])
+                axis.spines['left'].set_color('0.8')
+                continue
+            axis.axhline(0, color='0.88', linewidth=0.8, zorder=0)
+            for role, solver_name in get_roles_in_legend_order(role_per_solver, solved_stress_MPa):
+                stress = solved_stress_MPa[solver_name][:, component]
+                axis.plot(load_axis[:len(stress)], stress, label=solver_role_labels[role], **solver_role_styles[role])
+                mark_solver_failure(axis, load_axis[1:], stress[1:], len(stress) - 1,
+                                    solver_role_styles[role]['color'])
+        figure.supxlabel(load_axis_label, fontsize=13)
+        figure.align_ylabels(axes)
+        handles, labels = axes.flat[0].get_legend_handles_labels()
+        figure.legend(handles, labels, ncols=len(handles), columnspacing=2.4, **legend_style)
+        figure.savefig(plot_path)
+    plt.close(figure)
+    print(f"stress-strain plot saved to {plot_path}")
+
+## ------- Solver Performance ------- ##
+
+solver_performance_figure_size = (10.5, 5.6)
 iterations_log_axis_ratio = 20
 
 class SolverSteps(NamedTuple):
@@ -36,74 +131,9 @@ class SolverSteps(NamedTuple):
     solve_time_per_step: np.ndarray
     completed_step_count: int
 
-def get_applied_strain_description(max_macro_strain, load_path_shape, load_step_count):
-    nonzero_components = [f"{label} = {value:g}"
-                          for label, value in zip(macro_strain_component_labels, max_macro_strain) if value != 0]
-    component_lines = [", ".join(nonzero_components[start:start + 3]) for start in range(0, len(nonzero_components), 3)]
-    heading = (f"Applied Strain ({load_step_count} steps)" if load_path_shape == "monotonic"
-               else f"Cyclic Applied Strain, 0 → +max → −max → 0 ({load_step_count} steps)")
-    return "\n".join([heading] + component_lines)
-
 def shade_elastic_steps(axis, load_steps, elastic_steps):
     for load_step in load_steps[elastic_steps]:
-        axis.axvspan(load_step - 0.5, load_step + 0.5, color='0.9', linewidth=0, zorder=0)
-
-def label_elastic_steps(axis, load_steps, elastic_steps, max_font_size=13, min_font_size=8, band_fill_fraction=0.85):
-    elastic_load_steps = load_steps[elastic_steps]
-    if len(elastic_load_steps) == 0:
-        return
-    # Only the first run of elastic steps is labelled. A cyclic path has later runs, each unloading, which are shaded
-    # but would otherwise stretch the label across the whole path.
-    first_run_breaks = np.flatnonzero(np.diff(elastic_load_steps) != 1)
-    first_run_last_step = elastic_load_steps[first_run_breaks[0]] if len(first_run_breaks) else elastic_load_steps[-1]
-    band_left, band_right = elastic_load_steps[0] - 0.5, first_run_last_step + 0.5
-    label = axis.annotate("Elastic\nregime", xy=((band_left + band_right) / 2, 1), xycoords=axis.get_xaxis_transform(),
-                          xytext=(0, -8), textcoords='offset points', ha='center', va='top', color='0.4',
-                          fontsize=max_font_size, linespacing=1.1)
-    figure = axis.get_figure()
-    figure.canvas.draw()
-    renderer = figure.canvas.get_renderer()
-    band_width_pixels = abs(np.diff(axis.transData.transform([(band_left, 0), (band_right, 0)])[:, 0])[0])
-    label_width_pixels = label.get_window_extent(renderer).width
-    fitted_font_size = max_font_size * min(1.0, band_fill_fraction * band_width_pixels / label_width_pixels)
-    rotated_font_size = min(max_font_size, band_fill_fraction * band_width_pixels * 72 / figure.dpi / 1.2)
-    if fitted_font_size >= min_font_size:
-        label.set_fontsize(fitted_font_size)
-    elif rotated_font_size >= min_font_size:
-        label.set_text("Elastic")
-        label.set_rotation(90)
-        label.set_fontsize(rotated_font_size)
-    else:
-        label.set_text("◂ Elastic")
-        label.xy = (band_right, 1)
-        label.set_horizontalalignment('left')
-        label.set_position((4, -8))
-        label.set_fontsize(min_font_size + 2)
-
-def add_solver_legend(axis, line, solver_name, solver_steps, vertical_anchor):
-    no_line = matplotlib.lines.Line2D([], [], linestyle='none')
-    # One line of totals, so that up to five solvers' legends fit beside the iterations panel.
-    totals_label = (f"  {solver_steps.iterations_per_step.sum()} iterations, "
-                    f"{solver_steps.solve_time_per_step.sum():.2f} s in total")
-    if solver_steps.completed_step_count < len(solver_steps.iterations_per_step):
-        totals_label += f"\n  (stopped at step {solver_steps.completed_step_count + 1})"
-    solver_legend = matplotlib.legend.Legend(axis, [line, no_line], [f"{solver_name}:", totals_label],
-                                             labelspacing=0.4, handlelength=1.5, frameon=False,
-                                             loc='center left', bbox_to_anchor=(1.01, vertical_anchor))
-    solver_name_text, totals_text = solver_legend.get_texts()
-    solver_name_text.set_fontweight('bold')
-    solver_name_text.set_fontsize(15)
-    totals_text.set_fontsize(13)
-    axis.add_artist(solver_legend)
-    solver_legend.set_clip_on(False)
-
-def mark_solver_failure(axis, load_steps, values, completed_step_count, color):
-    # An x at the step the solver gave up on, drawn level with the last value it produced so it reads as the
-    # curve stopping rather than as a data point.
-    if completed_step_count >= len(load_steps) or completed_step_count == 0:
-        return
-    axis.plot(load_steps[completed_step_count], values[completed_step_count - 1], marker='x', markersize=11,
-              markeredgewidth=2.5, color=color, linestyle='none', clip_on=False, zorder=5)
+        axis.axvspan(load_step - 0.5, load_step + 0.5, color='0.93', linewidth=0, zorder=0)
 
 def get_time_per_iteration_ms(solver_steps):
     # Abandoned steps have zero iterations and zero time, so they stay at zero instead of being divided.
@@ -113,86 +143,30 @@ def get_time_per_iteration_ms(solver_steps):
                                      / solver_steps.iterations_per_step[solved])
     return time_per_iteration_ms
 
-class ColumnTitle(NamedTuple):
-    text: str
-
-class HandlerColumnTitle(matplotlib.legend_handler.HandlerBase):
-    # Draws the title starting at the left edge of the handle column, where the example lines start, instead of in
-    # the label column.
-    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
-        return [matplotlib.text.Text(xdescent, ydescent + height / 2, orig_handle.text, fontsize=fontsize,
-                                     fontweight='bold', horizontalalignment='left', verticalalignment='center',
-                                     transform=trans)]
-
-def add_stress_legend(axis, baseline_solver_name, new_solver_name):
-    # A grid: one row per component, one column per solver (none for the baseline when there is none), each column
-    # headed by the solver's name.
-    columns = [(new_solver_name, [{'marker': marker, **new_method_marker_style}
-                                  for _, marker, _ in deviatoric_stress_component_styles])]
-    if baseline_solver_name is not None:
-        columns.append((baseline_solver_name, [baseline_stress_style] * len(deviatoric_stress_component_styles)))
-    component_labels = [label for _, _, label in deviatoric_stress_component_styles]
-    handles, labels = [], []
-    for solver_name, line_styles in columns:
-        handles += [ColumnTitle(solver_name)] + [
-            matplotlib.lines.Line2D([], [], color=color, **line_style)
-            for (color, _, _), line_style in zip(deviatoric_stress_component_styles, line_styles)]
-        labels += [solver_name] + component_labels
-    legend = axis.legend(handles, labels, ncols=len(columns), loc='center left', bbox_to_anchor=(1.01, 0.5),
-                         frameon=False, fontsize=13, handlelength=2.2, columnspacing=1.2,
-                         handler_map={ColumnTitle: HandlerColumnTitle()})
-    # The title is drawn by its handle, but the invisible label under it keeps the column wide enough to hold it.
-    for column_title in legend.get_texts()[::1 + len(component_labels)]:
-        column_title.set_visible(False)
-
-def plot_load_path_summary(deviatoric_stress_MPa_per_solver, baseline_solver_name, new_solver_name, steps_per_solver,
-                           elastic_steps, title, plot_path):
-    # The stress panel compares the method being tested, new_solver_name, against baseline_solver_name (or shows it
-    # alone when that is None), each up to the last step it solved; deviatoric_stress_MPa_per_solver maps those names
-    # to their macroscopic deviatoric stress per step. The iteration and timing panels show every solver in
-    # steps_per_solver, a dict from solver name to SolverSteps. elastic_steps marks the steps where no partition
-    # yielded, which are shaded.
-    load_step_count = len(steps_per_solver[new_solver_name].iterations_per_step)
+def plot_solver_performance(steps_per_solver, role_per_solver, elastic_steps, plot_path):
+    # Iterations and time per iteration at every step, for every solver in steps_per_solver (a dict from solver name
+    # to SolverSteps), each up to the last step it solved, with its total solve time in the legend. elastic_steps
+    # marks the steps where no partition yielded, which are shaded.
+    load_step_count = len(elastic_steps)
     load_steps = np.arange(1, load_step_count + 1)
-
-    with plt.rc_context(load_path_summary_style):
-        figure, (stress_axis, iterations_axis, time_per_iteration_axis) = plt.subplots(
-            3, 1, sharex=True, figsize=load_path_summary_figure_size, layout='constrained')
-        title_heading, title_details = title.split("\n", 1)
-        stress_axis.set_title(title_details, pad=16, linespacing=1.4, fontsize=17, color='0.2')
-        stress_axis.annotate(title_heading, xy=(0.5, 1), xycoords=stress_axis.title, xytext=(0, 6),
-                             textcoords='offset points', ha='center', va='bottom',
-                             fontsize=load_path_summary_style['axes.titlesize'])
-        for axis in (stress_axis, iterations_axis, time_per_iteration_axis):
+    with plt.rc_context(load_path_style):
+        figure, (iterations_axis, time_per_iteration_axis) = plt.subplots(
+            2, 1, sharex=True, figsize=solver_performance_figure_size, layout='constrained')
+        for axis in (iterations_axis, time_per_iteration_axis):
             shade_elastic_steps(axis, load_steps, elastic_steps)
 
-        for solver_name, stress in deviatoric_stress_MPa_per_solver.items():
-            completed_step_count = steps_per_solver[solver_name].completed_step_count
-            for component, (color, marker, _) in enumerate(deviatoric_stress_component_styles):
-                style = ({'marker': marker, **new_method_marker_style} if solver_name == new_solver_name
-                         else baseline_stress_style)
-                stress_axis.plot(load_steps[:completed_step_count], stress[:completed_step_count, component],
-                                 color=color, **style)
-                mark_solver_failure(stress_axis, load_steps, stress[:, component], completed_step_count, color)
-        add_stress_legend(stress_axis, baseline_solver_name, new_solver_name)
-        stress_axis.set_ylabel("Deviatoric stress (MPa)")
-
-        for solver_index, (solver_name, solver_steps) in enumerate(steps_per_solver.items()):
-            color = solver_colors[solver_index]
-            legend_anchor = 1 - (solver_index + 0.5) / len(steps_per_solver)
+        for role, solver_name in get_roles_in_legend_order(role_per_solver, steps_per_solver):
+            solver_steps = steps_per_solver[solver_name]
+            style = solver_role_styles[role]
             solved_steps = load_steps[:solver_steps.completed_step_count]
+            label = f"{solver_role_labels[role]}  {solver_steps.solve_time_per_step.sum():.2f} s"
+            if solver_steps.completed_step_count < load_step_count:
+                label += f", stopped at step {solver_steps.completed_step_count + 1}"
             time_per_iteration_ms = get_time_per_iteration_ms(solver_steps)
-
-            line, = iterations_axis.step(solved_steps, solver_steps.iterations_per_step[:len(solved_steps)],
-                                         where='mid', color=color)
-            add_solver_legend(iterations_axis, line, solver_name, solver_steps, legend_anchor)
-            mark_solver_failure(iterations_axis, load_steps, solver_steps.iterations_per_step,
-                                solver_steps.completed_step_count, color)
-
-            time_per_iteration_axis.step(solved_steps, time_per_iteration_ms[:len(solved_steps)], where='mid',
-                                         color=color)
-            mark_solver_failure(time_per_iteration_axis, load_steps, time_per_iteration_ms,
-                                solver_steps.completed_step_count, color)
+            for axis, values in ((iterations_axis, solver_steps.iterations_per_step),
+                                 (time_per_iteration_axis, time_per_iteration_ms)):
+                axis.step(solved_steps, values[:len(solved_steps)], where='mid', label=label, **style)
+                mark_solver_failure(axis, load_steps, values, solver_steps.completed_step_count, style['color'])
 
         iterations_axis.set_ylabel("Iterations")
         # Counts more than an order of magnitude apart, such as the LS fixed point against TFA, share a log axis so
@@ -204,16 +178,16 @@ def plot_load_path_summary(deviatoric_stress_MPa_per_solver, baseline_solver_nam
         else:
             iterations_axis.set_ylim(bottom=0)
             iterations_axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
-        time_per_iteration_axis.set_ylabel("Time per iteration (ms)")
+        time_per_iteration_axis.set_ylabel("ms per iteration")
         time_per_iteration_axis.set_ylim(bottom=0)
-        time_per_iteration_axis.set_xlabel("Load step", labelpad=12)
+        time_per_iteration_axis.set_xlabel("Load step")
         time_per_iteration_axis.set_xlim(0.5, load_step_count + 0.5)
         figure.align_ylabels()
-        label_elastic_steps(stress_axis, load_steps, elastic_steps)
-
+        handles, labels = iterations_axis.get_legend_handles_labels()
+        figure.legend(handles, labels, ncols=len(handles), columnspacing=1.6, fontsize=11, **legend_style)
         figure.savefig(plot_path)
     plt.close(figure)
-    print(f"load path summary plot saved to {plot_path}")
+    print(f"solver performance plot saved to {plot_path}")
 
 ## ------- Time per Iteration Breakdown ------- ##
 
@@ -224,8 +198,8 @@ online_time_group_labels = [r"Material update $\mu(\varepsilon)$",
                             r"Sensitivity $\mathbf{H}_\mu$", r"Build $\mathbf{M}_0^{-1}$",
                             r"Solve for $\delta\varepsilon$", "Other"]
 online_time_group_colors = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#4a3aa7', '#d3d2cc']
-time_breakdown_style = {'font.size': 13, 'axes.labelsize': 14, 'xtick.labelsize': 12, 'ytick.labelsize': 14,
-                        'legend.fontsize': 13}
+time_breakdown_style = {**figure_style, 'font.size': 13, 'axes.labelsize': 14, 'xtick.labelsize': 12,
+                        'ytick.labelsize': 14, 'legend.fontsize': 13}
 time_breakdown_figure_size = (10, 3.6)
 time_breakdown_legend_row_count = 2
 
@@ -283,19 +257,19 @@ def draw_element_and_partition_edges(axis, element_number_per_side, partition_nu
 def plot_cross_section(cross_section_material_ids, element_number_per_side, plot_path):
     partition_number_per_side = cross_section_material_ids.shape[0]
 
-    figure, axis = plt.subplots(figsize=cross_section_figure_size, layout='constrained')
-    axis.imshow(cross_section_material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.55']), vmin=0, vmax=1,
-                origin='lower', extent=(0, 1, 0, 1))
-    draw_element_and_partition_edges(axis, element_number_per_side, partition_number_per_side)
-    axis.set_axis_off()
-
-    figure.savefig(plot_path)
+    with plt.rc_context(figure_style):
+        figure, axis = plt.subplots(figsize=cross_section_figure_size, layout='constrained')
+        axis.imshow(cross_section_material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.55']), vmin=0,
+                    vmax=1, origin='lower', extent=(0, 1, 0, 1))
+        draw_element_and_partition_edges(axis, element_number_per_side, partition_number_per_side)
+        axis.set_axis_off()
+        figure.savefig(plot_path)
     plt.close(figure)
     print(f"cross section plot saved to {plot_path}")
 
 ## ------- von Mises Stress Maps ------- ##
 
-von_mises_style = {'font.size': 13, 'axes.titlesize': 15, 'figure.titlesize': 14}
+von_mises_style = {**figure_style, 'font.size': 13, 'axes.titlesize': 15, 'figure.titlesize': 14}
 von_mises_panel_size = 4.2
 
 def draw_inclusion_outline(axis, cross_section_material_ids):

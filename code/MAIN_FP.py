@@ -8,8 +8,8 @@
 # too long.
 #
 # Run from anywhere: python code/MAIN_FP.py
-# Outputs, in code/output: FP_load_path_summary.png, FP_time_breakdown.png, FP_von_mises_stress.png, FP_results.npz
-# and the shared cross_section.png.
+# Outputs, in code/output: FP_stress_strain.png, FP_solver_performance.png, FP_time_breakdown.png,
+# FP_von_mises_stress.png, FP_results.npz and the shared cross_section.png.
 
 import functools
 

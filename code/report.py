@@ -46,7 +46,7 @@ def report_results(results, solver_roles, run_name):
     print_comparison(results, comparable_step_count)
     if solver_roles.tfa_baseline is not None:
         print_model_difference(results, solver_roles.tfa_baseline, solver_roles.ls, comparable_step_count)
-    save_load_path_plots(results, comparable_step_count, solver_roles.tfa_baseline, solver_roles.ls, run_name)
+    save_load_path_plots(results, comparable_step_count, solver_roles, run_name)
     save_von_mises_stress_plot(results, solver_roles, run_name)
 
 def check_results(results, problem, solver_roles):
@@ -252,9 +252,14 @@ def save_cross_section_plot(partition_material_ids):
 def get_von_mises_stress(stress):
     return get_equivalent_stress(get_deviatoric_stress(stress))
 
+def get_role_per_solver(solver_roles):
+    # Each solver's name mapped to its role (a SolverRoles field), which sets how every figure draws and names it.
+    return {solver_name: role for role, solver_name in solver_roles._asdict().items() if solver_name is not None}
+
 def save_von_mises_stress_plot(results, solver_roles, run_name):
     # One map per LS solver, from the finest lattice to the coarsest, then TFA, each on its own lattice, at the last
     # step every mapped solver completed, so the maps compare the same load.
+    role_per_solver = get_role_per_solver(solver_roles)
     mapped_solver_names = [name for name in (solver_roles.ls_fine, solver_roles.ls, solver_roles.ls_coarse,
                                              solver_roles.tfa_baseline) if name is not None]
     step_count = min(get_completed_step_count(results[solver_name]) for solver_name in mapped_solver_names)
@@ -265,7 +270,8 @@ def save_von_mises_stress_plot(results, solver_roles, run_name):
         side = int(round(np.sqrt(len(stress))))
         # The coarse scheme's mesh has one element per partition; every other solver's is the main mesh.
         element_number_per_side = side if solver_name == solver_roles.ls_coarse else config.element_number_per_side
-        stress_maps.append(plots.StressMap(solver_name, get_von_mises_stress(stress).reshape(side, side) / 1e6,
+        stress_maps.append(plots.StressMap(plots.solver_role_labels[role_per_solver[solver_name]],
+                                           get_von_mises_stress(stress).reshape(side, side) / 1e6,
                                            result.partition_material_ids.reshape(side, side), element_number_per_side))
     plots.plot_von_mises_stress(stress_maps, step_count, config.load_step_count, config.von_mises_min_MPa,
                                 config.von_mises_max_MPa, config.output_folder / f"{run_name}_von_mises_stress.png")
@@ -281,20 +287,24 @@ def get_solver_steps(solver_results):
                              solve_time_per_step=get_fastest_repeat_per_step(solver_results, "solve_time_per_step"),
                              completed_step_count=get_completed_step_count(solver_results))
 
-def save_load_path_plots(results, comparable_step_count, baseline_solver_name, new_solver_name, run_name):
-    # Stresses are plotted for the method being tested and, unless baseline_solver_name is None, the baseline. The
-    # elastic steps shaded are the baseline's when there is one, since the LS model can yield at different steps from
-    # TFA.
-    plotted_solver_names = [new_solver_name] + ([baseline_solver_name] if baseline_solver_name is not None else [])
-    plots.plot_load_path_summary(
-        {solver_name: get_deviatoric_stress(results[solver_name][-1].macroscopic_stress) / 1e6
-         for solver_name in plotted_solver_names},
-        baseline_solver_name, new_solver_name,
+def save_load_path_plots(results, comparable_step_count, solver_roles, run_name):
+    # The stress-strain curves of every solver but TFA FFT, which the agreement check already requires to match TFA;
+    # the iterations, time per iteration and time breakdown of every solver. The elastic steps shaded are the
+    # baseline's when there is one, since the LS model can yield at different steps from TFA.
+    role_per_solver = get_role_per_solver(solver_roles)
+    stress_solver_names = [solver_name for solver_name in results if solver_name != solver_roles.tfa_fft]
+    plots.plot_stress_strain(
+        {solver_name: results[solver_name][-1].macroscopic_stress / 1e6 for solver_name in stress_solver_names},
+        role_per_solver,
+        {solver_name: get_completed_step_count(results[solver_name]) for solver_name in stress_solver_names},
+        config.applied_macro_strain, config.max_macro_strain, config.output_folder / f"{run_name}_stress_strain.png")
+    elastic_steps_solver_name = solver_roles.tfa_baseline if solver_roles.tfa_baseline is not None else solver_roles.ls
+    plots.plot_solver_performance(
         {solver_name: get_solver_steps(solver_results) for solver_name, solver_results in results.items()},
-        get_elastic_steps(results[plotted_solver_names[-1]][-1]),
-        plots.get_applied_strain_description(config.max_macro_strain, config.load_path_shape, config.load_step_count),
-        config.output_folder / f"{run_name}_load_path_summary.png")
+        role_per_solver, get_elastic_steps(results[elastic_steps_solver_name][-1]),
+        config.output_folder / f"{run_name}_solver_performance.png")
     plots.plot_time_per_iteration_breakdown(
-        {solver_name: 1000 * get_time_per_iteration_per_group(solver_results, comparable_step_count)
+        {plots.solver_role_labels[role_per_solver[solver_name]]:
+             1000 * get_time_per_iteration_per_group(solver_results, comparable_step_count)
          for solver_name, solver_results in results.items()},
         config.output_folder / f"{run_name}_time_breakdown.png")

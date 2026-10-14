@@ -20,7 +20,7 @@ inclusion_side_length       = 0.5e-3
 inclusion_radius            = 0.35e-3
 element_number_per_side     = 64
 element_number_along_z      = 1
-partition_number_per_side   = 16
+partition_number_per_side   = 32
 
 # Materials. matched_stiffness_control = True gives the inclusion the matrix's elastic stiffness; the TFA and LS models
 # are then the same equation, which is the regression gate for the LS solvers.

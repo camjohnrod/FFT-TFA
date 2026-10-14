@@ -24,7 +24,7 @@ baseline it is compared against. Each is solved by two strategies (fixed point, 
   entry point's strategy as the baseline of its plots and checks.
 - LS and TFA are *different* models: their difference is modelling error, printed as such, not a solver bug. Only
   under `matched_stiffness_control` are they the same equation; that is the LS regression gate, and it needs
-  `include_tfa_model`.
+  `include_tfa_model` and the FE kernel (`reference_kernel = "fe"`; the default is Moulinec–Suquet).
 - **Non-partitioned LS** (`config.include_non_partitioned_ls`, default `True`, `MAIN_Newton.py` only, since the LS
   fixed point at fine resolution takes too long): the same LS scheme on two more lattices, as comparisons. "LS
   Newton, fine" has one partition per element column, the finest lattice the mesh allows; "LS Newton, coarse" has
@@ -126,18 +126,20 @@ neither builds nor loads P. Each FE `P0` is cached under its discretization and 
 each lattice and each `reference_stiffness` choice gets its own file; the Moulinec–Suquet kernel takes milliseconds and
 is not cached. Bump `offline.cache_version` whenever a code change
 alters the offline operators, since parameters alone cannot detect that. `code/output/` (gitignored): each run first
-deletes its own `<prefix>*` files, then writes `<prefix>load_path_summary.png`, `<prefix>time_breakdown.png`,
-`<prefix>von_mises_stress.png` (von Mises stress at the last step every mapped solver completed, one map per solver on
-its own lattice, from the finest LS lattice to the coarsest, then TFA) and `<prefix>results.npz` (per-solver results
-plus the problem parameters, read by the cross-checks; written last, only once every check has passed, so a failed run
-leaves none), plus the shared `cross_section.png`.
+deletes its own `<prefix>*` files, then writes `<prefix>stress_strain.png` (every macroscopic stress component
+against the applied strain, every solver but TFA FFT; a row of components zero for every solver is left out),
+`<prefix>solver_performance.png` (iterations and time per iteration per step, total time per solver),
+`<prefix>time_breakdown.png`, `<prefix>von_mises_stress.png` (von Mises stress at the last step every mapped solver
+completed, one map per solver on its own lattice, from the finest LS lattice to the coarsest, then TFA) and
+`<prefix>results.npz` (per-solver results plus the problem parameters, read by the cross-checks; written last, only
+once every check has passed, so a failed run leaves none), plus the shared `cross_section.png`.
 
 ## Architecture
 
 The entry points are thin: `main()` reads as an outline, and what both report and check after solving is one call
 each, `report.report_results` and `report.check_results`, driven by `SolverRoles` (each solver's role: LS, TFA
 baseline, TFA FFT, LS fine, LS coarse; `None` when not run). The pipeline lives in modules under `code/`, imported in
-one direction (each arrow points to the modules that may import what comes before it): `config` → `lattice_fft`,
+one direction (each arrow points to the modules that may import what comes before it): `config` → `lattice_fft` →
 `offline`, `online_timing` → `material` → `convergence` → `load_path` → `tfa_solvers`, `ls_solvers`, `laminate`
 (independent of each other) → `verification`, `report`. Every module reads inputs as `config.<name>`, except
 `plots.py`, which imports no project module and takes everything as arguments; only `report.py` imports it, passing
@@ -157,7 +159,7 @@ the config values in.
 | `laminate.py` | exact solution of the laminate geometry: two uniform phase states, Newton on ε11, γ12, γ13 |
 | `verification.py` | kernel, dense and Jacobian checks, `run_verification` |
 | `report.py` | `SolverRoles`, `report_results`, `check_results`; timing aggregation, agreement, laminate and cross-checks, saved results, plots |
-| `plots.py` | load-path summary and time breakdown for up to five solvers, cross-section, von Mises stress maps |
+| `plots.py` | stress-strain curves, solver performance, time breakdown, cross-section, von Mises stress maps; one style and short name per solver role (`solver_role_styles`, `solver_role_labels`), shared by every figure |
 
 Non-obvious points:
 - **Strain convention (ER-2):** engineering shear, `(ε11, ε22, ε33, 2ε12, 2ε23, 2ε13)`. `get_relative_residual`
@@ -229,8 +231,9 @@ Non-obvious points:
   | `ls_fixed_point_iteration` | LS-19 (damped) |
   | `get_ls_jacobian_blocks`, `get_ls_newton_correction`, `ls_newton_iteration` | LS-20 and the load step of section 7.3 |
 
-  In `report.py`, `plots.py` and the entry points, the solver a plot or check compares against is the "baseline"
-  (`baseline_solver_name`): the plain TFA solver of the same strategy, or none in an LS-only run.
+  In `report.py` and the entry points, the solver a check compares against is the "baseline" (`tfa_baseline` in
+  `SolverRoles`): the plain TFA solver of the same strategy, or none in an LS-only run. Figures draw and name every
+  solver by its role, so the same role looks the same in every figure and in both entry points.
 - **One reference stiffness C0 for both models.** `config.reference_stiffness` (`"homogenized"` ⟨L E⟩, `"voigt"`
   ⟨L⟩, or `"matrix"`) sets `Problem.reference_L`, from which the single `P0` is built (`offline.get_reference_L`).
   C0 is part of the LS model, so it changes the LS answer; for TFA it only preconditions the FFT solvers, so the
@@ -271,7 +274,8 @@ spectral measure misses it; inspect fields locally.
 Roadmap, in order:
 1. Thickness check: done (2026-10-12). `element_number_along_z = 1` reproduces `= 3` to round-off.
 2. Moulinec–Suquet kernel: done (2026-10-12), `reference_kernel = "moulinec_suquet"` (LS-21, `notes/2_ls_model.md`
-   section 6.5); FE stays the default. Under MS, TFA keeps its FE operators, so an LS-vs-TFA difference includes the
+   section 6.5); the default since 2026-10-13, with FE kept as an option and the only kernel for the matched-stiffness
+   gate. Under MS, TFA keeps its FE operators, so an LS-vs-TFA difference includes the
    FE-vs-MS discretization gap; it is not reported separately (fine LS against TFA on elastic steps, where TFA is the
    exact FE answer, measures it). Never call partitioned LS "SCA", which also clusters by k-means and updates C0.
 3. Gold-standard reference: a separate FE-consistent FFT solver (Ladecký et al., `references/`; displacement
