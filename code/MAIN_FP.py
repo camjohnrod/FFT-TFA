@@ -1,7 +1,8 @@
-# The partition-averaged Lippmann-Schwinger (LS) model solved by damped fixed-point iteration (LS-19). With
+# The constant-polarization (CP) solver, the partition-averaged Lippmann-Schwinger (LS) model on the main partitions,
+# solved by damped fixed-point iteration (LS-19). With
 # config.include_tfa_model, the actual E/P TFA model (ER-4) is solved next to it as the baseline, by fixed-point
 # iteration with and without the FFT reference preconditioner (3_tfa_baseline.md Strategy 1). The two TFA solvers
-# solve the same equation and must agree to solver tolerance. LS is a different model, so its difference from TFA is
+# solve the same equation and must agree to solver tolerance. CP is a different model, so its difference from TFA is
 # modelling error, printed as such; only under matched_stiffness_control are the two models the same equation, and
 # then they must agree too. The problem and every solver setting are read from config.py. The non-partitioned LS
 # solvers (config.include_non_partitioned_ls) run in MAIN_Newton.py only: the LS fixed point at fine resolution takes
@@ -23,10 +24,10 @@ from tfa_solvers import get_tfa_fixed_point_solvers
 from verification import run_verification
 
 run_name = "FP"
-solver_roles = get_solver_roles(ls="LS FP", tfa_baseline="TFA Standard FP", tfa_fft="TFA FFT FP")
+solver_roles = get_solver_roles(cp="CP FP", tfa_baseline="TFA Standard FP", tfa_fft="TFA FFT FP")
 
 def get_solvers(problem, ls_relaxation):
-    solvers = {solver_roles.ls: get_ls_fixed_point_solver(problem.P0_transformed, problem.reference_compliance,
+    solvers = {solver_roles.cp: get_ls_fixed_point_solver(problem.P0_transformed, problem.reference_compliance,
                                                           ls_relaxation, problem.partition_materials)}
     if config.include_tfa_model:
         solvers.update(get_tfa_fixed_point_solvers(problem.E, problem.P, problem.P0_transformed,
@@ -41,7 +42,7 @@ def main():
         run_verification(problem)
 
     ls_relaxation = get_ls_relaxation_factor(problem.partition_materials, problem.reference_L)
-    print(f"LS fixed point: relaxation {ls_relaxation:.4g}")
+    print(f"CP fixed point: relaxation {ls_relaxation:.4g}")
     if config.include_tfa_model:
         print(f"TFA fixed point: relaxation {config.tfa_relaxation_factor}")
     results = run_interleaved_repeats(functools.partial(get_solvers, problem, ls_relaxation))

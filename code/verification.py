@@ -1,7 +1,7 @@
 # Tolerance checks run before either entry point solves anything: the structure of every reference kernel P0 (main,
 # fine and coarse lattices), finite-difference checks of the Newton Jacobians, the FE homogenized stiffness against
 # the laminate's exact one, and, when the grid is small enough for dense matrices, the FFT convolution against the
-# dense product and the LS elastic stiffness against the FE one. The FE kernel is also checked against the fine one
+# dense product and the CP elastic stiffness against the FE one. The FE kernel is also checked against the fine one
 # averaged over partitions and against a direct dense reference solve. Every check prints PASS or FAIL, and any failure
 # stops the run.
 
@@ -139,7 +139,7 @@ def get_ls_jacobian_checks(problem):
         jacobian_blocks = get_ls_jacobian_blocks(strain, partition_materials, no_plastic_history, reference_compliance)
         return direction - get_P0_induced_strain(P0_transformed, np.einsum('pij,pj->pi', jacobian_blocks, direction))
 
-    return get_jacobian_checks("LS", "LS-20", partition_materials, get_base_strain, get_residual, apply_jacobian)
+    return get_jacobian_checks("CP", "LS-20", partition_materials, get_base_strain, get_residual, apply_jacobian)
 
 def get_tfa_jacobian_checks(problem):
     # The ER-18 product J v = v - P (H_μ v) of the TFA Newton solvers, at the elastic predictor E ε̄.
@@ -172,9 +172,9 @@ def print_elastic_model_error(dense_P0, problem):
     model_stiffness = get_model_elastic_stiffness(dense_P0, problem.partition_materials.L,
                                                   problem.reference_compliance)
     stiffness_error = np.max(np.abs(model_stiffness - exact_stiffness)) / np.max(np.abs(exact_stiffness))
-    # Against the FE stiffness: with the FE kernel, the LS model's constant-polarization error alone; with the
+    # Against the FE stiffness: with the FE kernel, the CP model's constant-polarization error alone; with the
     # Moulinec–Suquet kernel, that plus the difference between the two discretizations.
-    print(f"  LS elastic stiffness against the FE homogenized stiffness ({config.reference_kernel} kernel, no solver "
+    print(f"  CP elastic stiffness against the FE homogenized stiffness ({config.reference_kernel} kernel, no solver "
           "tolerance involved):")
     print(f"    homogenized stiffness    : {stiffness_error:.3e} relative, worst component")
     print(f"    C_1111 exact vs model MPa: {exact_stiffness[0, 0] / 1e6:.3f} vs {model_stiffness[0, 0] / 1e6:.3f}")
@@ -188,7 +188,7 @@ def get_laminate_stiffness_check(problem):
 
 def run_verification(problem, extra_check_functions=()):
     # Each of extra_check_functions(problem) returns further (description, error, tolerance) checks from the entry
-    # point, such as the Jacobian checks of its Newton solvers, printed and enforced with the rest. The LS elastic
+    # point, such as the Jacobian checks of its Newton solvers, printed and enforced with the rest. The CP elastic
     # model error is printed after them, from the dense P0, so only when the dense checks run.
     print("verification:")
     checks = get_reference_kernel_checks(problem.P0_transformed, problem.reference_L)

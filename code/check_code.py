@@ -70,7 +70,7 @@ smoke_runs = {
     "cyclic": SmokeRun({"load_path_shape": '"cyclic"', "strain_increment_count": "4"}, require_every_step=True),
     # The LS regression gate, where LS must reproduce TFA.
     "matched stiffness": SmokeRun({"matched_stiffness_control": "True"}),
-    "LS only": SmokeRun({"include_tfa_model": "False"}),
+    "CP only": SmokeRun({"include_tfa_model": "False"}),
     # The exact solution every solver must reproduce (laminate.py): a layer 3 partitions thick, loaded in tension and
     # shear so that every interface-normal component, ε11, γ12 and γ13, takes part.
     "laminate": SmokeRun({"inclusion_shape": '"laminate"', "inclusion_side_length": "(3/9) * 1e-3",

@@ -16,19 +16,20 @@ from material import get_deviatoric_stress, get_equivalent_stress
 
 class SolverRoles(NamedTuple):
     # Each solver of an entry point by the role it plays, under the name it reports with; None for a role that is not
-    # run. ls is partitioned LS, the method being tested. TFA, when included, is its model baseline, and its
-    # FFT-preconditioned solver is checked against the plain one. ls_fine and ls_coarse are the same LS scheme without
-    # partitions, on the element lattice and on a coarse mesh with one element per partition.
-    ls: str
+    # run. cp is the constant-polarization solver on the main partitions, the method being tested. TFA, when included,
+    # is its model baseline, and its FFT-preconditioned solver is checked against the plain one. ls_fine and
+    # ls_coarse are the same LS scheme without partitions, on the element lattice and on a coarse mesh with one element
+    # per partition.
+    cp: str
     tfa_baseline: str = None
     tfa_fft: str = None
     ls_fine: str = None
     ls_coarse: str = None
 
-def get_solver_roles(ls, tfa_baseline, tfa_fft, ls_fine=None, ls_coarse=None):
+def get_solver_roles(cp, tfa_baseline, tfa_fft, ls_fine=None, ls_coarse=None):
     # The roles of an entry point's solvers: TFA's only with config.include_tfa_model, and the non-partitioned LS
     # ones only with config.include_non_partitioned_ls, for an entry point that names them (MAIN_Newton.py).
-    solver_roles = SolverRoles(ls)
+    solver_roles = SolverRoles(cp)
     if config.include_tfa_model:
         solver_roles = solver_roles._replace(tfa_baseline=tfa_baseline, tfa_fft=tfa_fft)
     if config.include_non_partitioned_ls and ls_fine is not None:
@@ -40,12 +41,12 @@ def report_problem(problem):
     save_cross_section_plot(problem.partition_materials.material_ids)
 
 def report_results(results, solver_roles, run_name):
-    # The printed comparison and every plot. Partitioned LS is the method being tested, against the TFA baseline when
+    # The printed comparison and every plot. CP is the method being tested, against the TFA baseline when
     # there is one.
     comparable_step_count = get_comparable_step_count(results)
     print_comparison(results, comparable_step_count)
     if solver_roles.tfa_baseline is not None:
-        print_model_difference(results, solver_roles.tfa_baseline, solver_roles.ls, comparable_step_count)
+        print_model_difference(results, solver_roles.tfa_baseline, solver_roles.cp, comparable_step_count)
     save_load_path_plots(results, comparable_step_count, solver_roles, run_name)
     save_von_mises_stress_plot(results, solver_roles, run_name)
 
@@ -55,14 +56,14 @@ def check_results(results, problem, solver_roles):
     if solver_roles.tfa_baseline is not None:
         check_solver_agreement(results, [solver_roles.tfa_baseline, solver_roles.tfa_fft], comparable_step_count)
         if config.matched_stiffness_control:
-            check_matched_stiffness(results, solver_roles.tfa_baseline, solver_roles.ls, comparable_step_count)
+            check_matched_stiffness(results, solver_roles.tfa_baseline, solver_roles.cp, comparable_step_count)
     if solver_roles.ls_fine is not None and config.partition_number_per_side == config.element_number_per_side:
-        # With one partition per element, the three LS lattices are the same lattice, so the three LS solvers are the
+        # With one partition per element, the three LS lattices are the same lattice, so the three solvers are the
         # same solver and must agree.
         for solver_name in (solver_roles.ls_fine, solver_roles.ls_coarse):
-            check_stress_agreement(f"partitions = elements, {solver_name} vs {solver_roles.ls}",
+            check_stress_agreement(f"partitions = elements, {solver_name} vs {solver_roles.cp}",
                                    get_stress_path(results, solver_name, comparable_step_count),
-                                   get_stress_path(results, solver_roles.ls, comparable_step_count),
+                                   get_stress_path(results, solver_roles.cp, comparable_step_count),
                                    config.solver_agreement_tolerance)
     if config.inclusion_shape == "laminate":
         check_laminate_solution(results, problem.partition_materials)
@@ -179,20 +180,20 @@ def check_against_saved_results(results, solver_name, saved_run_name, saved_solv
     check_stress_agreement(description, get_stress_path(results, solver_name, step_count), saved_stress[:step_count],
                            config.solver_agreement_tolerance)
 
-## ------- LS Model Comparison ------- ##
+## ------- CP Model Comparison ------- ##
 
-def print_model_difference(results, tfa_solver_name, ls_solver_name, comparable_step_count):
-    # The LS model's macroscopic stress against the TFA (actual E/P) model's: modelling error, not solver error.
-    model_difference = get_relative_stress_difference(get_stress_path(results, ls_solver_name, comparable_step_count),
+def print_model_difference(results, tfa_solver_name, cp_solver_name, comparable_step_count):
+    # The CP model's macroscopic stress against the TFA (actual E/P) model's: modelling error, not solver error.
+    model_difference = get_relative_stress_difference(get_stress_path(results, cp_solver_name, comparable_step_count),
                                                       get_stress_path(results, tfa_solver_name, comparable_step_count))
-    print(f"model discrepancy, different models ({ls_solver_name} vs {tfa_solver_name}): {model_difference:.2e} "
+    print(f"model discrepancy, different models ({cp_solver_name} vs {tfa_solver_name}): {model_difference:.2e} "
           "relative. This is a modelling difference, not a solver error.")
 
-def check_matched_stiffness(results, tfa_solver_name, ls_solver_name, comparable_step_count):
-    # With matched phase stiffness the LS and TFA models are the same equation, so here, and only here, the LS solver
+def check_matched_stiffness(results, tfa_solver_name, cp_solver_name, comparable_step_count):
+    # With matched phase stiffness the CP and TFA models are the same equation, so here, and only here, the CP solver
     # must reproduce TFA to solver tolerance.
-    check_stress_agreement(f"matched-stiffness control, {ls_solver_name} vs {tfa_solver_name}",
-                           get_stress_path(results, ls_solver_name, comparable_step_count),
+    check_stress_agreement(f"matched-stiffness control, {cp_solver_name} vs {tfa_solver_name}",
+                           get_stress_path(results, cp_solver_name, comparable_step_count),
                            get_stress_path(results, tfa_solver_name, comparable_step_count),
                            config.matched_stiffness_tolerance)
 
@@ -257,10 +258,10 @@ def get_role_per_solver(solver_roles):
     return {solver_name: role for role, solver_name in solver_roles._asdict().items() if solver_name is not None}
 
 def save_von_mises_stress_plot(results, solver_roles, run_name):
-    # One map per LS solver, from the finest lattice to the coarsest, then TFA, each on its own lattice, at the last
-    # step every mapped solver completed, so the maps compare the same load.
+    # One map per CP or LS solver, from the finest lattice to the coarsest, then TFA, each on its own lattice, at the
+    # last step every mapped solver completed, so the maps compare the same load.
     role_per_solver = get_role_per_solver(solver_roles)
-    mapped_solver_names = [name for name in (solver_roles.ls_fine, solver_roles.ls, solver_roles.ls_coarse,
+    mapped_solver_names = [name for name in (solver_roles.ls_fine, solver_roles.cp, solver_roles.ls_coarse,
                                              solver_roles.tfa_baseline) if name is not None]
     step_count = min(get_completed_step_count(results[solver_name]) for solver_name in mapped_solver_names)
     stress_maps = []
@@ -290,7 +291,7 @@ def get_solver_steps(solver_results):
 def save_load_path_plots(results, comparable_step_count, solver_roles, run_name):
     # The stress-strain curves of every solver but TFA FFT, which the agreement check already requires to match TFA;
     # the iterations, time per iteration and time breakdown of every solver. The elastic steps shaded are the
-    # baseline's when there is one, since the LS model can yield at different steps from TFA.
+    # baseline's when there is one, since the CP model can yield at different steps from TFA.
     role_per_solver = get_role_per_solver(solver_roles)
     stress_solver_names = [solver_name for solver_name in results if solver_name != solver_roles.tfa_fft]
     plots.plot_stress_strain(
@@ -298,7 +299,7 @@ def save_load_path_plots(results, comparable_step_count, solver_roles, run_name)
         role_per_solver,
         {solver_name: get_completed_step_count(results[solver_name]) for solver_name in stress_solver_names},
         config.applied_macro_strain, config.max_macro_strain, config.output_folder / f"{run_name}_stress_strain.png")
-    elastic_steps_solver_name = solver_roles.tfa_baseline if solver_roles.tfa_baseline is not None else solver_roles.ls
+    elastic_steps_solver_name = solver_roles.tfa_baseline if solver_roles.tfa_baseline is not None else solver_roles.cp
     plots.plot_solver_performance(
         {solver_name: get_solver_steps(solver_results) for solver_name, solver_results in results.items()},
         role_per_solver, get_elastic_steps(results[elastic_steps_solver_name][-1]),

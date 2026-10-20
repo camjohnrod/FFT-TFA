@@ -17,18 +17,18 @@ figure_style = {'font.family': 'serif', 'font.serif': ['cmr10'], 'mathtext.fonts
                 'axes.formatter.use_mathtext': True, 'axes.formatter.useoffset': False, 'savefig.dpi': 200}
 
 # One look per solver role, keyed like report.SolverRoles and in legend order: told apart by colour (Okabe–Ito, whose
-# pairs stay distinct under simulated colour blindness) and by dash pattern. Partitioned LS, the method being tested,
+# pairs stay distinct under simulated colour blindness) and by dash pattern. CP, the method being tested,
 # is solid, the fine lattice dotted and the coarse one dash-dot. TFA, the baseline, is a thinner black dash drawn on
 # top, so it stays visible where the curves agree.
 solver_role_styles = {
     "ls_fine":      {'color': '#0072B2', 'linestyle': (0, (1, 1.6)), 'dash_capstyle': 'round', 'zorder': 3},
-    "ls":           {'color': '#D55E00', 'linestyle': '-', 'zorder': 2},
+    "cp":           {'color': '#D55E00', 'linestyle': '-', 'zorder': 2},
     "ls_coarse":    {'color': '#009E73', 'linestyle': (0, (7, 2, 1.5, 2)), 'zorder': 3},
     "tfa_baseline": {'color': 'black', 'linestyle': (0, (5, 3)), 'linewidth': 1.4, 'zorder': 4},
     "tfa_fft":      {'color': '#CC79A7', 'linestyle': (0, (3, 1.5, 1, 1.5, 1, 1.5)), 'zorder': 4},
 }
 # Short names: the strategy (fixed point or Newton) is in the file name.
-solver_role_labels = {"ls_fine": "LS fine", "ls": "LS", "ls_coarse": "LS coarse", "tfa_baseline": "TFA",
+solver_role_labels = {"ls_fine": "LS fine", "cp": "CP", "ls_coarse": "LS coarse", "tfa_baseline": "TFA",
                       "tfa_fft": "TFA FFT"}
 
 load_path_style = {**figure_style, 'font.size': 12, 'axes.labelsize': 13, 'xtick.labelsize': 11,
@@ -107,7 +107,8 @@ def plot_stress_strain(stress_MPa_per_solver, role_per_solver, completed_step_co
                 axis.set_yticks([])
                 axis.spines['left'].set_color('0.8')
                 continue
-            axis.axhline(0, color='0.88', linewidth=0.8, zorder=0)
+            axis.grid(True, color='0.9', linewidth=0.8)
+            axis.set_axisbelow(True)
             for role, solver_name in get_roles_in_legend_order(role_per_solver, solved_stress_MPa):
                 stress = solved_stress_MPa[solver_name][:, component]
                 axis.plot(load_axis[:len(stress)], stress, label=solver_role_labels[role], **solver_role_styles[role])
@@ -169,7 +170,7 @@ def plot_solver_performance(steps_per_solver, role_per_solver, elastic_steps, pl
                 mark_solver_failure(axis, load_steps, values, solver_steps.completed_step_count, style['color'])
 
         iterations_axis.set_ylabel("Iterations")
-        # Counts more than an order of magnitude apart, such as the LS fixed point against TFA, share a log axis so
+        # Counts more than an order of magnitude apart, such as the CP fixed point against TFA, share a log axis so
         # the smaller ones stay readable. Otherwise the axis is linear from zero.
         largest_counts = [solver_steps.iterations_per_step.max() for solver_steps in steps_per_solver.values()]
         if max(largest_counts) > iterations_log_axis_ratio * max(min(largest_counts), 1):

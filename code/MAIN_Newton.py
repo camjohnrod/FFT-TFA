@@ -1,7 +1,8 @@
-# The partition-averaged Lippmann-Schwinger (LS) model solved by matrix-free Newton-GMRES on the LS-20 Jacobian. With
+# The constant-polarization (CP) solver, the partition-averaged Lippmann-Schwinger (LS) model on the main partitions,
+# solved by matrix-free Newton-GMRES on the LS-20 Jacobian. With
 # config.include_tfa_model, the actual E/P TFA model (ER-4) is solved next to it as the baseline, by Newton-Krylov
 # with GMRES, once plain and once right-preconditioned by the FFT reference M0 = I - P0 H_μ,0 (3_tfa_baseline.md
-# Strategy 2). The two TFA solvers solve the same equation and must agree to solver tolerance. LS is a different
+# Strategy 2). The two TFA solvers solve the same equation and must agree to solver tolerance. CP is a different
 # model, so its difference from TFA is modelling error, printed as such; only under matched_stiffness_control are the
 # two models the same equation, and then they must agree too. Every solver is also checked against the fixed-point
 # result of the same model saved by MAIN_FP.py, when the problem matches. The problem and every solver setting are
@@ -23,11 +24,11 @@ from tfa_solvers import get_tfa_newton_solvers
 from verification import get_ls_jacobian_checks, get_tfa_jacobian_checks, run_verification
 
 run_name = "Newton"
-solver_roles = get_solver_roles(ls="LS Newton", tfa_baseline="TFA Newton", tfa_fft="TFA FFT Newton",
+solver_roles = get_solver_roles(cp="CP Newton", tfa_baseline="TFA Newton", tfa_fft="TFA FFT Newton",
                                 ls_fine="LS Newton, fine", ls_coarse="LS Newton, coarse")
 
 def get_solvers(problem):
-    solvers = {solver_roles.ls: get_ls_newton_solver(problem.P0_transformed, problem.reference_compliance,
+    solvers = {solver_roles.cp: get_ls_newton_solver(problem.P0_transformed, problem.reference_compliance,
                                                      problem.partition_materials)}
     if solver_roles.ls_fine is not None:
         # The same LS scheme on the fine and coarse lattices, with the same C0 (config.include_non_partitioned_ls).
@@ -56,7 +57,7 @@ def main():
     report_results(results, solver_roles, run_name)
     check_results(results, problem, solver_roles)
     # Every solver against the fixed-point result of the same model, saved by MAIN_FP.py.
-    check_against_saved_results(results, solver_roles.ls, "FP", "LS FP")
+    check_against_saved_results(results, solver_roles.cp, "FP", "CP FP")
     if config.include_tfa_model:
         for solver_name in (solver_roles.tfa_baseline, solver_roles.tfa_fft):
             check_against_saved_results(results, solver_name, "FP", "TFA Standard FP")

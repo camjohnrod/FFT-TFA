@@ -60,7 +60,7 @@ class Discretization(NamedTuple):
         return self.elements_per_partition_side**2 * self.element_number_along_z * self.element_volume
 
 def get_main_discretization():
-    # The one config.py describes: TFA and partitioned LS live on its partitions.
+    # The one config.py describes: TFA and CP live on its partitions.
     return Discretization(config.element_number_per_side, config.element_number_along_z,
                           config.partition_number_per_side)
 
@@ -113,7 +113,7 @@ def get_element_column_material_ids(discretization):
     return is_inside_inclusion(np.column_stack([x.ravel(), y.ravel()])).astype(int)
 
 def get_partition_material_ids(mesh):
-    # Each partition's material, read off its elements. TFA and partitioned LS give every partition one material law,
+    # Each partition's material, read off its elements. TFA and CP give every partition one material law,
     # so a partition holding both phases stops the run here, before any offline solve.
     partition_count = mesh.discretization.partition_count
     if mesh.element_material_ids.min() == mesh.element_material_ids.max():
@@ -126,7 +126,7 @@ def get_partition_material_ids(mesh):
     if mixed_partitions.any():
         raise ValueError(f"{np.count_nonzero(mixed_partitions)} of {partition_count} partitions contain both phases, "
                          "but every partition must be a single phase: it has one material law in TFA and in "
-                         "partitioned LS. Align the inclusion with the partition grid, or use one partition per "
+                         "CP. Align the inclusion with the partition grid, or use one partition per "
                          "element (partition_number_per_side = element_number_per_side).")
     return (inclusion_elements > 0).astype(int)
 
@@ -423,7 +423,7 @@ def get_cache_path(kind, parameters):
 def get_cached(names, parameters, compute):
     # The named arrays, as a dict by name, each from its own cache file for these parameters when they all exist,
     # otherwise computed together by compute() and each saved to its own file. One file per array lets a run load only
-    # the arrays it needs (E without P for LS alone).
+    # the arrays it needs (E without P for CP alone).
     cache_paths = {name: get_cache_path(name, parameters) for name in names}
     if all(cache_path.exists() for cache_path in cache_paths.values()):
         arrays = {}
@@ -440,7 +440,7 @@ def get_cached(names, parameters, compute):
     return arrays
 
 def get_E_and_P(mesh, L_matrix, L_inclusion, include_P):
-    # E always: LS needs it for the homogenized C0 and the verification for the homogenized stiffness. The dense P,
+    # E always: CP needs it for the homogenized C0 and the verification for the homogenized stiffness. The dense P,
     # (6 × partitions)² doubles, only when include_P, since only TFA uses it; P is None otherwise.
     discretization = mesh.discretization
     E_P_parameters = {"cache_version": cache_version,
@@ -515,7 +515,7 @@ def get_lattice(discretization, L_matrix, L_inclusion, reference_L):
     return Lattice(partition_materials, get_reference_kernel(mesh, reference_L))
 
 class Problem(NamedTuple):
-    # The main lattice (TFA and partitioned LS): its partitions' materials, its mesh, on which E, P and P0 are built,
+    # The main lattice (TFA and CP): its partitions' materials, its mesh, on which E, P and P0 are built,
     # and those operators.
     partition_materials: PartitionMaterials
     mesh: Mesh
@@ -541,7 +541,7 @@ def get_problem():
     if config.matched_stiffness_control:
         L_inclusion = L_matrix
         print("matched-stiffness control: the inclusion elastic stiffness is overridden to the matrix value, which "
-              "makes the TFA and LS models the same equation. Yield properties still differ.")
+              "makes the TFA and CP models the same equation. Yield properties still differ.")
     partition_materials = get_partition_materials(L_matrix, L_inclusion, partition_material_ids)
     E, P = get_E_and_P(mesh, L_matrix, L_inclusion, include_P=config.include_tfa_model)
     reference_L = get_reference_L(E, partition_materials.L, L_matrix)

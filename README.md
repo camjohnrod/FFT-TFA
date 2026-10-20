@@ -5,16 +5,16 @@ softer J2-plastic matrix, in a periodic cell. The cell is meshed with 8-node hex
 *partitions*, columns of elements through the thickness; each partition carries one uniform strain and plastic
 state. Two reduced models are compared:
 
-- **LS**, the model under development: a partition-averaged Lippmann–Schwinger equation in which partitions interact
+- **CP** (constant polarization), the model under development: the partition-averaged Lippmann–Schwinger equation (the LS scheme of the notes) in which partitions interact
   only through a homogeneous reference medium (stiffness C0), so the nonlocal operator is one FFT convolution with a
   kernel P0 (`notes/2_ls_model.md`).
 - **TFA**, the baseline: Transformation Field Analysis, whose interaction operator P is computed exactly from the
   real composite but is dense, so its cost grows with the square of the number of partitions (`notes/3_tfa_baseline.md`).
 
 **Research question.** On identical uniform partitions, how does the interaction operator decide accuracy and cost?
-TFA uses the real composite's operator: exact in elasticity, but dense. LS replaces it with a reference-medium
+TFA uses the real composite's operator: exact in elasticity, but dense. CP replaces it with a reference-medium
 operator applied by FFT: the FE kernel or a Moulinec–Suquet kernel (`reference_kernel`). The aim is to measure
-each against a full-field reference, and to find the exact relation between the TFA and LS operators.
+each against a full-field reference, and to find the exact relation between the TFA and CP operators.
 `notes/1_research_context.md` places this in the literature.
 
 ## Quick start
@@ -37,8 +37,8 @@ each of its solvers, several times over for fair timings:
 
 | Entry point | Solvers |
 |---|---|
-| `MAIN_FP.py` | LS fixed point; with `include_tfa_model`, TFA fixed point plain and FFT-preconditioned |
-| `MAIN_Newton.py` | LS Newton; with `include_non_partitioned_ls`, LS on the element lattice ("fine") and on a coarse mesh with one element per partition ("coarse"); with `include_tfa_model`, TFA Newton plain and FFT-preconditioned |
+| `MAIN_FP.py` | CP fixed point; with `include_tfa_model`, TFA fixed point plain and FFT-preconditioned |
+| `MAIN_Newton.py` | CP Newton; with `include_non_partitioned_ls`, LS on the element lattice ("fine") and on a coarse mesh with one element per partition ("coarse"); with `include_tfa_model`, TFA Newton plain and FFT-preconditioned |
 
 Outputs, in `code/output/` (prefix `FP_` or `Newton_`): `stress_strain.png` (every macroscopic stress component
 against the applied strain, one curve per solver), `solver_performance.png` (iterations and time per iteration per
@@ -51,11 +51,11 @@ gitignored: rerun to regenerate it.
 - **Geometry** (`inclusion_shape`, `element_number_per_side`, `partition_number_per_side`): the geometry is resolved
   on the elements, and every partition must be a single phase, or the run stops before any solve. A square or a
   laminate must have its edges on partition edges; a circle needs one partition per element.
-- **Reference stiffness** (`reference_stiffness`): C0 is part of the LS model, so it changes LS's answer; for TFA it
+- **Reference stiffness** (`reference_stiffness`): C0 is part of the CP model, so it changes CP's answer; for TFA it
   only affects the FFT preconditioner's speed.
 - **Reference kernel** (`reference_kernel`): `"moulinec_suquet"` (default) or `"fe"`, for every LS lattice.
 - **Load path** (`max_macro_strain`, `strain_increment_count`, `load_path_shape`).
-- **Checks with a known answer**: `matched_stiffness_control = True` (with `reference_kernel = "fe"`) makes LS and TFA
+- **Checks with a known answer**: `matched_stiffness_control = True` (with `reference_kernel = "fe"`) makes CP and TFA
   the same equation, so they must agree; `inclusion_shape = "laminate"` has an exact solution (`code/laminate.py`)
   that every solver must match.
 

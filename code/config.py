@@ -22,8 +22,8 @@ element_number_per_side     = 64
 element_number_along_z      = 1
 partition_number_per_side   = 32
 
-# Materials. matched_stiffness_control = True gives the inclusion the matrix's elastic stiffness; the TFA and LS models
-# are then the same equation, which is the regression gate for the LS solvers.
+# Materials. matched_stiffness_control = True gives the inclusion the matrix's elastic stiffness; the TFA and CP models
+# are then the same equation, which is the regression gate for the CP solvers.
 elastic_modulus_inclusion   = 10e9
 elastic_modulus_matrix      = 100e6
 poisson_ratio_inclusion     = 0.3
@@ -34,17 +34,17 @@ inclusion_hardening_modulus = 0.0
 matrix_hardening_modulus    = 10e6
 matched_stiffness_control   = False
 
-# Models. The LS model is always solved. include_tfa_model also solves the actual E/P TFA model by the same strategy,
-# as the baseline LS is compared against; matched_stiffness_control, the regression gate between the two, needs it.
+# Models. The CP model is always solved. include_tfa_model also solves the actual E/P TFA model by the same strategy,
+# as the baseline CP is compared against; matched_stiffness_control, the regression gate between the two, needs it.
 # include_non_partitioned_ls adds the same LS scheme on two other lattices, in MAIN_Newton.py only (MAIN_FP.py ignores
 # it, since the LS fixed point at fine resolution takes too long):
 #   "LS Newton, fine"    one partition per element column: the finest lattice the mesh allows
-#   "LS Newton, coarse"  one element per partition: as cheap as partitioned LS, but without the fine mesh's information
+#   "LS Newton, coarse"  one element per partition: as cheap as CP, but without the fine mesh's information
 include_tfa_model           = True
 include_non_partitioned_ls  = True
 
-# Reference medium: the homogeneous stiffness C0 from which the P0 kernel is built. It is part of the LS model, so it
-# changes the LS answer; for TFA it only preconditions the FFT solvers, changing their convergence, not their answer.
+# Reference medium: the homogeneous stiffness C0 from which the P0 kernel is built. It is part of the CP model, so it
+# changes the CP answer; for TFA it only preconditions the FFT solvers, changing their convergence, not their answer.
 #   "homogenized"  the homogenized stiffness of the actual composite, <L E> over the partitions
 #   "voigt"        the Voigt average <L> over the partitions
 #   "matrix"       the matrix stiffness
@@ -52,14 +52,14 @@ reference_stiffness         = "matrix"
 
 # Reference kernel P0, the operator through which LS partitions interact, built with C0 on every LS lattice:
 #   "fe"               the FE mesh's reference response, averaged over partitions (LS-14). The only kernel under
-#                      which matched_stiffness_control makes LS and TFA the same equation, since TFA's P is built on
+#                      which matched_stiffness_control makes CP and TFA the same equation, since TFA's P is built on
 #                      that mesh.
 #   "moulinec_suquet"  the continuum Green operator at the element grid's frequencies (LS-21), averaged over
 #                      partitions as SCA averages its fine-grid operator over clusters. Fine and coarse LS, one element
 #                      per partition, are then the standard Moulinec–Suquet scheme at element and partition resolution.
 #                      On an even grid its highest frequency uses Moulinec–Suquet's convention: zero stress there.
 # For TFA, P0 only preconditions the FFT solvers. "homogenized" C0 is built from the FE operator E, so with
-# "moulinec_suquet" use "matrix" or "voigt" to keep LS free of FE.
+# "moulinec_suquet" use "matrix" or "voigt" to keep CP and LS free of FE.
 reference_kernel            = "moulinec_suquet"
 
 # Load path: max_macro_strain reached linearly over strain_increment_count steps. Alternatives:
@@ -81,12 +81,12 @@ independent_check_round_off = 1e-12
 
 # TFA solvers. The relaxation applies to the fixed points; the divergence limit to fixed point and Newton. A solver
 # diverges when its relative residual exceeds the limit times the larger of 1 and the step's first relative residual
-# (convergence.has_converged), here and for LS.
+# (convergence.has_converged), here and for CP.
 tfa_relaxation_factor       = 1.0
 tfa_max_iterations          = 1000
 tfa_divergence_limit        = 1.0
 
-# LS solvers. None picks the fixed point's relaxation from the stiffness-ratio bounds, times the safety factor.
+# CP and LS solvers. None picks the fixed point's relaxation from the stiffness-ratio bounds, times the safety factor.
 ls_relaxation_factor        = None
 ls_stability_safety         = 0.9
 ls_max_iterations           = 20000
@@ -103,14 +103,14 @@ verification_tolerance      = 1e-9
 jacobian_check_tolerance    = 1e-6
 verification_max_partitions = 256
 
-# Model checks after solving. LS against TFA under matched_stiffness_control, and every solver against the laminate's
+# Model checks after solving. CP against TFA under matched_stiffness_control, and every solver against the laminate's
 # exact solution, macroscopically and in every partition, each phase on its own stress scale. laminate_tolerance is
 # about 25 times the largest difference measured at convergence_tolerance = 1e-6: scale it with convergence_tolerance.
 matched_stiffness_tolerance = 1e-5
 laminate_tolerance          = 1e-5
 
 # Every solver runs this many full load paths, interleaved, and the reports take the fastest repeat per step.
-timing_repeat_count         = 3
+timing_repeat_count         = 1
 
 # Colour-scale limits (MPa) of the von Mises stress maps, so maps from different runs can share a scale. None takes
 # that limit from the plotted maps.
@@ -154,14 +154,14 @@ for phase, shear_modulus, yield_stress, hardening_modulus in (
 if load_path_shape not in ("monotonic", "cyclic"):
     raise ValueError(f"load_path_shape must be \"monotonic\" or \"cyclic\". Got {load_path_shape!r}.")
 if matched_stiffness_control and not include_tfa_model:
-    raise ValueError("matched_stiffness_control checks the LS model against TFA, so it needs include_tfa_model = True.")
+    raise ValueError("matched_stiffness_control checks the CP model against TFA, so it needs include_tfa_model = True.")
 if reference_stiffness not in ("homogenized", "voigt", "matrix"):
     raise ValueError("reference_stiffness must be \"homogenized\", \"voigt\" or \"matrix\". "
                      f"Got {reference_stiffness!r}.")
 if reference_kernel not in ("fe", "moulinec_suquet"):
     raise ValueError(f"reference_kernel must be \"fe\" or \"moulinec_suquet\". Got {reference_kernel!r}.")
 if matched_stiffness_control and reference_kernel != "fe":
-    raise ValueError("matched_stiffness_control makes LS and TFA the same equation only with the FE kernel, since "
+    raise ValueError("matched_stiffness_control makes CP and TFA the same equation only with the FE kernel, since "
                      "TFA's P is built on the same mesh: it needs reference_kernel = \"fe\".")
 if von_mises_min_MPa is not None and von_mises_max_MPa is not None and von_mises_min_MPa >= von_mises_max_MPa:
     raise ValueError("The von Mises colour-scale minimum must be below its maximum.")

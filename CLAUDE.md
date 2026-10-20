@@ -5,30 +5,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A research codebase for reduced-order homogenization of elastoplastic composites (stiff circular/square inclusions,
-or a laminate, in a softer J2-plastic matrix) on uniform partitions. Two reduced models, LS and TFA, differ only in
+or a laminate, in a softer J2-plastic matrix) on uniform partitions. Two reduced models, CP and TFA, differ only in
 the operator through which partitions interact; the research question is how that operator decides accuracy and
-cost (README, "Research question"; `notes/1_research_context.md`). LS is the model under development; TFA is the
+cost (README, "Research question"; `notes/1_research_context.md`). CP is the model under development; TFA is the
 baseline it is compared against. Each is solved by two strategies (fixed point, Newton), one entry point per strategy:
 
 | Entry point | Solvers | Outputs prefix |
 |---|---|---|
-| `code/MAIN_FP.py` | LS FP; with `include_tfa_model`: TFA Standard FP, TFA FFT FP | `FP_` |
-| `code/MAIN_Newton.py` | LS Newton; with `include_non_partitioned_ls`: LS Newton, fine and LS Newton, coarse; with `include_tfa_model`: TFA Newton, TFA FFT Newton | `Newton_` |
+| `code/MAIN_FP.py` | CP FP; with `include_tfa_model`: TFA Standard FP, TFA FFT FP | `FP_` |
+| `code/MAIN_Newton.py` | CP Newton; with `include_non_partitioned_ls`: LS Newton, fine and LS Newton, coarse; with `include_tfa_model`: TFA Newton, TFA FFT Newton | `Newton_` |
 
-- **LS** is the partition-averaged Lippmann-Schwinger model of `notes/2_ls_model.md`,
+- **CP** (constant polarization) is the partition-averaged Lippmann-Schwinger (LS) model of `notes/2_ls_model.md`
+  on the main partitions (the notes and the `ls_*` code name the model LS, as do the fine and coarse solvers),
   where the nonlocal operator is the P0 convolution alone. It is always solved.
 - **TFA** is the actual E/P model (`notes/3_tfa_baseline.md`, ER-4): residual `r = ε - Eε̄ - Pμ(ε)`. FP is Strategy 1
   (fixed point, optionally preconditioned by the FFT reference `M0 = I - P0 H_μ,0`); Newton is Strategy 2 (Newton
   with GMRES, optionally right-preconditioned by `M0⁻¹`). All four TFA solvers solve the same equation and must agree
   to `solver_agreement_tolerance`. `config.include_tfa_model` (default `True`) adds the two TFA solvers of the
   entry point's strategy as the baseline of its plots and checks.
-- LS and TFA are *different* models: their difference is modelling error, printed as such, not a solver bug. Only
-  under `matched_stiffness_control` are they the same equation; that is the LS regression gate, and it needs
+- CP and TFA are *different* models: their difference is modelling error, printed as such, not a solver bug. Only
+  under `matched_stiffness_control` are they the same equation; that is the CP regression gate, and it needs
   `include_tfa_model` and the FE kernel (`reference_kernel = "fe"`; the default is Moulinec–Suquet).
 - **Non-partitioned LS** (`config.include_non_partitioned_ls`, default `True`, `MAIN_Newton.py` only, since the LS
   fixed point at fine resolution takes too long): the same LS scheme on two more lattices, as comparisons. "LS
   Newton, fine" has one partition per element column, the finest lattice the mesh allows; "LS Newton, coarse" has
-  one element per partition, as cheap as partitioned LS but without the fine mesh's information. With the FE kernel
+  one element per partition, as cheap as CP but without the fine mesh's information. With the FE kernel
   neither is a reference solution (see "Status"), so the code measures no solver against them; a gold-standard
   reference is roadmap step 3.
 
@@ -54,7 +55,7 @@ Each smoke run works on a temporary copy of `code/` whose `config.py` is shrunk 
 value, so a local study configuration cannot change what they cover) and runs `MAIN_FP.py` then
 `MAIN_Newton.py`. `smoke_runs` lists the runs, each with a comment saying why it exists: monotonic; cyclic
 (`load_path_shape = "cyclic"`, the only test of unloading, reverse yielding and zero imposed strain, where a solver
-abandoning the load path also fails, since abandoning prints no FAIL); matched stiffness (the LS regression gate); LS
+abandoning the load path also fails, since abandoning prints no FAIL); matched stiffness (the CP regression gate); CP
 only; laminate (every solver against the exact solution); circle (one partition per element); the Moulinec–Suquet
 kernel on a laminate (exact) and on even grids (its highest-frequency convention); and mixed partitions, a negative
 test that must stop with the mixed-partition error (`SmokeRun.expected_error`). It never touches this
@@ -85,21 +86,21 @@ Keep every input a single-line `name = value` at column 0: the smoke runs set in
 "config.py has no line setting …" until `smoke_run_overrides`/`smoke_runs` are updated. A new input must be read
 somewhere as `config.<name>`, or the unused check fails.
 
-Runs are slow: `main()` does `timing_repeat_count` interleaved full load paths per solver. The LS fixed point needs
+Runs are slow: `main()` does `timing_repeat_count` interleaved full load paths per solver. The CP fixed point needs
 tens of thousands of iterations per path (~55,000, ~25 s per path, measured at a 25×25 grid), and `MAIN_Newton.py` with
 `include_non_partitioned_ls` also solves LS on the element lattice. With `include_tfa_model`, the offline step builds
-TFA's dense P, of (6 × partitions)² doubles: 0.3 GB at 32² partitions, 4.8 GB at 64²; an LS-only run builds only E
+TFA's dense P, of (6 × partitions)² doubles: 0.3 GB at 32² partitions, 4.8 GB at 64²; a CP-only run builds only E
 (6 load columns) and the P0 kernels. Estimate cost before running and background large configurations.
 
 **Checks every run makes, all printing PASS/FAIL and stopping the run on FAIL:**
 - The independent residual check: after every step, outside the timings, `run_strain_path` recomputes the model
-  residual from scratch at the returned strain (`get_ls_residual` for LS, `get_actual_residual` for TFA) and
+  residual from scratch at the returned strain (`get_ls_residual` for CP, `get_actual_residual` for TFA) and
   requires it converged. It catches solver bookkeeping bugs the solver's own residual cannot.
 - With non-partitioned LS and `partition_number_per_side = element_number_per_side`: the three LS lattices are one
-  lattice, so LS Newton, fine and LS Newton, coarse must agree with LS Newton (the "circle" smoke run).
+  lattice, so LS Newton, fine and LS Newton, coarse must agree with CP Newton (the "circle" smoke run).
 - With `include_tfa_model`: agreement between the two TFA solvers (`check_solver_agreement`), and, with
-  `matched_stiffness_control = True`, LS must reproduce TFA to `matched_stiffness_tolerance`
-  (`check_matched_stiffness`), the LS regression gate.
+  `matched_stiffness_control = True`, CP must reproduce TFA to `matched_stiffness_tolerance`
+  (`check_matched_stiffness`), the CP regression gate.
 - With `inclusion_shape = "laminate"`: every solver's macroscopic stress and the stress of every partition (each
   phase on its own stress scale, since the inclusion's is about a hundred times the matrix's) must match the exact
   laminate solution (`laminate.py`) to `laminate_tolerance` (`check_laminate_solution`), and verification
@@ -112,7 +113,7 @@ TFA's dense P, of (6 × partitions)² doubles: 0.3 GB at 32² partitions, 4.8 GB
 - With `verification_enabled`: structural checks on the main, fine and coarse kernels (zero at ξ = 0, D̂0 Hermitian,
   eigenvalues real and in [0, 1]); finite-difference Jacobian checks in `MAIN_Newton.py` (LS-20, and ER-18 with TFA);
   and, only when `partition_count <= verification_max_partitions` (default 256, so **skipped at the default 32×32
-  partitions**), the FFT convolution against the dense product, plus the LS elastic stiffness printed against the FE
+  partitions**), the FFT convolution against the dense product, plus the CP elastic stiffness printed against the FE
   one. FE kernel only: the partitioned P0 rebuilt from the fine one (`get_partition_averaged_P0_offset_blocks`, exact by
   linearity) and the dense check against a direct reference solve; the MS kernel is built by that same averaging, and
   refuses to build unless its half spectrum is the transform of a real kernel. Lower `partition_number_per_side` to get them, keeping the inclusion aligned (e.g. 16 partitions with 32
@@ -121,7 +122,7 @@ TFA's dense P, of (6 × partitions)² doubles: 0.3 GB at 32² partitions, 4.8 GB
 **Cache and output.** The offline step (factorizing the global stiffness to build `E`, `P`, `P0`) is cached in
 `code/cache/` (gitignored), shared by both entry points, one file per array and parameter set named by a hash of its
 parameters (`offline.get_cache_path`, `get_cached`). `E` and `P` share one factorization of the stiffness but are
-solved separately and cached in separate files, so E is bit-identical whether or not P is built, and an LS-only run
+solved separately and cached in separate files, so E is bit-identical whether or not P is built, and a CP-only run
 neither builds nor loads P. Each FE `P0` is cached under its discretization and the reference stiffness itself, so
 each lattice and each `reference_stiffness` choice gets its own file; the Moulinec–Suquet kernel takes milliseconds and
 is not cached. Bump `offline.cache_version` whenever a code change
@@ -137,7 +138,7 @@ once every check has passed, so a failed run leaves none), plus the shared `cros
 ## Architecture
 
 The entry points are thin: `main()` reads as an outline, and what both report and check after solving is one call
-each, `report.report_results` and `report.check_results`, driven by `SolverRoles` (each solver's role: LS, TFA
+each, `report.report_results` and `report.check_results`, driven by `SolverRoles` (each solver's role: CP, TFA
 baseline, TFA FFT, LS fine, LS coarse; `None` when not run). The pipeline lives in modules under `code/`, imported in
 one direction (each arrow points to the modules that may import what comes before it): `config` → `lattice_fft` →
 `offline`, `online_timing` → `material` → `convergence` → `load_path` → `tfa_solvers`, `ls_solvers`, `laminate`
@@ -176,23 +177,23 @@ Non-obvious points:
   copying the columns costs more than the full product.
 - **No global lattice size online:** solvers, the FFT and the load path take their sizes from the arrays they are
   given (`reshape(-1, 6)`, the kernel's shape, `len(partition_materials.L)`), never from `config.partition_count`.
-  A `Solver` carries everything it needs: TFA binds E and P, LS binds P0, and both carry their partitions' materials.
-  This is what lets solvers on different lattices (partitioned, fine, coarse LS) run side by side in one run.
+  A `Solver` carries everything it needs: TFA binds E and P, CP and LS bind P0, and both carry their partitions' materials.
+  This is what lets solvers on different lattices (CP, fine LS, coarse LS) run side by side in one run.
   `check_code.py` enforces it: no module in `online_modules` may read `config.partition_*`, `config.element_*` or
   `config.dof_count`.
 - **Discretizations:** everything offline is built for an `offline.Discretization` (elements per side, elements
   along z, partitions per side, and the sizes derived from them), carried by its `Mesh` along with the element B
   matrix, so offline functions take just the mesh. There are three, one function each: the main one from `config`
-  (TFA and partitioned LS), the fine one (the main mesh, one partition per element column: fine LS) and the
+  (TFA and CP), the fine one (the main mesh, one partition per element column: fine LS) and the
   coarse one (one element per main partition). All three P0 kernels share the one C0 and the one `reference_kernel`;
   the Moulinec–Suquet one is built on each discretization's element grid and averaged over its partitions, so fine
-  and coarse LS (one element per partition) get the standard scheme and partitioned LS the SCA-style average.
+  and coarse LS (one element per partition) get the standard scheme and CP the SCA-style average.
 - **Half spectrum:** the kernel and every lattice field are real, so `P0_transformed` and `M0⁻¹` hold only the
   non-redundant half of the frequencies (`rfftn`, shape `(N, N//2 + 1, 6, 6)`), transformed back with
   `irfftn(..., s=(N, N))`. Anything new that reads `P0_transformed` must use this convention.
 - **Geometry and partitions:** the geometry is resolved on the elements (each element column's centre is tested,
   `offline.get_element_column_material_ids`), and each partition's material is read off its elements. TFA and
-  partitioned LS give each partition one material law, so `get_partition_material_ids` stops the run, before any
+  CP give each partition one material law, so `get_partition_material_ids` stops the run, before any
   offline solve, if a partition holds both phases. A circle therefore runs only with one partition per element
   (`partition_number_per_side = element_number_per_side`); a square or laminate runs whenever its edges fall on
   partition edges. The FFT needs a congruent, translated partition lattice, so there is one z-layer of partitions
@@ -215,14 +216,14 @@ Non-obvious points:
   when its relative residual exceeds the divergence limit times max(1, the step's first relative residual), not the
   limit alone: at a zero crossing of the cyclic path the first residual legitimately exceeds the imposed strain.
   `config.py` rejects a hardening modulus at or below −3G for any phase that can yield (no admissible return map).
-- **Known differences between solvers, by design:** LS starts each step from its previous strain plus the uniform
-  increment, while TFA starts from the exact elastic predictor, so LS spends iterations on elastic steps. TFA and LS
+- **Known differences between solvers, by design:** CP starts each step from its previous strain plus the uniform
+  increment, while TFA starts from the exact elastic predictor, so CP spends iterations on elastic steps. TFA and CP
   fixed points have different divergence limits and iteration caps (`tfa_divergence_limit`, `tfa_max_iterations`
   against `ls_divergence_limit`, `ls_max_iterations`). Compare solvers by time: a column-restricted P product
   and a P0 convolution cost very different amounts, so work counts are not comparable across models.
 - **Naming.** "Reference" always means the homogeneous reference medium C0 and what is built from it: P0
   (`get_reference_kernel`, `get_P0_induced_strain`), C0⁻¹ (`reference_compliance`), and the FFT preconditioner of
-  TFA (`FFTReference`, `M0`, `H_μ,0`), as in both notes. The LS model's functions are `ls_*`, mapped to the LS note:
+  TFA (`FFTReference`, `M0`, `H_μ,0`), as in both notes. The CP and LS models' functions are `ls_*`, mapped to the LS note:
 
   | Code | LS note |
   |---|---|
@@ -232,14 +233,14 @@ Non-obvious points:
   | `get_ls_jacobian_blocks`, `get_ls_newton_correction`, `ls_newton_iteration` | LS-20 and the load step of section 7.3 |
 
   In `report.py` and the entry points, the solver a check compares against is the "baseline" (`tfa_baseline` in
-  `SolverRoles`): the plain TFA solver of the same strategy, or none in an LS-only run. Figures draw and name every
+  `SolverRoles`): the plain TFA solver of the same strategy, or none in a CP-only run. Figures draw and name every
   solver by its role, so the same role looks the same in every figure and in both entry points.
 - **One reference stiffness C0 for both models.** `config.reference_stiffness` (`"homogenized"` ⟨L E⟩, `"voigt"`
   ⟨L⟩, or `"matrix"`) sets `Problem.reference_L`, from which the single `P0` is built (`offline.get_reference_L`).
-  C0 is part of the LS model, so it changes the LS answer; for TFA it only preconditions the FFT solvers, so the
+  C0 is part of the CP model, so it changes the CP answer; for TFA it only preconditions the FFT solvers, so the
   plain TFA solvers are bit-identical under every choice and the FFT ones agree to solver tolerance. P0 is
   unchanged by scaling C0, so with equal phase Poisson ratios `"voigt"` and `"matrix"` give the same P0 and differ
-  only through C0⁻¹ in the LS equivalent eigenstrain.
+  only through C0⁻¹ in the CP equivalent eigenstrain.
 
 ## Notes directory
 
@@ -275,9 +276,9 @@ Roadmap, in order:
 1. Thickness check: done (2026-10-12). `element_number_along_z = 1` reproduces `= 3` to round-off.
 2. Moulinec–Suquet kernel: done (2026-10-12), `reference_kernel = "moulinec_suquet"` (LS-21, `notes/2_ls_model.md`
    section 6.5); the default since 2026-10-13, with FE kept as an option and the only kernel for the matched-stiffness
-   gate. Under MS, TFA keeps its FE operators, so an LS-vs-TFA difference includes the
+   gate. Under MS, TFA keeps its FE operators, so a CP-vs-TFA difference includes the
    FE-vs-MS discretization gap; it is not reported separately (fine LS against TFA on elastic steps, where TFA is the
-   exact FE answer, measures it). Never call partitioned LS "SCA", which also clusters by k-means and updates C0.
+   exact FE answer, measures it). Never call CP "SCA", which also clusters by k-means and updates C0.
 3. Gold-standard reference: a separate FE-consistent FFT solver (Ladecký et al., `references/`; displacement
    unknowns, plasticity at the Gauss points). For its error split, a derivation already checked: with every partition
    a k × k block of equal-volume reference cells and Π the block average, ‖f − g‖² = ‖f − Πg‖² + ‖g − Πg‖² at every
