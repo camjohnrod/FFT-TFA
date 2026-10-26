@@ -44,7 +44,8 @@ meant to leave results alone (a refactor), run `check.py save` before and `check
 problem and solver input in `pinned_inputs` and sets them on the `config` module in memory (then calls
 `config.check_inputs()`), with a temporary cache folder, so it never touches the user's config, cache or outputs.
 This only works because no module reads `config` at import time: keep it that way (no `config.x` in default
-arguments or module-level constants). A renamed config input must be renamed in `pinned_inputs` too.
+arguments or module-level constants). A renamed config input must be renamed in `pinned_inputs` too. The reference
+is bit-for-bit only at the `thread_count` it was saved with, since threaded BLAS may sum in a different order.
 
 Dependencies (`numpy`, `scipy`, `matplotlib`, `tqdm`) are in the repository's untracked `.venv/` (Python 3.12), which
 is what `python` resolves to here. The `fenics-env`/`fenicsx-env` envs are unrelated.
@@ -56,9 +57,15 @@ colours) in `plots.py`, and check.py's own problem definitions. "Default" means 
 (`git show HEAD:code/config.py`); check `git diff` before committing, since config.py is often left at a local study
 configuration. A run exercises plasticity only if a phase's yield stress is finite.
 
+**Threads:** `config.thread_count` (default 1) caps every method alike: config.py sets the BLAS/OpenMP environment
+variables before it imports numpy, and the online FFTs use `scipy.fft` with `workers=config.thread_count` (numpy's
+FFT cannot thread). So `run.py` and `check.py` import `config` before numpy; keep any new entry point that way.
+Offline kernel construction still uses `np.fft` (milliseconds, once).
+
 Cost: with TFA, the offline step builds the dense P of (6 × partitions)² doubles (0.3 GB at 32² partitions, 4.8 GB
 at 64²), cached in `code/cache/` under a hash of its parameters (`fe.get_cache_path`); bump `fe.cache_version` when a
-code change alters E or P. The default problem runs in about 30 s once cached. Estimate cost before running large
+code change alters E or P. Each cache file also stores `build_seconds`, the time it took to compute, so a cached run
+still reports TFA's true offline cost; a file without it is recomputed. Estimate cost before running large
 configurations and run them in the background.
 
 ## Architecture
@@ -95,7 +102,10 @@ Non-obvious points:
 - **E is built only when needed:** by TFA, or by `reference_stiffness = "homogenized"`. A CP/Spectral LS run with
   `"matrix"` or `"voigt"` C0 does no FE solve at all. C0 changes the LS answer; TFA doesn't use it.
 - **Iterations:** "Newton its" are Newton corrections (residual evaluations − 1), "GMRES its" the inner GMRES
-  iterations summed over them (scipy callback, `callback_type='pr_norm'`). Times are `solve_step` wall time only.
+  iterations summed over them (scipy callback, `callback_type='pr_norm'`). "Online" is `solve_step` wall time only;
+  "Offline" (`Problem.offline_seconds`) is what each method's operators cost to build as if it ran alone: the
+  partition mesh and materials for all three, plus C0 and P0 for CP and Spectral LS (C0 includes E's build time
+  under `"homogenized"`), plus E and P for TFA at the time they took to compute.
 - **Failed load steps:** an unsolvable step raises a `LoadPathAbandoned` subclass (`SolverDidNotConverge`, or
   `MaterialFullySoftened` when a flow stress reaches zero); `run_load_path` stops that method there and the others
   carry on; a failure on the first step re-raises. Divergence means exceeding the limit times

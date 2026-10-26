@@ -1,6 +1,6 @@
 # Solves the problem in config.py with every method switched on there, step by step along the load path, then prints
 # a timing table and saves it with the figures in code/output/:
-#   timing.txt              each method's time, Newton iterations and GMRES iterations over the whole load path
+#   timing.txt              each method's offline and online time, Newton and GMRES iterations, over the load path
 #   stress_strain.png       macroscopic stress against applied strain, every method
 #   cross_section.png       the inclusion on the element and partition grids
 #   von_mises_stress.png    von Mises stress at the last load step, one map per method
@@ -10,10 +10,11 @@
 import sys
 import time
 from typing import NamedTuple
+
+import config  # first: it sets the thread count before numpy loads
 import numpy as np
 import tqdm
 
-import config
 import plots
 from fe import get_problem
 from ls_model import get_ls_solver
@@ -110,12 +111,14 @@ def solve_all(problem):
 
 ## ------- Output ------- ##
 
-def get_timing_table(results, step_count):
-    # Totals over the load steps each method completed, and why a method stopped early.
-    rows = [("Method", "Time (s)", "Newton its", "GMRES its", "Steps")]
+def get_timing_table(results, offline_seconds, step_count):
+    # Offline: building the method's operators (fe.get_problem). Online: solving the load steps it completed, with its
+    # Newton and GMRES iterations over them. Then why a method stopped early.
+    rows = [("Method", "Offline (s)", "Online (s)", "Newton its", "GMRES its", "Steps")]
     for method, result in results.items():
-        rows.append((method, f"{result.solve_time_per_step.sum():.2f}", f"{result.newton_iterations_per_step.sum()}",
-                     f"{result.gmres_iterations_per_step.sum()}", f"{result.completed_step_count}/{step_count}"))
+        rows.append((method, f"{offline_seconds[method]:.2f}", f"{result.solve_time_per_step.sum():.2f}",
+                     f"{result.newton_iterations_per_step.sum()}", f"{result.gmres_iterations_per_step.sum()}",
+                     f"{result.completed_step_count}/{step_count}"))
     widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
     lines = ["   ".join(cell.ljust(width) if column == 0 else cell.rjust(width)
                         for column, (cell, width) in enumerate(zip(row, widths))) for row in rows]
@@ -149,7 +152,7 @@ def main():
     applied_macro_strain = get_applied_macro_strain()
     results = solve_all(problem)
 
-    table = get_timing_table(results, len(applied_macro_strain))
+    table = get_timing_table(results, problem.offline_seconds, len(applied_macro_strain))
     print(f"\n{table}\n")
     config.output_folder.mkdir(exist_ok=True)
     (config.output_folder / "timing.txt").write_text(table + "\n")

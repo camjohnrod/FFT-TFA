@@ -32,8 +32,12 @@ Dependencies: `numpy`, `scipy`, `matplotlib`, `tqdm` (installed in the untracked
 ## Changing the problem
 
 **Every setting is in `code/config.py`**, grouped and commented: geometry and mesh, materials, load path, which
-methods to run, the reference stiffness C0, the Newton–GMRES settings, the offline batch size, the figures' colour
-scale and the check tolerances. There are no command-line options and no settings anywhere else.
+methods to run, the reference stiffness C0, the Newton–GMRES settings, the number of CPU threads, the offline batch
+size, the figures' colour scale and the check tolerances. There are no command-line options and no settings anywhere
+else.
+
+`thread_count` (default 1) caps every method alike, TFA's dense products and the FFTs of CP and Spectral LS, so that
+no method gets more cores than another.
 
 One rule to know: every partition must be a single phase. A square or laminate needs its edges on partition edges; a
 circle needs one partition per element (`partition_number_per_side = element_number_per_side`). The run stops with an
@@ -45,17 +49,21 @@ explanation otherwise.
 
 | File | Contents |
 |---|---|
-| `timing.txt` | each method's total solve time, Newton iterations, GMRES iterations and load steps completed |
+| `timing.txt` | each method's offline time (building its operators) and online time (solving the load path), Newton iterations, GMRES iterations and load steps completed |
 | `stress_strain.png` | macroscopic stress against applied strain, every method |
 | `cross_section.png` | the inclusion on the element and partition grids |
 | `von_mises_stress.png` | von Mises stress at the last load step, one map per method on its own lattice |
 
 ```
-Method        Time (s)   Newton its   GMRES its   Steps
-CP                5.10          180        9307   60/60
-Spectral LS      15.06          180       11039   60/60
-TFA               7.92          107         683   60/60
+Method        Offline (s)   Online (s)   Newton its   GMRES its   Steps
+CP                   0.02         4.85          180        9307   60/60
+Spectral LS          0.04        14.23          180       11039   60/60
+TFA                  9.22         8.21          107         683   60/60
 ```
+
+Offline is the time to build each method's operators: for TFA, the FE influence functions E and P, reported at the
+time they took to compute even when they now come from the cache. Online is the time to solve the load path. On a
+shared or busy machine, single runs vary by up to about 20 %.
 
 A method that cannot solve a load step stops there, and the table says why; the others carry on.
 

@@ -11,7 +11,8 @@
 #   square    a square inclusion under tension and shear, the kind of problem config.py sets up by default.
 # On both, every method must complete every load step and, once a reference is saved, reproduce it bit for bit. So a
 # change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
-# results, then save a new reference. The reference is code/cache/check_reference.npz.
+# results, then save a new reference. The reference is code/cache/check_reference.npz, and holds bit for bit only at
+# the config.thread_count it was saved with.
 #
 # The problems are set below, not read from config.py, so that the checks mean the same thing whatever config.py holds;
 # only the check settings (laminate_*) come from config.py. config.py, the cache and code/output are not touched.
@@ -21,9 +22,10 @@ import io
 import sys
 import tempfile
 import pathlib
+
+import config  # first: it sets the thread count before numpy loads
 import numpy as np
 
-import config
 import run
 from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_unloaded_plastic_state
 

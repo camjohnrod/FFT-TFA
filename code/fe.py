@@ -2,7 +2,7 @@
 # functions E and P of the composite (TFA), the Moulinec–Suquet kernel P0 of the homogeneous reference (CP and
 # Spectral LS), and the cache of E and P. Everything is built for a Discretization (a mesh and its partition lattice),
 # so the same code serves the partitions of CP and TFA and the element lattice of Spectral LS. get_problem() at the
-# end builds everything a run needs.
+# end builds everything a run needs and times what each method's offline step costs.
 
 import hashlib
 import sys
@@ -310,13 +310,17 @@ def get_influence_function_solver(mesh, K):
     return solve
 
 def get_influence_functions(mesh, L_per_element, include_P):
-    # E, and P when include_P (None otherwise), from one factorization of K. E's six load columns are solved on their
-    # own, so E is the same to the last bit whether or not P is built.
+    # E, and P when include_P (None otherwise), from one factorization of K, each with the seconds it took: E's
+    # include assembling and factorizing K, P's only its own solves. E's six load columns are solved on their own, so
+    # E is the same to the last bit whether or not P is built.
+    start_time = time.perf_counter()
     solve = get_influence_function_solver(mesh, get_K(mesh, L_per_element))
     # ER-1: E is the applied macrostrain plus the fluctuation it causes; P is A_ε K⁻¹ F_μ (ER-24).
     E = np.tile(np.eye(6), (mesh.discretization.partition_count, 1)) + solve(get_F_macrostrain(mesh, L_per_element))
+    E_seconds = time.perf_counter() - start_time
     P = solve(get_F_eigenstrain(mesh, L_per_element)) if include_P else None
-    return E, P
+    P_seconds = time.perf_counter() - start_time - E_seconds
+    return E, P, E_seconds, P_seconds
 
 ## ------- Reference Stiffness C0 and Kernel P0 (CP and Spectral LS) ------- ##
 
@@ -413,27 +417,35 @@ def get_cache_path(kind, parameters):
         digest.update(value.tobytes())
     return config.cache_folder / f"{kind}_{digest.hexdigest()[:12]}.npz"
 
+def is_cached(cache_path):
+    # A cache file counts only if it records how long its array took to build, which the offline times report.
+    if not cache_path.exists():
+        return False
+    with np.load(cache_path) as cached:
+        return "build_seconds" in cached.files
+
 def get_cached(names, parameters, compute):
-    # The named arrays, as a dict by name, each from its own cache file for these parameters when they all exist,
-    # otherwise computed together by compute() and each saved to its own file. One file per array lets a run load only
-    # the arrays it needs (E without P when TFA is off).
+    # The named arrays and the seconds each took to build, as two dicts by name, each from its own cache file for these
+    # parameters when they all exist, otherwise computed together by compute(), which returns both dicts, and each
+    # saved to its own file. One file per array lets a run load only the arrays it needs (E without P when TFA is off).
     cache_paths = {name: get_cache_path(name, parameters) for name in names}
-    if all(cache_path.exists() for cache_path in cache_paths.values()):
-        arrays = {}
+    if all(is_cached(cache_path) for cache_path in cache_paths.values()):
+        arrays, build_seconds = {}, {}
         for name, cache_path in cache_paths.items():
             print(f"{cache_path.name}: loaded from cache.")
             with np.load(cache_path) as cached:
-                arrays[name] = cached[name]
-        return arrays
+                arrays[name], build_seconds[name] = cached[name], float(cached["build_seconds"])
+        return arrays, build_seconds
     print(f"{', '.join(cache_path.name for cache_path in cache_paths.values())}: no cache found, computing.")
-    arrays = compute()
+    arrays, build_seconds = compute()
     config.cache_folder.mkdir(exist_ok=True)
     for name, cache_path in cache_paths.items():
-        np.savez(cache_path, **{name: arrays[name]})
-    return arrays
+        np.savez(cache_path, **{name: arrays[name], "build_seconds": build_seconds[name]})
+    return arrays, build_seconds
 
 def get_E_and_P(mesh, L_matrix, L_inclusion, include_P):
-    # E, and the dense P, (6 × partitions)² doubles, only when include_P; P is None otherwise.
+    # E, and the dense P, (6 × partitions)² doubles, only when include_P (P is None otherwise), and the seconds they
+    # took to build, by name ("E", "P"), measured when they were computed, even if they now come from the cache.
     discretization = mesh.discretization
     E_P_parameters = {"cache_version": cache_version,
                       "domain_side_length": config.domain_side_length,
@@ -449,16 +461,16 @@ def get_E_and_P(mesh, L_matrix, L_inclusion, include_P):
         E_P_parameters["inclusion_radius"] = config.inclusion_radius
 
     def compute():
-        E, P = get_influence_functions(mesh, get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids),
-                                       include_P)
-        return {"E": E, "P": P}
+        E, P, E_seconds, P_seconds = get_influence_functions(
+            mesh, get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids), include_P)
+        return {"E": E, "P": P}, {"E": E_seconds, "P": P_seconds}
 
-    E_P = get_cached(("E", "P") if include_P else ("E",), E_P_parameters, compute)
+    E_P, build_seconds = get_cached(("E", "P") if include_P else ("E",), E_P_parameters, compute)
     if not include_P:
-        return E_P["E"], None
+        return E_P["E"], None, build_seconds
     # Column-major, so the columns of a run of consecutive partitions are contiguous and P products can read just the
     # yielding partitions' columns without copying them (tfa_model.apply_P_to_partitions).
-    return E_P["E"], np.asfortranarray(E_P["P"])
+    return E_P["E"], np.asfortranarray(E_P["P"]), build_seconds
 
 ## ------- Problem ------- ##
 
@@ -476,25 +488,42 @@ class Problem(NamedTuple):
     reference_compliance: np.ndarray
     # The element lattice of Spectral LS, None without config.include_spectral_ls.
     spectral_lattice: Lattice
+    # The seconds each method's offline step costs, by method name: everything it needs built, as if it ran alone.
+    offline_seconds: dict
 
 def get_problem():
     # Built from config, with E and P taken from the cache when it matches. E is needed by TFA and by the
-    # "homogenized" reference stiffness, P by TFA only.
+    # "homogenized" reference stiffness, P by TFA only. The offline times count E and P at the time they took to
+    # compute, even when they come from the cache, and everything else as built now.
+    start_time = time.perf_counter()
     mesh = get_periodic_mesh(get_partition_discretization())
     L_matrix = get_L(config.elastic_modulus_matrix, config.poisson_ratio_matrix)
     L_inclusion = get_L(config.elastic_modulus_inclusion, config.poisson_ratio_inclusion)
     partition_materials = get_partition_materials(L_matrix, L_inclusion, get_partition_material_ids(mesh))
-    E, P = None, None
+    partition_seconds = time.perf_counter() - start_time
+
+    E, P, build_seconds = None, None, {}
     if config.include_tfa_model or config.reference_stiffness == "homogenized":
-        E, P = get_E_and_P(mesh, L_matrix, L_inclusion, include_P=config.include_tfa_model)
+        E, P, build_seconds = get_E_and_P(mesh, L_matrix, L_inclusion, include_P=config.include_tfa_model)
+    start_time = time.perf_counter()
     reference_L = get_reference_L(E, partition_materials.L, L_matrix)
+    reference_seconds = time.perf_counter() - start_time
+    if config.reference_stiffness == "homogenized":
+        reference_seconds += build_seconds["E"]
     print(f"reference stiffness C0: {config.reference_stiffness}, C0_1111 = {reference_L[0, 0] / 1e6:.2f} MPa")
+    start_time = time.perf_counter()
     partitions = Lattice(partition_materials, get_reference_kernel(mesh.discretization, reference_L))
+    offline_seconds = {"CP": partition_seconds + reference_seconds + time.perf_counter() - start_time}
 
     spectral_lattice = None
     if config.include_spectral_ls:
+        start_time = time.perf_counter()
         spectral_discretization = get_spectral_discretization()
         spectral_materials = get_partition_materials(
             L_matrix, L_inclusion, get_partition_material_ids(get_periodic_mesh(spectral_discretization)))
         spectral_lattice = Lattice(spectral_materials, get_reference_kernel(spectral_discretization, reference_L))
-    return Problem(partitions, E, P, np.linalg.inv(reference_L), spectral_lattice)
+        # C0 is read off the partitions (Voigt and homogenized), so Spectral LS needs them built too.
+        offline_seconds["Spectral LS"] = partition_seconds + reference_seconds + time.perf_counter() - start_time
+    if config.include_tfa_model:
+        offline_seconds["TFA"] = partition_seconds + build_seconds["E"] + build_seconds["P"]
+    return Problem(partitions, E, P, np.linalg.inv(reference_L), spectral_lattice, offline_seconds)

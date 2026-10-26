@@ -6,6 +6,7 @@
 
 import functools
 import numpy as np
+import scipy.fft
 
 import config
 from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain
@@ -15,11 +16,14 @@ def apply_on_partition_lattice(fourier_blocks, partition_field):
     # Applies a translation-invariant operator, given by its 6 × 6 block at every lattice frequency, to a
     # partition-stacked field: transform the field, multiply frequency by frequency, transform back (ER-14a).
     # The field and the operator are real, so only the non-redundant half of the frequencies is used. The lattice is
-    # the operator's: its first axis runs over every frequency along one side.
+    # the operator's: its first axis runs over every frequency along one side. The FFTs use config.thread_count
+    # threads, like TFA's dense products.
     lattice_shape = (fourier_blocks.shape[0],) * 2
-    field_transformed = np.fft.rfftn(partition_field.reshape(*lattice_shape, 6), axes=(0, 1))
+    field_transformed = scipy.fft.rfftn(partition_field.reshape(*lattice_shape, 6), axes=(0, 1),
+                                        workers=config.thread_count)
     result_transformed = np.einsum('...ij,...j->...i', fourier_blocks, field_transformed)
-    return np.fft.irfftn(result_transformed, s=lattice_shape, axes=(0, 1)).reshape(-1, 6)
+    return scipy.fft.irfftn(result_transformed, s=lattice_shape, axes=(0, 1),
+                            workers=config.thread_count).reshape(-1, 6)
 
 def get_P0_induced_strain(P0_transformed, partition_field):
     # P0 applied as a convolution over the partition lattice (LS-17).

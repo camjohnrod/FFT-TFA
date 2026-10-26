@@ -3,10 +3,22 @@
 #
 #   python code/run.py      solve the problem below with every method switched on, print a timing table, and save it
 #                           with the figures in code/output/
-#   python code/check.py    check the code on small problems with known answers (about a minute)
+#   python code/check.py    check the code on small problems with known answers (a few seconds)
 
+import os
 import pathlib
-import numpy as np
+
+## ------- Threads ------- ##
+
+# The number of CPU threads every method may use, for its dense products (BLAS: TFA's P) and its FFTs (CP and Spectral
+# LS) alike, so no method gets more cores than another. It is set here, before numpy loads, which is why run.py and
+# check.py import config first; a session that imports numpy before config keeps numpy's default.
+thread_count                = 1
+
+for thread_variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ[thread_variable] = str(thread_count)
+
+import numpy as np  # noqa: E402, after the thread count is set
 
 ## ------- Geometry and Mesh ------- ##
 
