@@ -1,6 +1,8 @@
-# Offline setup: the periodic hexahedral mesh and its materials, the 8-node element matrices, the influence
-# functions E and P of the actual composite and P0 of the homogeneous reference, and their cache. Everything is built
-# for a Discretization (a mesh and its partition lattice), so the same code serves the main, fine and coarse ones.
+# The offline step: the periodic hexahedral mesh and its materials, the 8-node element matrices, the FE influence
+# functions E and P of the composite (TFA), the Moulinec–Suquet kernel P0 of the homogeneous reference (CP and
+# Spectral LS), and the cache of E and P. Everything is built for a Discretization (a mesh and its partition lattice),
+# so the same code serves the partitions of CP and TFA and the element lattice of Spectral LS. get_problem() at the
+# end builds everything a run needs.
 
 import hashlib
 import sys
@@ -12,7 +14,6 @@ import scipy.sparse.linalg
 import tqdm
 
 import config
-from lattice_fft import get_P0_offset_blocks_from_transformed, get_P0_transformed
 
 ## ------- Discretizations ------- ##
 
@@ -59,20 +60,15 @@ class Discretization(NamedTuple):
     def partition_volume(self):
         return self.elements_per_partition_side**2 * self.element_number_along_z * self.element_volume
 
-def get_main_discretization():
-    # The one config.py describes: TFA and CP live on its partitions.
+def get_partition_discretization():
+    # The one config.py describes: CP and TFA live on its partitions.
     return Discretization(config.element_number_per_side, config.element_number_along_z,
                           config.partition_number_per_side)
 
-def get_fine_discretization():
-    # The main mesh with one partition per element column: the lattice of the fine, non-partitioned LS solver.
+def get_spectral_discretization():
+    # The same mesh with one partition per element column: the lattice of Spectral LS.
     return Discretization(config.element_number_per_side, config.element_number_along_z,
                           config.element_number_per_side)
-
-def get_coarse_discretization():
-    # A coarse mesh with one element per main partition: the lattice of the coarse, non-partitioned LS scheme.
-    return Discretization(config.partition_number_per_side, config.element_number_along_z,
-                          config.partition_number_per_side)
 
 ## ------- Mesh, Geometry and Materials ------- ##
 
@@ -113,8 +109,8 @@ def get_element_column_material_ids(discretization):
     return is_inside_inclusion(np.column_stack([x.ravel(), y.ravel()])).astype(int)
 
 def get_partition_material_ids(mesh):
-    # Each partition's material, read off its elements. TFA and CP give every partition one material law,
-    # so a partition holding both phases stops the run here, before any offline solve.
+    # Each partition's material, read off its elements. Every method gives each partition one material law, so a
+    # partition holding both phases stops the run here, before any offline solve.
     partition_count = mesh.discretization.partition_count
     if mesh.element_material_ids.min() == mesh.element_material_ids.max():
         raise ValueError("Every element is the same phase, so the cell is homogeneous: the inclusion is too small or "
@@ -125,9 +121,9 @@ def get_partition_material_ids(mesh):
     mixed_partitions = (inclusion_elements > 0) & (inclusion_elements < elements)
     if mixed_partitions.any():
         raise ValueError(f"{np.count_nonzero(mixed_partitions)} of {partition_count} partitions contain both phases, "
-                         "but every partition must be a single phase: it has one material law in TFA and in "
-                         "CP. Align the inclusion with the partition grid, or use one partition per "
-                         "element (partition_number_per_side = element_number_per_side).")
+                         "but every partition must be a single phase: it has one material law. Align the inclusion "
+                         "with the partition grid, or use one partition per element (partition_number_per_side = "
+                         "element_number_per_side).")
     return (inclusion_elements > 0).astype(int)
 
 def get_periodic_mesh(discretization):
@@ -261,7 +257,7 @@ def get_free_dofs(mesh):
     pinned_dofs = np.arange(3)
     return np.setdiff1d(np.arange(mesh.discretization.dof_count), pinned_dofs)
 
-## ------- Influence Functions (Offline) ------- ##
+## ------- Influence Functions E and P (TFA) ------- ##
 
 def get_F_macrostrain(mesh, L_per_element):
     # Nodal loads per unit macrostrain. Moving the applied strain to the right-hand side gives -∫ Bᵀ L ε̄ dV.
@@ -297,7 +293,7 @@ def get_influence_function_solver(mesh, K):
 
     def solve(F):
         F_free = F.tocsr()[free_dofs].tocsc()
-        columns_per_solve = 100
+        columns_per_solve = config.offline_columns_per_solve
         average_strain = np.zeros((A.shape[0], F.shape[1]))
         column_batches = tqdm.tqdm(range(0, F.shape[1], columns_per_solve),
                                    desc=f"  {f'solve {F.shape[1]} load columns':<26}",
@@ -322,32 +318,28 @@ def get_influence_functions(mesh, L_per_element, include_P):
     P = solve(get_F_eigenstrain(mesh, L_per_element)) if include_P else None
     return E, P
 
-def get_homogenized_L(E, L_per_partition):
-    E_blocks = E.reshape(-1, 6, 6)
-    return np.mean(L_per_partition @ E_blocks, axis=0)
+## ------- Reference Stiffness C0 and Kernel P0 (CP and Spectral LS) ------- ##
 
 def get_reference_L(E, L_per_partition, L_matrix):
     # The homogeneous reference stiffness C0 chosen by config.reference_stiffness. Every partition has the same volume,
     # so the averages are plain means over the partitions.
     if config.reference_stiffness == "homogenized":
-        return get_homogenized_L(E, L_per_partition)
+        return np.mean(L_per_partition @ E.reshape(-1, 6, 6), axis=0)
     if config.reference_stiffness == "voigt":
         return np.mean(L_per_partition, axis=0)
     return L_matrix
 
-## ------- Reference Kernel P0 (Offline) ------- ##
+# P0 is handled in two forms: in real space, one 6 × 6 block per partition offset P0[a_B - a_A] on a lattice indexed
+# [j, i] as get_grid_id orders it, and transformed over the lattice (ER-14a). The kernel is real, so the transform
+# keeps only the non-redundant half of the frequencies (rfftn, shape (N, N//2 + 1, 6, 6)).
 
-# Every P0 below is returned in real space, one 6 × 6 block per partition offset P0[a_B - a_A], on a lattice indexed
-# [j, i] as get_grid_id orders it, which is what get_P0_transformed takes.
+def get_P0_transformed(P0_offset_blocks, partition_number_per_side):
+    P0_offset_lattice = P0_offset_blocks.reshape(partition_number_per_side, partition_number_per_side, 6, 6)
+    return np.fft.rfftn(P0_offset_lattice, axes=(0, 1))
 
-def get_fe_P0_offset_blocks(mesh, reference_L):
-    # The FE kernel (LS-14): the reference response to eigenstrain in partition 0 alone. Reference interactions depend
-    # only on the offset between partitions (ER-6e), so block B of this response is P0[B - 0] and one solve gives the
-    # whole kernel.
-    reference_L_per_element = np.tile(reference_L, (mesh.discretization.element_count, 1, 1))
-    K = get_K(mesh, reference_L_per_element)
-    F_eigenstrain_in_first_partition = get_F_eigenstrain(mesh, reference_L_per_element)[:, :6]
-    return get_influence_function_solver(mesh, K)(F_eigenstrain_in_first_partition)
+def get_P0_offset_blocks_from_transformed(P0_transformed):
+    lattice_shape = (P0_transformed.shape[0],) * 2
+    return np.fft.irfftn(P0_transformed, s=lattice_shape, axes=(0, 1)).reshape(-1, 6)
 
 def get_direction_strain_matrix(directions):
     # B(n), shape (..., 6, 3): the engineering strain (ER-2) of a displacement u varying along the unit direction n,
@@ -376,14 +368,7 @@ def get_moulinec_suquet_P0_offset_blocks(lattice_side, reference_L):
         highest_frequencies = ((np.abs(frequency_y) == lattice_side / 2)[:, None]
                                | (frequency_x == lattice_side / 2)[None, :])
         P0_transformed[highest_frequencies] = np.eye(6)
-
-    # A half spectrum that is not the transform of a real kernel would be made into one silently by irfftn, so the
-    # round trip must give it back.
-    P0_offset_blocks = get_P0_offset_blocks_from_transformed(P0_transformed)
-    round_trip_error = np.abs(get_P0_transformed(P0_offset_blocks, lattice_side) - P0_transformed).max()
-    if round_trip_error > 1e-12 * np.abs(P0_transformed).max():
-        raise RuntimeError(f"the Moulinec–Suquet kernel is not real (round-trip error {round_trip_error:.2e}).")
-    return P0_offset_blocks
+    return get_P0_offset_blocks_from_transformed(P0_transformed)
 
 def get_partition_averaged_P0_offset_blocks(element_P0_offset_blocks, discretization):
     # The kernel of the discretization's partitions from the kernel of its element columns (one partition per column,
@@ -404,15 +389,23 @@ def get_partition_averaged_P0_offset_blocks(element_P0_offset_blocks, discretiza
                                                        (partition_offsets + d_i) % element_side)]
     return partition_P0.reshape(-1, 6)
 
+def get_reference_kernel(discretization, reference_L):
+    # P̂0 on the discretization's partition lattice: the Moulinec–Suquet kernel built on its element grid, then
+    # averaged over its partitions, as SCA averages its fine-grid operator over clusters. On a lattice of one element
+    # per partition (Spectral LS) the average leaves it unchanged. It takes milliseconds, so it is not cached.
+    P0_offset_blocks = get_partition_averaged_P0_offset_blocks(
+        get_moulinec_suquet_P0_offset_blocks(discretization.element_number_per_side, reference_L), discretization)
+    return get_P0_transformed(P0_offset_blocks, discretization.partition_number_per_side)
+
 ## ------- Cache ------- ##
 
-# Increase whenever a code change alters the offline operators, so caches made by the old code are recomputed.
+# Increase whenever a code change alters E or P, so caches made by the old code are recomputed.
 # 2: the geometry is resolved on the elements, not the partitions.
 cache_version = 2
 
 def get_cache_path(kind, parameters):
-    # One file per parameter set, so switching between configurations or entry points reuses each one's operators
-    # instead of overwriting a single file. The name is a hash of every parameter, so a file that exists matches them.
+    # One file per parameter set, so switching between configurations reuses each one's operators instead of
+    # overwriting a single file. The name is a hash of every parameter, so a file that exists matches them.
     digest = hashlib.sha256()
     for name in sorted(parameters):
         value = np.asarray(parameters[name])
@@ -423,7 +416,7 @@ def get_cache_path(kind, parameters):
 def get_cached(names, parameters, compute):
     # The named arrays, as a dict by name, each from its own cache file for these parameters when they all exist,
     # otherwise computed together by compute() and each saved to its own file. One file per array lets a run load only
-    # the arrays it needs (E without P for CP alone).
+    # the arrays it needs (E without P when TFA is off).
     cache_paths = {name: get_cache_path(name, parameters) for name in names}
     if all(cache_path.exists() for cache_path in cache_paths.values()):
         arrays = {}
@@ -440,8 +433,7 @@ def get_cached(names, parameters, compute):
     return arrays
 
 def get_E_and_P(mesh, L_matrix, L_inclusion, include_P):
-    # E always: CP needs it for the homogenized C0 and the verification for the homogenized stiffness. The dense P,
-    # (6 × partitions)² doubles, only when include_P, since only TFA uses it; P is None otherwise.
+    # E, and the dense P, (6 × partitions)² doubles, only when include_P; P is None otherwise.
     discretization = mesh.discretization
     E_P_parameters = {"cache_version": cache_version,
                       "domain_side_length": config.domain_side_length,
@@ -465,89 +457,44 @@ def get_E_and_P(mesh, L_matrix, L_inclusion, include_P):
     if not include_P:
         return E_P["E"], None
     # Column-major, so the columns of a run of consecutive partitions are contiguous and P products can read just the
-    # yielding partitions' columns without copying them (tfa_solvers.apply_P_to_partitions).
+    # yielding partitions' columns without copying them (tfa_model.apply_P_to_partitions).
     return E_P["E"], np.asfortranarray(E_P["P"])
 
-def get_reference_kernel(mesh, reference_L):
-    # P̂0 on the mesh's partition lattice, for the given reference stiffness, built as config.reference_kernel says.
-    # P0 does not depend on the geometry, since the reference is homogeneous. The Moulinec–Suquet kernel follows one
-    # rule on every lattice: built on the element grid, then averaged over partitions, which leaves it unchanged on a
-    # lattice of one element per partition (fine and coarse LS). It takes milliseconds, so it is not cached.
-    discretization = mesh.discretization
-    if config.reference_kernel == "moulinec_suquet":
-        P0_offset_blocks = get_partition_averaged_P0_offset_blocks(
-            get_moulinec_suquet_P0_offset_blocks(discretization.element_number_per_side, reference_L), discretization)
-    else:
-        P0_offset_blocks = get_cached_fe_P0_offset_blocks(mesh, reference_L)
-    return get_P0_transformed(P0_offset_blocks, discretization.partition_number_per_side)
-
-def get_cached_fe_P0_offset_blocks(mesh, reference_L):
-    # The FE kernel, cached under the discretization and the reference stiffness, so each has its own file.
-    discretization = mesh.discretization
-    P0_parameters = {"cache_version": cache_version,
-                     "domain_side_length": config.domain_side_length,
-                     "element_number_per_side": discretization.element_number_per_side,
-                     "element_number_along_z": discretization.element_number_along_z,
-                     "partition_number_per_side": discretization.partition_number_per_side,
-                     "reference_L": reference_L}
-
-    def compute():
-        start_time = time.perf_counter()
-        P0_offset_blocks = get_fe_P0_offset_blocks(mesh, reference_L)
-        print(f"P0 offline solve ({discretization.element_number_per_side} elements, "
-              f"{discretization.partition_number_per_side} partitions per side): "
-              f"{time.perf_counter() - start_time:.2f} seconds.")
-        return {"P0_offset_blocks": P0_offset_blocks}
-
-    return get_cached(("P0_offset_blocks",), P0_parameters, compute)["P0_offset_blocks"]
-
-## ------- Problem Setup ------- ##
+## ------- Problem ------- ##
 
 class Lattice(NamedTuple):
-    # A partition lattice with what an LS solver on it needs: its partitions' materials and its P0 kernel.
+    # A partition lattice with what an LS method on it needs: its partitions' materials and its P0 kernel.
     partition_materials: PartitionMaterials
     P0_transformed: np.ndarray
-
-def get_lattice(discretization, L_matrix, L_inclusion, reference_L):
-    # The lattice of a discretization, with the geometry resolved on its own elements and P0 built with the given C0.
-    mesh = get_periodic_mesh(discretization)
-    partition_materials = get_partition_materials(L_matrix, L_inclusion, get_partition_material_ids(mesh))
-    return Lattice(partition_materials, get_reference_kernel(mesh, reference_L))
 
 class Problem(NamedTuple):
-    # The main lattice (TFA and CP): its partitions' materials, its mesh, on which E, P and P0 are built,
-    # and those operators.
-    partition_materials: PartitionMaterials
-    mesh: Mesh
+    # Everything a run needs. CP and TFA share the partitions; E and P are None when no method needs them.
+    partitions: Lattice
     E: np.ndarray
-    # None without config.include_tfa_model: only TFA uses the dense P.
     P: np.ndarray
-    P0_transformed: np.ndarray
-    # The homogeneous reference stiffness C0 chosen by config.reference_stiffness, from which every P0 is built, and
-    # its inverse. Shared by every LS solver and the TFA FFT reference.
-    reference_L: np.ndarray
+    # The inverse of the reference stiffness C0, shared by CP and Spectral LS.
     reference_compliance: np.ndarray
-    # The lattices of the non-partitioned LS solvers (offline.get_fine_discretization, get_coarse_discretization).
-    fine_lattice: Lattice
-    coarse_lattice: Lattice
+    # The element lattice of Spectral LS, None without config.include_spectral_ls.
+    spectral_lattice: Lattice
 
 def get_problem():
-    # Everything an entry point needs, built from config, with the offline operators taken from the cache when it
-    # matches.
-    mesh = get_periodic_mesh(get_main_discretization())
-    partition_material_ids = get_partition_material_ids(mesh)
+    # Built from config, with E and P taken from the cache when it matches. E is needed by TFA and by the
+    # "homogenized" reference stiffness, P by TFA only.
+    mesh = get_periodic_mesh(get_partition_discretization())
     L_matrix = get_L(config.elastic_modulus_matrix, config.poisson_ratio_matrix)
     L_inclusion = get_L(config.elastic_modulus_inclusion, config.poisson_ratio_inclusion)
-    if config.matched_stiffness_control:
-        L_inclusion = L_matrix
-        print("matched-stiffness control: the inclusion elastic stiffness is overridden to the matrix value, which "
-              "makes the TFA and CP models the same equation. Yield properties still differ.")
-    partition_materials = get_partition_materials(L_matrix, L_inclusion, partition_material_ids)
-    E, P = get_E_and_P(mesh, L_matrix, L_inclusion, include_P=config.include_tfa_model)
+    partition_materials = get_partition_materials(L_matrix, L_inclusion, get_partition_material_ids(mesh))
+    E, P = None, None
+    if config.include_tfa_model or config.reference_stiffness == "homogenized":
+        E, P = get_E_and_P(mesh, L_matrix, L_inclusion, include_P=config.include_tfa_model)
     reference_L = get_reference_L(E, partition_materials.L, L_matrix)
     print(f"reference stiffness C0: {config.reference_stiffness}, C0_1111 = {reference_L[0, 0] / 1e6:.2f} MPa")
-    P0_transformed = get_reference_kernel(mesh, reference_L)
-    fine_lattice = get_lattice(get_fine_discretization(), L_matrix, L_inclusion, reference_L)
-    coarse_lattice = get_lattice(get_coarse_discretization(), L_matrix, L_inclusion, reference_L)
-    return Problem(partition_materials, mesh, E, P, P0_transformed, reference_L, np.linalg.inv(reference_L),
-                   fine_lattice, coarse_lattice)
+    partitions = Lattice(partition_materials, get_reference_kernel(mesh.discretization, reference_L))
+
+    spectral_lattice = None
+    if config.include_spectral_ls:
+        spectral_discretization = get_spectral_discretization()
+        spectral_materials = get_partition_materials(
+            L_matrix, L_inclusion, get_partition_material_ids(get_periodic_mesh(spectral_discretization)))
+        spectral_lattice = Lattice(spectral_materials, get_reference_kernel(spectral_discretization, reference_L))
+    return Problem(partitions, E, P, np.linalg.inv(reference_L), spectral_lattice)

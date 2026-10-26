@@ -3,117 +3,120 @@
 Reduced-order homogenization of elastoplastic composites: a stiff inclusion (square, circle or laminate layer) in a
 softer J2-plastic matrix, in a periodic cell. The cell is meshed with 8-node hexahedra and divided into
 *partitions*, columns of elements through the thickness; each partition carries one uniform strain and plastic
-state. Two reduced models are compared:
+state. Three methods solve the same problem:
 
-- **CP** (constant polarization), the model under development: the partition-averaged Lippmann–Schwinger equation (the LS scheme of the notes) in which partitions interact
-  only through a homogeneous reference medium (stiffness C0), so the nonlocal operator is one FFT convolution with a
-  kernel P0 (`notes/2_ls_model.md`).
-- **TFA**, the baseline: Transformation Field Analysis, whose interaction operator P is computed exactly from the
-  real composite but is dense, so its cost grows with the square of the number of partitions (`notes/3_tfa_baseline.md`).
+| Method | What it is |
+|---|---|
+| **CP** | The method under development: the partition-averaged Lippmann–Schwinger (LS) equation, in which partitions interact only through a homogeneous reference medium (stiffness C0), so the interaction is one FFT convolution with the Moulinec–Suquet kernel P0 (`notes/2_ls_model.md`). |
+| **Spectral LS** | The same equation with one partition per element: the standard Moulinec–Suquet spectral method on the element grid. |
+| **TFA** | The baseline, Transformation Field Analysis: partitions interact through the exact FE influence function P of the composite, exact in elasticity but dense, so its cost grows with the square of the number of partitions (`notes/3_tfa_baseline.md`). |
 
-**Research question.** On identical uniform partitions, how does the interaction operator decide accuracy and cost?
-TFA uses the real composite's operator: exact in elasticity, but dense. CP replaces it with a reference-medium
-operator applied by FFT: the FE kernel or a Moulinec–Suquet kernel (`reference_kernel`). The aim is to measure
-each against a full-field reference, and to find the exact relation between the TFA and CP operators.
+Every method solves each load step by Newton's method, with GMRES for each Newton correction.
+
+**Research question.** On identical partitions, how does the interaction operator decide accuracy and cost?
 `notes/1_research_context.md` places this in the literature.
 
 ## Quick start
 
 ```bash
-python code/MAIN_FP.py        # fixed-point solvers; run first
-python code/MAIN_Newton.py    # Newton–Krylov solvers; also cross-checks against MAIN_FP.py's saved results
-python code/check_code.py     # after any code change: static checks and nine small smoke runs (~6 minutes)
+python code/run.py      # solve the problem in code/config.py with every method
+python code/check.py    # check the code (a few seconds); run after any change to it
 ```
 
-Dependencies: `numpy`, `scipy`, `matplotlib`, `tqdm` (no package file; installed in the untracked `.venv/`).
-Every setting is in `code/config.py`; there are no command-line options. The first run of a configuration factorizes
-the global stiffness and caches the result in `code/cache/` (gitignored), which takes minutes and, only when TFA is
-included, a dense matrix of (6 × partitions)² doubles: 0.3 GB at the default 32 × 32 partitions.
+The default problem (64 × 64 elements, 32 × 32 partitions, 60 load steps) takes about half a minute once its FE
+operators are cached. The first run of a new configuration with TFA builds and caches them in `code/cache/`, which
+takes minutes and a dense matrix of (6 × partitions)² doubles: 0.3 GB at 32 × 32 partitions, 4.8 GB at 64 × 64.
 
-## What a run does
+Dependencies: `numpy`, `scipy`, `matplotlib`, `tqdm` (installed in the untracked `.venv/`).
 
-Each entry point loads the macroscopic strain path step by step (monotonic or cyclic) and solves every load step with
-each of its solvers, several times over for fair timings:
+## Changing the problem
 
-| Entry point | Solvers |
+**Every setting is in `code/config.py`**, grouped and commented: geometry and mesh, materials, load path, which
+methods to run, the reference stiffness C0, the Newton–GMRES settings, the offline batch size, the figures' colour
+scale and the check tolerances. There are no command-line options and no settings anywhere else.
+
+One rule to know: every partition must be a single phase. A square or laminate needs its edges on partition edges; a
+circle needs one partition per element (`partition_number_per_side = element_number_per_side`). The run stops with an
+explanation otherwise.
+
+## Output
+
+`code/run.py` prints its progress and a timing table, and saves to `code/output/`:
+
+| File | Contents |
 |---|---|
-| `MAIN_FP.py` | CP fixed point; with `include_tfa_model`, TFA fixed point plain and FFT-preconditioned |
-| `MAIN_Newton.py` | CP Newton; with `include_non_partitioned_ls`, LS on the element lattice ("fine") and on a coarse mesh with one element per partition ("coarse"); with `include_tfa_model`, TFA Newton plain and FFT-preconditioned |
+| `timing.txt` | each method's total solve time, Newton iterations, GMRES iterations and load steps completed |
+| `stress_strain.png` | macroscopic stress against applied strain, every method |
+| `cross_section.png` | the inclusion on the element and partition grids |
+| `von_mises_stress.png` | von Mises stress at the last load step, one map per method on its own lattice |
 
-Outputs, in `code/output/` (prefix `FP_` or `Newton_`): `stress_strain.png` (every macroscopic stress component
-against the applied strain, one curve per solver), `solver_performance.png` (iterations and time per iteration per
-step), `time_breakdown.png` (where the time goes), `von_mises_stress.png` (one map per solver at the last step,
-finest lattice first) and `results.npz`, plus `cross_section.png`. The folder is
-gitignored: rerun to regenerate it.
+```
+Method        Time (s)   Newton its   GMRES its   Steps
+CP                5.10          180        9307   60/60
+Spectral LS      15.06          180       11039   60/60
+TFA               7.92          107         683   60/60
+```
 
-## Configuration essentials
+A method that cannot solve a load step stops there, and the table says why; the others carry on.
 
-- **Geometry** (`inclusion_shape`, `element_number_per_side`, `partition_number_per_side`): the geometry is resolved
-  on the elements, and every partition must be a single phase, or the run stops before any solve. A square or a
-  laminate must have its edges on partition edges; a circle needs one partition per element.
-- **Reference stiffness** (`reference_stiffness`): C0 is part of the CP model, so it changes CP's answer; for TFA it
-  only affects the FFT preconditioner's speed.
-- **Reference kernel** (`reference_kernel`): `"moulinec_suquet"` (default) or `"fe"`, for every LS lattice.
-- **Load path** (`max_macro_strain`, `strain_increment_count`, `load_path_shape`).
-- **Checks with a known answer**: `matched_stiffness_control = True` (with `reference_kernel = "fe"`) makes CP and TFA
-  the same equation, so they must agree; `inclusion_shape = "laminate"` has an exact solution (`code/laminate.py`)
-  that every solver must match.
+## Checking the code
 
-## How the code is checked
+```bash
+python code/check.py         # run the checks
+python code/check.py save    # run the checks and, if they pass, save the results as the reference
+```
 
-Every run prints PASS/FAIL checks and stops on a failure: the converged residual recomputed from scratch after every
-step, agreement between solvers that solve the same equation, cross-checks between the two entry points, and, before
-solving, checks of the operators (kernel structure, finite-difference Jacobians, dense reference solves on small
-grids). `code/check_code.py` runs both entry points on nine small configurations, each with a comment saying what it
-tests. For a change that must leave every result unchanged, run `python code/check_code.py save` before it and
-`python code/check_code.py compare` after it: every solver's stress path and iteration counts must be bit-identical.
+`check.py` solves two small problems with every method, without touching your `config.py`, cache or outputs:
+
+- **laminate**, loaded, unloaded and loaded in reverse: every method must reproduce the exact solution in every
+  partition.
+- **square**, under tension and shear.
+
+On both, every method must complete every load step and, once a reference is saved, reproduce it bit for bit. Before
+a change that should not alter any result (a cleanup), run `check.py save`; after it, `check.py` must pass. After a
+change meant to alter results, check them, then save a new reference.
 
 ## Code layout
 
 | File | Contents |
 |---|---|
-| `code/config.py` | every input, its checks and derived values |
-| `code/MAIN_FP.py`, `code/MAIN_Newton.py` | entry points, each `main()` an outline |
-| `code/offline.py` | mesh, materials, finite-element operators, E and P, the FE and Moulinec–Suquet P0 kernels, cache |
-| `code/lattice_fft.py` | FFT over the partition lattice |
+| `code/config.py` | every setting |
+| `code/run.py` | the entry point: builds the problem, runs each method along the load path, writes the table and figures |
+| `code/check.py` | the checks, with the laminate's exact solution |
+| `code/fe.py` | mesh, materials, element matrices, the influence functions E and P, the kernel P0, the cache |
+| `code/ls_model.py` | the LS equation and its Newton solver (CP and Spectral LS) |
+| `code/tfa_model.py` | the TFA equation and its Newton solver |
+| `code/newton.py` | what both share: residual norm, convergence test, GMRES solve |
 | `code/material.py` | J2 return map and its sensitivity |
-| `code/tfa_solvers.py`, `code/ls_solvers.py` | the two models' solvers |
-| `code/laminate.py` | exact laminate solution |
-| `code/load_path.py`, `code/convergence.py`, `code/online_timing.py` | stepping a solver along the path, convergence, timing |
-| `code/verification.py`, `code/report.py`, `code/plots.py` | pre-solve checks, reports and post-solve checks, figures |
-| `code/check_code.py` | the test script |
+| `code/plots.py` | the figures |
 | `notes/` | in reading order: `1_research_context.md` (research question, P0 operators, literature), `2_ls_model.md` (LS, equations LS-*), `3_tfa_baseline.md` (TFA and its solvers, ER-*), `background_influence_functions_and_J2/` (derivations of E, P and the J2 return map) |
 | `references/` | the papers the notes cite; `reading_notes/` has one note per paper read cover to cover |
 
-`CLAUDE.md` holds the detailed conventions and design decisions (strain convention, half-spectrum FFT, timing rules,
-naming).
+`CLAUDE.md` holds the detailed conventions (strain convention, half-spectrum FFT, naming).
 
 ## Status and roadmap
 
-All solvers, checks and figures above work and are tested. With the FE kernel, the fine LS solver is a comparison,
-**not** a reference solution: it rings along high-contrast interfaces (about ±30 % element-to-element alternation
-near the inclusion corners, not removed by refinement, absent from element-level TFA).
+All three methods, the figures and the checks work and are tested. The code was cut back to these on 2026-10-26; the
+fixed-point solvers, the FFT-preconditioned TFA solvers, the FE kernel for P0 and the coarse LS lattice are at git tag
+`pre-cleanup`.
 
-**Position in the literature** (details in `notes/1_research_context.md`). LS is the clustered Lippmann–Schwinger equation
-that self-consistent clustering analysis (SCA) also solves, here on uniform partitions so that it runs by FFT. For
-linear elasticity this is Brisard–Dormieux's scheme (2010, 2012). With plasticity, no numerical study on uniform
+**Position in the literature** (details in `notes/1_research_context.md`). LS is the clustered Lippmann–Schwinger
+equation that self-consistent clustering analysis (SCA) also solves, here on uniform partitions so that it runs by FFT.
+For linear elasticity this is Brisard–Dormieux's scheme (2010, 2012). With plasticity, no numerical study on uniform
 partitions was found among the papers read, and no numerical comparison of LS and TFA on identical partitions.
 
 Roadmap, in order:
-1. **Thickness check (done).** One element layer through the thickness reproduces three to round-off, so one layer,
-   the default, loses nothing.
-2. **Moulinec–Suquet kernel (done)**, `reference_kernel = "moulinec_suquet"`, now the default, next to the FE
-   kernel, which is the only one for the matched-stiffness gate. One rule for every LS lattice: Moulinec–Suquet on
-   the element grid, averaged over partitions. Fine and coarse LS are then the standard Moulinec–Suquet method at
-   element and at partition resolution; partitioned LS averages the fine operator as SCA does (Liu et al. 2016).
-   TFA keeps its FE operators, so under this kernel an LS-vs-TFA difference includes the FE-vs-MS discretization gap.
+1. **Thickness check (done).** One element layer through the thickness reproduces three to round-off.
+2. **Moulinec–Suquet kernel (done).** One rule for every LS lattice: Moulinec–Suquet on the element grid, averaged
+   over partitions as SCA does (Liu et al. 2016). TFA keeps its FE operators, so a CP-vs-TFA difference includes the
+   FE-vs-Moulinec–Suquet discretization gap.
 3. **Gold-standard reference.** A full-field FE-consistent FFT solver (Ladecký et al., in `references/`) with
-   plasticity at the Gauss points, so that errors become absolute rather than relative to another model.
-4. **TFA–LS study.** Derive the exact relation between TFA's P and the LS operator, and measure TFA and
-   every LS kernel on identical partitions against the reference, across contrast, partition count and load path.
-5. **Cost at equal accuracy.** Time and memory against resolution for each operator, compared at the same error.
+   plasticity at the Gauss points, so that errors become absolute rather than relative to another method.
+4. **TFA–LS study.** Derive the exact relation between TFA's P and the LS operator, and measure TFA, CP and Spectral
+   LS against the reference, across contrast, partition count and load path.
+5. **Cost at equal accuracy.** Time and memory against resolution for each method, compared at the same error.
 
-Later: a rule for LS partitions holding both phases (circles on coarse partitions), a reference stiffness that
-follows plastic softening (as in SCA), a Newton line search for strongly softening materials, a Fourier
-preconditioner for LS Newton (its GMRES is unpreconditioned), and the consistent kernel (the exact partition
-average, Brisard–Dormieux), the limit of the averaged Moulinec–Suquet kernel as the element grid is refined.
+Later: a rule for partitions holding both phases (circles on coarse partitions), a reference stiffness that follows
+plastic softening (as in SCA), a Newton line search for strongly softening materials, a Fourier preconditioner for
+the Newton solver of CP and Spectral LS (its GMRES is unpreconditioned), and the consistent kernel (the exact
+partition average, Brisard–Dormieux), the limit of the averaged Moulinec–Suquet kernel as the element grid is refined.

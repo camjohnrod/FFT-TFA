@@ -123,8 +123,9 @@ Notes on each:
 - **FE kernel.** The review lists FFT solvers for "trilinear hexahedral elements on a regular periodic grid" (its
   ref. 99) as one discretization among others; our kernel is that discretization's Green operator, averaged over
   partitions (our reading). The LS note says these operators "are not asserted to equal the continuum operators at
-  finite N". It stays as an option because it is the only kernel under which LS and TFA become the same equation
-  (`matched_stiffness_control`), since TFA's $\mathbf P$ comes from the same FE mesh.
+  finite N". It was kept as an option because it is the only kernel under which LS and TFA become the same equation
+  (matched phase stiffness), since TFA's $\mathbf P$ comes from the same FE mesh; the code dropped it on 2026-10-26
+  (git tag `pre-cleanup` has it).
 
 ## 3. Consistent against non-consistent
 

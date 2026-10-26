@@ -468,7 +468,7 @@ Storage of the reference kernel is $O(M)$, and application costs $O(M\log M)$. T
 
 ### 6.5 Moulinec–Suquet kernel
 
-The alternative to LS-14 (`reference_kernel = "moulinec_suquet"`) evaluates the continuum Green operator at the frequencies $\boldsymbol\xi$ of an $N\times N$ lattice of element columns:
+The alternative to LS-14 (the only kernel in the code since 2026-10-26) evaluates the continuum Green operator at the frequencies $\boldsymbol\xi$ of an $N\times N$ lattice of element columns:
 
 **(LS-21) Moulinec–Suquet kernel**
 
@@ -488,7 +488,7 @@ $$
 \mathbf P_0[\mathbf D]=\sum_{\mathbf d}\frac{(k-|d_1|)(k-|d_2|)}{k^2}\,\mathbf p_0^{\rm el}[k\mathbf D+\mathbf d].
 $$
 
-With $k=1$ (fine and coarse LS) this is the standard Moulinec–Suquet scheme at that resolution; with $k>1$ it averages the fine operator over partitions as SCA does over clusters (Liu–Bessa–Liu 2016). The average is a congruence, so its eigenvalues stay in $[0,1]$. Like LS-14 it is non-consistent; as the element grid is refined it tends to the consistent operator of LS-7 (`1_research_context.md`, section 2).
+With $k=1$ (one partition per element, Spectral LS in the code) this is the standard Moulinec–Suquet scheme at that resolution; with $k>1$ it averages the fine operator over partitions as SCA does over clusters (Liu–Bessa–Liu 2016). The average is a congruence, so its eigenvalues stay in $[0,1]$. Like LS-14 it is non-consistent; as the element grid is refined it tends to the consistent operator of LS-7 (`1_research_context.md`, section 2).
 
 ## 7. Solve the nonlinear equation without forming its Jacobian
 

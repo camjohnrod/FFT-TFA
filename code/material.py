@@ -4,8 +4,6 @@
 from typing import NamedTuple
 import numpy as np
 
-from online_timing import timed_online
-
 class PlasticState(NamedTuple):
     # Partition-stacked plastic history: either the accepted history z_n of ER-3 or a candidate for the current step.
     plastic_strain: np.ndarray
@@ -40,6 +38,9 @@ def get_deviatoric_stress(stress):
 def get_equivalent_stress(deviatoric_stress):
     return np.sqrt(1.5 * np.sum(deviatoric_stress[:, :3]**2, axis=1) + 3 * np.sum(deviatoric_stress[:, 3:]**2, axis=1))
 
+def get_von_mises_stress(stress):
+    return get_equivalent_stress(get_deviatoric_stress(stress))
+
 def get_flow_stress(partition_materials, accumulated_plastic_strain):
     return partition_materials.yield_stress + partition_materials.hardening_modulus * accumulated_plastic_strain
 
@@ -60,7 +61,6 @@ def get_flow_direction(deviatoric_stress, equivalent_stress):
     flow_direction[:, 3:] = 3 * deviatoric_stress[:, 3:] / equivalent_stress[:, None]
     return flow_direction
 
-@timed_online("material_update")
 def get_plastic_eigenstrain(strain, partition_materials, plastic_history):
     # ER-3 by radial return from the accepted history. The eigenstrain μ is the plastic strain.
     trial = get_trial_state(strain, partition_materials, plastic_history)
@@ -85,7 +85,6 @@ def get_plastic_eigenstrain(strain, partition_materials, plastic_history):
 
     return PlasticState(plastic_strain, accumulated_plastic_strain), stress
 
-@timed_online("sensitivity")
 def get_eigenstrain_sensitivity(strain, partition_materials, plastic_history):
     # H_μ = ∂μ/∂ε at the current strain (ER-8), zero in partitions that stay elastic.
     trial = get_trial_state(strain, partition_materials, plastic_history)
