@@ -1,13 +1,14 @@
 # TFA, the baseline: the actual E/P model of notes/3_tfa_baseline.md, whose residual is r = ε - E ε̄ - P μ(ε) (ER-4),
-# with E and P the exact FE influence functions of the composite (fe.py). Each load step is solved by Newton with
-# GMRES (Strategy 2), on the matrix-free Jacobian J v = v - P (H_μ v) of ER-21.
+# with E and P the exact FE influence functions of the composite (fe.py). Its regions, called partitions below as in
+# the notes, are CP's clusters (fe.Clusters), each with one uniform strain and material state. Each load step is solved
+# by Newton with GMRES (Strategy 2), on the matrix-free Jacobian J v = v - P (H_μ v) of ER-21.
 
 import functools
 import numpy as np
 
 import config
 from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_yielding_partitions
-from newton import Solver, StepResult, get_relative_residual, has_converged, solve_newton_correction
+from newton import Evaluation, Solver, solve_load_step, solve_newton_correction
 
 def get_induced_strain(P, eigenstrain):
     return (P @ eigenstrain.reshape(-1)).reshape(-1, 6)
@@ -35,7 +36,7 @@ def get_induced_strain_reusing_history(P, plastic_state, plastic_history, induce
         return induced_strain_history
     return induced_strain_history + apply_P_to_partitions(P, eigenstrain_increment, changed_partitions)
 
-def reset_elastic_partitions(strain, b, P, induced_strain_history, partition_materials, plastic_history):
+def reset_elastic_partitions(strain, b, P, induced_strain_history, materials, plastic_history):
     # Updates the material at the given strain, solves the partitions that stay elastic exactly, and returns the
     # residual r = ε - b - Pμ(ε) of ER-4, which is then zero in every elastic partition.
     #
@@ -43,14 +44,14 @@ def reset_elastic_partitions(strain, b, P, induced_strain_history, partition_mat
     # residual without changing μ. Yielding partitions keep their strain, so their μ does not change either. The
     # second material update catches elastic partitions that the reset pushed past yield: only then does μ, and
     # so Pμ, change.
-    plastic_state, stress = get_plastic_eigenstrain(strain, partition_materials, plastic_history)
+    plastic_state, stress = get_plastic_eigenstrain(strain, materials, plastic_history)
     induced_strain = get_induced_strain_reusing_history(P, plastic_state, plastic_history, induced_strain_history)
     yielding_partitions = get_yielding_partitions(plastic_state, plastic_history)
 
     strain = strain.copy()
     strain[~yielding_partitions] = b[~yielding_partitions] + induced_strain[~yielding_partitions]
 
-    plastic_state, stress = get_plastic_eigenstrain(strain, partition_materials, plastic_history)
+    plastic_state, stress = get_plastic_eigenstrain(strain, materials, plastic_history)
     if not np.array_equal(get_yielding_partitions(plastic_state, plastic_history), yielding_partitions):
         induced_strain = get_induced_strain_reusing_history(P, plastic_state, plastic_history, induced_strain_history)
 
@@ -67,28 +68,24 @@ def get_newton_krylov_correction(P, sensitivity, residual):
 
     return solve_newton_correction(apply_jacobian, residual)
 
-def newton_krylov_iteration(E, P, macro_strain, partition_materials, plastic_history):
+def newton_krylov_iteration(E, P, clusters, macro_strain, plastic_history):
     # One load step (Strategy 2): Newton on the actual residual ER-4, from the exact elastic predictor Eε̄ + Pμₙ.
+    # The clusters have different volumes, so the residual norm is a volume average over them.
+    materials = clusters.materials
     b = (E @ macro_strain).reshape(-1, 6)
     induced_strain_history = get_induced_strain(P, plastic_history.plastic_strain)
-    strain = b + induced_strain_history
-    gmres_iteration_count = 0
 
-    residual_history = []
-    while True:
-        strain, plastic_state, stress, residual = reset_elastic_partitions(
-            strain, b, P, induced_strain_history, partition_materials, plastic_history)
-        residual_history.append(get_relative_residual(residual, macro_strain))
+    def evaluate(strain):
+        return Evaluation(*reset_elastic_partitions(strain, b, P, induced_strain_history, materials,
+                                                    plastic_history))
 
-        if has_converged(residual_history, config.tfa_divergence_limit):
-            break
+    def get_correction(current):
+        sensitivity = get_eigenstrain_sensitivity(current.strain, materials, plastic_history)
+        return get_newton_krylov_correction(P, sensitivity, current.residual)
 
-        sensitivity = get_eigenstrain_sensitivity(strain, partition_materials, plastic_history)
-        correction, iteration_count = get_newton_krylov_correction(P, sensitivity, residual)
-        strain = strain + correction
-        gmres_iteration_count += iteration_count
+    return solve_load_step(evaluate, get_correction, b + induced_strain_history, macro_strain,
+                           config.tfa_divergence_limit, clusters.average)
 
-    return StepResult(strain, stress, plastic_state, np.array(residual_history), gmres_iteration_count)
-
-def get_tfa_solver(E, P, partition_materials):
-    return Solver(functools.partial(newton_krylov_iteration, E, P), partition_materials)
+def get_tfa_solver(E, P, clusters):
+    # TFA on the given clusters, which E and P were built on.
+    return Solver(functools.partial(newton_krylov_iteration, E, P, clusters), clusters)

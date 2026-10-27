@@ -1,4 +1,5 @@
-# Every figure run.py saves: the macroscopic stress-strain curves, the cross-section and the von Mises stress maps.
+# Every figure run.py saves: the macroscopic stress-strain curves, each method's discretization of the cross-section,
+# and maps of the von Mises stress and the accumulated plastic strain.
 # Every method is drawn the same way in every figure (method_styles). Plot appearance is set here; no solver logic.
 
 from typing import NamedTuple
@@ -108,74 +109,64 @@ def plot_stress_strain(stress_MPa_per_method, completed_step_count_per_method, a
 
 ## ------- Cross Sections ------- ##
 
-cross_section_figure_size = (5, 5)
+cross_section_style = {**figure_style, 'font.size': 12, 'axes.titlesize': 13}
+cross_section_panel_size = 4.2
 
-def draw_element_and_partition_edges(axis, element_number_per_side, partition_number_per_side):
-    # Element edges thin and light, partition edges darker. With one partition per element only the light grid is
-    # drawn, which would otherwise bury a fine map under dark lines.
-    element_edges = np.linspace(0, 1, element_number_per_side + 1)
-    axis.vlines(element_edges, 0, 1, color='0.75', linewidth=0.5)
-    axis.hlines(element_edges, 0, 1, color='0.75', linewidth=0.5)
-    if partition_number_per_side < element_number_per_side:
-        partition_edges = np.linspace(0, 1, partition_number_per_side + 1)
-        axis.vlines(partition_edges, 0, 1, color='0.25', linewidth=1.2, clip_on=False)
-        axis.hlines(partition_edges, 0, 1, color='0.25', linewidth=1.2, clip_on=False)
+class CellMap(NamedTuple):
+    # One method's discretization on the element grid: the cell (unknown) each element belongs to, as an
+    # element_number_per_side² map, with a title and a line of its settings.
+    title: str
+    settings: str
+    cell_ids: np.ndarray
 
-def plot_cross_section(cross_section_material_ids, element_number_per_side, plot_path):
-    partition_number_per_side = cross_section_material_ids.shape[0]
+def draw_cell_boundaries(axis, cell_ids):
+    # A line along every element edge whose two sides belong to different cells, and around the cross-section.
+    edge_length = 1 / cell_ids.shape[0]
+    line_style = {'color': '0.15', 'linewidth': 0.6}
+    rows, columns = np.nonzero(cell_ids != np.roll(cell_ids, 1, axis=0))
+    axis.hlines(rows * edge_length, columns * edge_length, (columns + 1) * edge_length, **line_style)
+    rows, columns = np.nonzero(cell_ids != np.roll(cell_ids, 1, axis=1))
+    axis.vlines(columns * edge_length, rows * edge_length, (rows + 1) * edge_length, **line_style)
+    axis.plot([0, 1, 1, 0, 0], [0, 0, 1, 1, 0], **line_style)
 
-    with plt.rc_context(figure_style):
-        figure, axis = plt.subplots(figsize=cross_section_figure_size, layout='constrained')
-        axis.imshow(cross_section_material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.55']), vmin=0,
-                    vmax=1, origin='lower', extent=(0, 1, 0, 1))
-        draw_element_and_partition_edges(axis, element_number_per_side, partition_number_per_side)
-        axis.set_axis_off()
+def plot_cross_section(element_material_ids, cell_maps, plot_path):
+    # One panel per method: the phase of every element (fiber dark), with the method's cells drawn on top.
+    with plt.rc_context(cross_section_style):
+        figure, axes = plt.subplots(1, len(cell_maps), squeeze=False, layout='constrained',
+                                    figsize=(cross_section_panel_size * len(cell_maps), cross_section_panel_size + 0.6))
+        for axis, cell_map in zip(axes[0], cell_maps):
+            axis.imshow(element_material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.62']), vmin=0, vmax=1,
+                        origin='lower', extent=(0, 1, 0, 1))
+            draw_cell_boundaries(axis, cell_map.cell_ids)
+            axis.set_title(f"{cell_map.title}\n{cell_map.settings}")
+            axis.set_axis_off()
         figure.savefig(plot_path)
     plt.close(figure)
 
-## ------- von Mises Stress Maps ------- ##
+## ------- Field Maps (von Mises Stress, Plastic Strain) ------- ##
 
-von_mises_style = {**figure_style, 'font.size': 13, 'axes.titlesize': 15, 'figure.titlesize': 14}
-von_mises_panel_size = 4.2
+field_map_style = {**figure_style, 'font.size': 13, 'axes.titlesize': 15, 'figure.titlesize': 14}
+field_map_panel_size = 4.2
 
-def draw_inclusion_outline(axis, cross_section_material_ids):
-    # The partition edges between inclusion and matrix, in white, which stands out from the stress map underneath.
-    partition_number_per_side = cross_section_material_ids.shape[0]
-    edge_length = 1 / partition_number_per_side
-    rows, columns = np.nonzero(cross_section_material_ids != np.roll(cross_section_material_ids, 1, axis=0))
-    axis.hlines(rows * edge_length, columns * edge_length, (columns + 1) * edge_length, color='white', linewidth=2.5)
-    rows, columns = np.nonzero(cross_section_material_ids != np.roll(cross_section_material_ids, 1, axis=1))
-    axis.vlines(columns * edge_length, rows * edge_length, (rows + 1) * edge_length, color='white', linewidth=2.5)
-
-def draw_stress_map(axis, stress_map_MPa, cross_section_material_ids, element_number_per_side, title, **imshow_kwargs):
-    image = axis.imshow(stress_map_MPa, origin='lower', extent=(0, 1, 0, 1), **imshow_kwargs)
-    draw_element_and_partition_edges(axis, element_number_per_side, cross_section_material_ids.shape[0])
-    draw_inclusion_outline(axis, cross_section_material_ids)
-    axis.set_title(title)
-    axis.set_axis_off()
-    return image
-
-class StressMap(NamedTuple):
-    # One method's map, on its own lattice: von Mises stress per partition (MPa) and phase per partition, both
-    # (side × side), and the side of its element grid.
+class FieldMap(NamedTuple):
+    # One method's map on the element grid (element_number_per_side², each element showing its cluster's value).
     title: str
-    von_mises_MPa: np.ndarray
-    material_ids: np.ndarray
-    element_number_per_side: int
+    values: np.ndarray
 
-def plot_von_mises_stress(stress_maps, load_step, load_step_count, stress_min_MPa, stress_max_MPa, plot_path):
+def plot_field_maps(field_maps, label, load_step, load_step_count, value_min, value_max, plot_path):
     # One map per method, side by side on one colour scale, between the given limits or, where a limit is None, the
-    # maps' own. Maps may sit on different lattices, since each is drawn over the whole cross-section.
-    with plt.rc_context(von_mises_style):
-        figure, axes = plt.subplots(1, len(stress_maps), squeeze=False, layout='constrained',
-                                    figsize=(von_mises_panel_size * len(stress_maps) + 1.2, von_mises_panel_size))
-        all_maps_MPa = [stress_map.von_mises_MPa for stress_map in stress_maps]
-        stress_limits = {'vmin': min(map(np.min, all_maps_MPa)) if stress_min_MPa is None else stress_min_MPa,
-                         'vmax': max(map(np.max, all_maps_MPa)) if stress_max_MPa is None else stress_max_MPa}
-        for axis, stress_map in zip(axes[0], stress_maps):
-            image = draw_stress_map(axis, stress_map.von_mises_MPa, stress_map.material_ids,
-                                    stress_map.element_number_per_side, stress_map.title, cmap='jet', **stress_limits)
-        figure.colorbar(image, ax=axes[0], label="von Mises stress (MPa)", shrink=0.85)
+    # maps' own; label names the field and its unit on the colour bar.
+    with plt.rc_context(field_map_style):
+        figure, axes = plt.subplots(1, len(field_maps), squeeze=False, layout='constrained',
+                                    figsize=(field_map_panel_size * len(field_maps) + 1.2, field_map_panel_size))
+        all_values = [field_map.values for field_map in field_maps]
+        limits = {'vmin': min(map(np.min, all_values)) if value_min is None else value_min,
+                  'vmax': max(map(np.max, all_values)) if value_max is None else value_max}
+        for axis, field_map in zip(axes[0], field_maps):
+            image = axis.imshow(field_map.values, origin='lower', extent=(0, 1, 0, 1), cmap='jet', **limits)
+            axis.set_title(field_map.title)
+            axis.set_axis_off()
+        figure.colorbar(image, ax=axes[0], label=label, shrink=0.85)
         figure.suptitle(f"Load step {load_step} of {load_step_count}", color='0.3')
         figure.savefig(plot_path)
     plt.close(figure)

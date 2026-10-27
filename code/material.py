@@ -1,5 +1,5 @@
-# J2 plasticity with linear isotropic hardening: closed-form radial return for all partitions at once, and its
-# eigenstrain sensitivity H_μ.
+# J2 plasticity with linear isotropic hardening: closed-form radial return for all material states (clusters) at once,
+# its eigenstrain sensitivity H_μ and the algorithmic stiffness L_t = L (I - H_μ).
 
 from typing import NamedTuple
 import numpy as np
@@ -41,18 +41,18 @@ def get_equivalent_stress(deviatoric_stress):
 def get_von_mises_stress(stress):
     return get_equivalent_stress(get_deviatoric_stress(stress))
 
-def get_flow_stress(partition_materials, accumulated_plastic_strain):
-    return partition_materials.yield_stress + partition_materials.hardening_modulus * accumulated_plastic_strain
+def get_flow_stress(materials, accumulated_plastic_strain):
+    return materials.yield_stress + materials.hardening_modulus * accumulated_plastic_strain
 
-def get_trial_state(strain, partition_materials, plastic_history):
-    stress = np.einsum('pij,pj->pi', partition_materials.L, strain - plastic_history.plastic_strain)
+def get_trial_state(strain, materials, plastic_history):
+    stress = np.einsum('pij,pj->pi', materials.L, strain - plastic_history.plastic_strain)
     mean_stress = np.sum(stress[:, :3], axis=1) / 3
     deviatoric_stress = stress - np.outer(mean_stress, volumetric_direction)
     equivalent_stress = get_equivalent_stress(deviatoric_stress)
-    yield_function = equivalent_stress - get_flow_stress(partition_materials,
+    yield_function = equivalent_stress - get_flow_stress(materials,
                                                          plastic_history.accumulated_plastic_strain)
-    shear_modulus = partition_materials.L[:, 3, 3]
-    plastic_multiplier = np.maximum(yield_function, 0) / (3 * shear_modulus + partition_materials.hardening_modulus)
+    shear_modulus = materials.L[:, 3, 3]
+    plastic_multiplier = np.maximum(yield_function, 0) / (3 * shear_modulus + materials.hardening_modulus)
     return TrialState(stress, mean_stress, deviatoric_stress, equivalent_stress, yield_function, plastic_multiplier)
 
 def get_flow_direction(deviatoric_stress, equivalent_stress):
@@ -61,9 +61,9 @@ def get_flow_direction(deviatoric_stress, equivalent_stress):
     flow_direction[:, 3:] = 3 * deviatoric_stress[:, 3:] / equivalent_stress[:, None]
     return flow_direction
 
-def get_plastic_eigenstrain(strain, partition_materials, plastic_history):
+def get_plastic_eigenstrain(strain, materials, plastic_history):
     # ER-3 by radial return from the accepted history. The eigenstrain μ is the plastic strain.
-    trial = get_trial_state(strain, partition_materials, plastic_history)
+    trial = get_trial_state(strain, materials, plastic_history)
 
     plastic_strain = plastic_history.plastic_strain.copy()
     accumulated_plastic_strain = plastic_history.accumulated_plastic_strain.copy()
@@ -72,7 +72,7 @@ def get_plastic_eigenstrain(strain, partition_materials, plastic_history):
     yielding = trial.yield_function > 0
     yielding_deviatoric_stress = trial.deviatoric_stress[yielding]
     yielding_equivalent_stress = trial.equivalent_stress[yielding]
-    shear_modulus = partition_materials.L[yielding, 3, 3]
+    shear_modulus = materials.L[yielding, 3, 3]
     plastic_multiplier = trial.plastic_multiplier[yielding]
 
     flow_direction = get_flow_direction(yielding_deviatoric_stress, yielding_equivalent_stress)
@@ -85,17 +85,17 @@ def get_plastic_eigenstrain(strain, partition_materials, plastic_history):
 
     return PlasticState(plastic_strain, accumulated_plastic_strain), stress
 
-def get_eigenstrain_sensitivity(strain, partition_materials, plastic_history):
+def get_eigenstrain_sensitivity(strain, materials, plastic_history):
     # H_μ = ∂μ/∂ε at the current strain (ER-8), zero in partitions that stay elastic.
-    trial = get_trial_state(strain, partition_materials, plastic_history)
+    trial = get_trial_state(strain, materials, plastic_history)
 
     sensitivity = np.zeros((len(strain), 6, 6))
 
     yielding = trial.yield_function > 0
     yielding_deviatoric_stress = trial.deviatoric_stress[yielding]
     yielding_equivalent_stress = trial.equivalent_stress[yielding]
-    shear_modulus = partition_materials.L[yielding, 3, 3]
-    hardening_modulus = partition_materials.hardening_modulus[yielding]
+    shear_modulus = materials.L[yielding, 3, 3]
+    hardening_modulus = materials.hardening_modulus[yielding]
     plastic_multiplier = trial.plastic_multiplier[yielding]
 
     flow_direction = get_flow_direction(yielding_deviatoric_stress, yielding_equivalent_stress)
@@ -108,3 +108,7 @@ def get_eigenstrain_sensitivity(strain, partition_materials, plastic_history):
     sensitivity[yielding] = (radial_sensitivity[:, None, None] * flow_projector
                              + rotational_sensitivity[:, None, None] * (deviatoric_projector - flow_projector))
     return sensitivity
+
+def get_algorithmic_stiffness(strain, materials, plastic_history):
+    # L_t = dσ/dε = L (I - H_μ), consistent with the radial return.
+    return materials.L @ (np.eye(6) - get_eigenstrain_sensitivity(strain, materials, plastic_history))

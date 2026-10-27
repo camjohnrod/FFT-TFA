@@ -1,8 +1,12 @@
-# The offline step: the periodic hexahedral mesh and its materials, the 8-node element matrices, the FE influence
-# functions E and P of the composite (TFA), the Moulinec–Suquet kernel P0 of the homogeneous reference (CP and
-# Spectral LS), and the cache of E and P. Everything is built for a Discretization (a mesh and its partition lattice),
-# so the same code serves the partitions of CP and TFA and the element lattice of Spectral LS. get_problem() at the
-# end builds everything a run needs and times what each method's offline step costs.
+# The offline step: the periodic hexahedral mesh, its partitions and their clusters, the 8-node element matrices, the
+# FE influence functions E and P of the composite (TFA), the Moulinec–Suquet kernel P0 of the homogeneous reference (CP
+# and Spectral LS), and the cache of E and P. Everything is built for a Discretization (a mesh and its partition
+# lattice), so the same code serves CP's partitions and the element lattice of Spectral LS. get_problem() at the end
+# builds everything a run needs and times what each method's offline step costs.
+#
+# The grids: the fine mesh of elements; CP's uniform partitions, k × k columns of elements; and each partition's
+# clusters, its part in each phase (one cluster for a single-phase partition, two for a mixed one). Every method keeps
+# one material state per cluster, and TFA's regions are these clusters.
 
 import hashlib
 import sys
@@ -31,10 +35,6 @@ class Discretization(NamedTuple):
     @property
     def element_count(self):
         return self.element_number_per_side**2 * self.element_number_along_z
-
-    @property
-    def partition_count(self):
-        return self.partition_number_per_side**2
 
     @property
     def dof_count(self):
@@ -80,13 +80,27 @@ class Mesh(NamedTuple):
     # The strain-displacement matrix at each of the 8 Gauss points, shared by every element (8 × 6 × 24).
     B: np.ndarray
 
-class PartitionMaterials(NamedTuple):
-    # Everything a lattice's partitions are made of, one row per partition: the phase (0 matrix, 1 inclusion), the
-    # elastic stiffness and the yield properties.
+class Materials(NamedTuple):
+    # One row per material state (cluster): the phase (0 matrix, 1 fiber), the elastic stiffness and the yield
+    # properties.
     material_ids: np.ndarray
     L: np.ndarray
     yield_stress: np.ndarray
     hardening_modulus: np.ndarray
+
+class Clusters(NamedTuple):
+    # The single-phase parts of a lattice's partitions, ordered by partition, matrix before fiber, one material state
+    # each.
+    partition: np.ndarray          # the partition each cluster belongs to
+    volume_fraction: np.ndarray    # the cluster's share of its partition's volume
+    materials: Materials           # one row per cluster
+    element_cluster: np.ndarray    # the cluster of every element
+
+    def average(self, values):
+        # The volume average over the cell of one value per cluster (rows of values). Every partition has the same
+        # volume, so a cluster weighs its volume fraction over the number of partitions.
+        weights = self.volume_fraction.reshape(-1, *[1] * (np.ndim(values) - 1))
+        return np.sum(weights * values, axis=0) / (self.partition[-1] + 1)
 
 def get_grid_id(i, j, k, count_per_side):
     return i + count_per_side * j + count_per_side**2 * k
@@ -94,11 +108,9 @@ def get_grid_id(i, j, k, count_per_side):
 def is_inside_inclusion(centres):
     # Whether each point of the cross-section, one (x, y) row each, lies inside the inclusion.
     offsets_from_inclusion_axis = centres - config.domain_side_length / 2
-    if config.inclusion_shape == "circle":
-        return np.sum(offsets_from_inclusion_axis**2, axis=1) < config.inclusion_radius**2
     if config.inclusion_shape == "laminate":
-        return np.abs(offsets_from_inclusion_axis[:, 0]) < config.inclusion_side_length / 2
-    return np.all(np.abs(offsets_from_inclusion_axis) < config.inclusion_side_length / 2, axis=1)
+        return np.abs(offsets_from_inclusion_axis[:, 0]) < config.layer_thickness / 2
+    return np.sum(offsets_from_inclusion_axis**2, axis=1) < config.inclusion_radius**2
 
 def get_element_column_material_ids(discretization):
     # The geometry, resolved on the elements: 1 for an element column whose centre lies inside the inclusion, else 0,
@@ -107,24 +119,6 @@ def get_element_column_material_ids(discretization):
     centre_coordinates = (np.arange(discretization.element_number_per_side) + 0.5) * discretization.element_side_length
     x, y = np.meshgrid(centre_coordinates, centre_coordinates)
     return is_inside_inclusion(np.column_stack([x.ravel(), y.ravel()])).astype(int)
-
-def get_partition_material_ids(mesh):
-    # Each partition's material, read off its elements. Every method gives each partition one material law, so a
-    # partition holding both phases stops the run here, before any offline solve.
-    partition_count = mesh.discretization.partition_count
-    if mesh.element_material_ids.min() == mesh.element_material_ids.max():
-        raise ValueError("Every element is the same phase, so the cell is homogeneous: the inclusion is too small or "
-                         "too large for this element grid.")
-    inclusion_elements = np.bincount(mesh.element_partition_ids, weights=mesh.element_material_ids,
-                                     minlength=partition_count)
-    elements = np.bincount(mesh.element_partition_ids, minlength=partition_count)
-    mixed_partitions = (inclusion_elements > 0) & (inclusion_elements < elements)
-    if mixed_partitions.any():
-        raise ValueError(f"{np.count_nonzero(mixed_partitions)} of {partition_count} partitions contain both phases, "
-                         "but every partition must be a single phase: it has one material law. Align the inclusion "
-                         "with the partition grid, or use one partition per element (partition_number_per_side = "
-                         "element_number_per_side).")
-    return (inclusion_elements > 0).astype(int)
 
 def get_periodic_mesh(discretization):
     element_number_per_side = discretization.element_number_per_side
@@ -169,14 +163,27 @@ def get_L(elastic_modulus, poisson_ratio):
     L[3:, 3:] = shear_block
     return L
 
-def get_partition_materials(L_matrix, L_inclusion, partition_material_ids):
-    return PartitionMaterials(
-        material_ids=partition_material_ids,
-        L=get_value_per_material(L_matrix, L_inclusion, partition_material_ids),
-        yield_stress=get_value_per_material(config.matrix_yield_stress, config.inclusion_yield_stress,
-                                            partition_material_ids),
+def get_materials(L_matrix, L_inclusion, material_ids):
+    return Materials(
+        material_ids=material_ids,
+        L=get_value_per_material(L_matrix, L_inclusion, material_ids),
+        yield_stress=get_value_per_material(config.matrix_yield_stress, config.inclusion_yield_stress, material_ids),
         hardening_modulus=get_value_per_material(config.matrix_hardening_modulus, config.inclusion_hardening_modulus,
-                                                 partition_material_ids))
+                                                 material_ids))
+
+def get_clusters(mesh, L_matrix, L_inclusion):
+    # The clusters of the mesh's partitions: the elements of one partition and one phase. A cluster's key is
+    # 2 × partition + phase, so sorting the keys orders them by partition, matrix first.
+    if mesh.element_material_ids.min() == mesh.element_material_ids.max():
+        raise ValueError("Every element is the same phase, so the cell is homogeneous: the fiber is too small or too "
+                         "large for this element grid.")
+    cluster_keys, element_cluster = np.unique(2 * mesh.element_partition_ids + mesh.element_material_ids,
+                                              return_inverse=True)
+    discretization = mesh.discretization
+    elements_per_partition = discretization.elements_per_partition_side**2 * discretization.element_number_along_z
+    volume_fraction = np.bincount(element_cluster) / elements_per_partition
+    return Clusters(cluster_keys // 2, volume_fraction, get_materials(L_matrix, L_inclusion, cluster_keys % 2),
+                    element_cluster)
 
 ## ------- Element Matrices and Assembly ------- ##
 
@@ -221,9 +228,9 @@ def get_element_dofs(mesh):
     node_dofs = 3 * mesh.element_nodes[:, :, None] + np.arange(3)
     return node_dofs.reshape(-1, 24)
 
-def get_partition_components(element_partition_ids):
-    # The six entries of each element's partition in a partition-stacked vector such as ε, μ or b.
-    return 6 * element_partition_ids[:, None] + np.arange(6)
+def get_cluster_components(element_cluster):
+    # The six entries of each element's cluster in a cluster-stacked vector such as ε, μ or b.
+    return 6 * element_cluster[:, None] + np.arange(6)
 
 def assemble_element_blocks(element_blocks, element_rows, element_columns, shape):
     # Adds each element's block into a sparse global matrix at the given global rows and columns. Blocks that share
@@ -265,23 +272,22 @@ def get_F_macrostrain(mesh, L_per_element):
     return -assemble_element_blocks(get_F_elements(mesh, L_per_element), get_element_dofs(mesh), macrostrain_columns,
                                     (mesh.discretization.dof_count, 6))
 
-def get_F_eigenstrain(mesh, L_per_element):
-    # F_μ in ER-24: nodal loads per unit partition eigenstrain, one block of six columns per partition.
+def get_F_eigenstrain(mesh, L_per_element, clusters):
+    # F_μ in ER-24: nodal loads per unit cluster eigenstrain, one block of six columns per cluster.
     return assemble_element_blocks(get_F_elements(mesh, L_per_element), get_element_dofs(mesh),
-                                   get_partition_components(mesh.element_partition_ids),
-                                   (mesh.discretization.dof_count, 6 * mesh.discretization.partition_count))
+                                   get_cluster_components(clusters.element_cluster),
+                                   (mesh.discretization.dof_count, 6 * len(clusters.partition)))
 
-def get_partition_averaging_operator(mesh):
-    # A_ε in ER-24: maps nodal displacements to partition-average strain.
+def get_cluster_averaging_operator(mesh, clusters):
+    # A_ε in ER-24: maps nodal displacements to cluster-average strain.
     discretization = mesh.discretization
-    element_blocks = np.broadcast_to(get_integrated_B(mesh) / discretization.partition_volume,
-                                     (discretization.element_count, 6, 24))
-    return assemble_element_blocks(element_blocks, get_partition_components(mesh.element_partition_ids),
-                                   get_element_dofs(mesh), (6 * discretization.partition_count,
-                                                            discretization.dof_count))
+    cluster_volume = clusters.volume_fraction * discretization.partition_volume
+    element_blocks = get_integrated_B(mesh) / cluster_volume[clusters.element_cluster, None, None]
+    return assemble_element_blocks(element_blocks, get_cluster_components(clusters.element_cluster),
+                                   get_element_dofs(mesh), (6 * len(clusters.partition), discretization.dof_count))
 
-def get_influence_function_solver(mesh, K):
-    # Factorizes K once and returns solve(F), the partition-average strain response A_ε K⁻¹ F to every load column of
+def get_influence_function_solver(mesh, K, clusters):
+    # Factorizes K once and returns solve(F), the cluster-average strain response A_ε K⁻¹ F to every load column of
     # F, so that several sets of load columns share one factorization.
     free_dofs = get_free_dofs(mesh)
     K_free = K[free_dofs][:, free_dofs].tocsc()
@@ -289,7 +295,7 @@ def get_influence_function_solver(mesh, K):
     start_time = time.perf_counter()
     K_free_factorization = scipy.sparse.linalg.splu(K_free, permc_spec='MMD_AT_PLUS_A')
     print(f"{time.perf_counter() - start_time:.1f} s")
-    A = get_partition_averaging_operator(mesh)
+    A = get_cluster_averaging_operator(mesh, clusters)
 
     def solve(F):
         F_free = F.tocsr()[free_dofs].tocsc()
@@ -309,28 +315,27 @@ def get_influence_function_solver(mesh, K):
 
     return solve
 
-def get_influence_functions(mesh, L_per_element, include_P):
-    # E, and P when include_P (None otherwise), from one factorization of K, each with the seconds it took: E's
-    # include assembling and factorizing K, P's only its own solves. E's six load columns are solved on their own, so
-    # E is the same to the last bit whether or not P is built.
+def get_influence_functions(mesh, L_per_element, clusters, include_P):
+    # E, and P when include_P (None otherwise), on the clusters, from one factorization of K, each with the seconds it
+    # took: E's include assembling and factorizing K, P's only its own solves. E's six load columns are solved on their
+    # own, so E is the same to the last bit whether or not P is built.
     start_time = time.perf_counter()
-    solve = get_influence_function_solver(mesh, get_K(mesh, L_per_element))
+    solve = get_influence_function_solver(mesh, get_K(mesh, L_per_element), clusters)
     # ER-1: E is the applied macrostrain plus the fluctuation it causes; P is A_ε K⁻¹ F_μ (ER-24).
-    E = np.tile(np.eye(6), (mesh.discretization.partition_count, 1)) + solve(get_F_macrostrain(mesh, L_per_element))
+    E = np.tile(np.eye(6), (len(clusters.partition), 1)) + solve(get_F_macrostrain(mesh, L_per_element))
     E_seconds = time.perf_counter() - start_time
-    P = solve(get_F_eigenstrain(mesh, L_per_element)) if include_P else None
+    P = solve(get_F_eigenstrain(mesh, L_per_element, clusters)) if include_P else None
     P_seconds = time.perf_counter() - start_time - E_seconds
     return E, P, E_seconds, P_seconds
 
 ## ------- Reference Stiffness C0 and Kernel P0 (CP and Spectral LS) ------- ##
 
-def get_reference_L(E, L_per_partition, L_matrix):
-    # The homogeneous reference stiffness C0 chosen by config.reference_stiffness. Every partition has the same volume,
-    # so the averages are plain means over the partitions.
+def get_reference_L(E, clusters, L_matrix):
+    # The homogeneous reference stiffness C0 chosen by config.reference_stiffness: volume averages over the clusters.
     if config.reference_stiffness == "homogenized":
-        return np.mean(L_per_partition @ E.reshape(-1, 6, 6), axis=0)
+        return clusters.average(clusters.materials.L @ E.reshape(-1, 6, 6))
     if config.reference_stiffness == "voigt":
-        return np.mean(L_per_partition, axis=0)
+        return clusters.average(clusters.materials.L)
     return L_matrix
 
 # P0 is handled in two forms: in real space, one 6 × 6 block per partition offset P0[a_B - a_A] on a lattice indexed
@@ -404,8 +409,8 @@ def get_reference_kernel(discretization, reference_L):
 ## ------- Cache ------- ##
 
 # Increase whenever a code change alters E or P, so caches made by the old code are recomputed.
-# 2: the geometry is resolved on the elements, not the partitions.
-cache_version = 2
+# 2: the geometry is resolved on the elements, not the partitions. 3: E and P are built on clusters.
+cache_version = 3
 
 def get_cache_path(kind, parameters):
     # One file per parameter set, so switching between configurations reuses each one's operators instead of
@@ -443,9 +448,10 @@ def get_cached(names, parameters, compute):
         np.savez(cache_path, **{name: arrays[name], "build_seconds": build_seconds[name]})
     return arrays, build_seconds
 
-def get_E_and_P(mesh, L_matrix, L_inclusion, include_P):
-    # E, and the dense P, (6 × partitions)² doubles, only when include_P (P is None otherwise), and the seconds they
-    # took to build, by name ("E", "P"), measured when they were computed, even if they now come from the cache.
+def get_E_and_P(mesh, clusters, L_matrix, L_inclusion, include_P):
+    # E, and the dense P, (6 × clusters)² doubles, only when include_P (P is None otherwise), on the clusters, and the
+    # seconds they took to build, by name ("E", "P"), measured when they were computed, even if they now come from the
+    # cache.
     discretization = mesh.discretization
     E_P_parameters = {"cache_version": cache_version,
                       "domain_side_length": config.domain_side_length,
@@ -455,32 +461,33 @@ def get_E_and_P(mesh, L_matrix, L_inclusion, include_P):
                       "partition_number_per_side": discretization.partition_number_per_side,
                       "L_matrix": L_matrix,
                       "L_inclusion": L_inclusion}
-    if config.inclusion_shape in ("square", "laminate"):
-        E_P_parameters["inclusion_side_length"] = config.inclusion_side_length
+    if config.inclusion_shape == "laminate":
+        E_P_parameters["layer_thickness"] = config.layer_thickness
     else:
         E_P_parameters["inclusion_radius"] = config.inclusion_radius
 
     def compute():
         E, P, E_seconds, P_seconds = get_influence_functions(
-            mesh, get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids), include_P)
+            mesh, get_value_per_material(L_matrix, L_inclusion, mesh.element_material_ids), clusters, include_P)
         return {"E": E, "P": P}, {"E": E_seconds, "P": P_seconds}
 
     E_P, build_seconds = get_cached(("E", "P") if include_P else ("E",), E_P_parameters, compute)
     if not include_P:
         return E_P["E"], None, build_seconds
     # Column-major, so the columns of a run of consecutive partitions are contiguous and P products can read just the
-    # yielding partitions' columns without copying them (tfa_model.apply_P_to_partitions).
+    # yielding clusters' columns without copying them (tfa_model.apply_P_to_partitions).
     return E_P["E"], np.asfortranarray(E_P["P"]), build_seconds
 
 ## ------- Problem ------- ##
 
 class Lattice(NamedTuple):
-    # A partition lattice with what an LS method on it needs: its partitions' materials and its P0 kernel.
-    partition_materials: PartitionMaterials
+    # A partition lattice with what an LS method on it needs: its clusters and its P0 kernel.
+    clusters: Clusters
     P0_transformed: np.ndarray
 
 class Problem(NamedTuple):
-    # Everything a run needs. CP and TFA share the partitions; E and P are None when no method needs them.
+    # Everything a run needs: CP's partitions with their clusters, which are also TFA's regions; E and P on those
+    # clusters, None when no method needs them.
     partitions: Lattice
     E: np.ndarray
     P: np.ndarray
@@ -499,29 +506,28 @@ def get_problem():
     mesh = get_periodic_mesh(get_partition_discretization())
     L_matrix = get_L(config.elastic_modulus_matrix, config.poisson_ratio_matrix)
     L_inclusion = get_L(config.elastic_modulus_inclusion, config.poisson_ratio_inclusion)
-    partition_materials = get_partition_materials(L_matrix, L_inclusion, get_partition_material_ids(mesh))
+    clusters = get_clusters(mesh, L_matrix, L_inclusion)
     partition_seconds = time.perf_counter() - start_time
 
     E, P, build_seconds = None, None, {}
     if config.include_tfa_model or config.reference_stiffness == "homogenized":
-        E, P, build_seconds = get_E_and_P(mesh, L_matrix, L_inclusion, include_P=config.include_tfa_model)
+        E, P, build_seconds = get_E_and_P(mesh, clusters, L_matrix, L_inclusion, include_P=config.include_tfa_model)
     start_time = time.perf_counter()
-    reference_L = get_reference_L(E, partition_materials.L, L_matrix)
+    reference_L = get_reference_L(E, clusters, L_matrix)
     reference_seconds = time.perf_counter() - start_time
     if config.reference_stiffness == "homogenized":
         reference_seconds += build_seconds["E"]
     print(f"reference stiffness C0: {config.reference_stiffness}, C0_1111 = {reference_L[0, 0] / 1e6:.2f} MPa")
     start_time = time.perf_counter()
-    partitions = Lattice(partition_materials, get_reference_kernel(mesh.discretization, reference_L))
+    partitions = Lattice(clusters, get_reference_kernel(mesh.discretization, reference_L))
     offline_seconds = {"CP": partition_seconds + reference_seconds + time.perf_counter() - start_time}
 
     spectral_lattice = None
     if config.include_spectral_ls:
         start_time = time.perf_counter()
-        spectral_discretization = get_spectral_discretization()
-        spectral_materials = get_partition_materials(
-            L_matrix, L_inclusion, get_partition_material_ids(get_periodic_mesh(spectral_discretization)))
-        spectral_lattice = Lattice(spectral_materials, get_reference_kernel(spectral_discretization, reference_L))
+        spectral_mesh = get_periodic_mesh(get_spectral_discretization())
+        spectral_lattice = Lattice(get_clusters(spectral_mesh, L_matrix, L_inclusion),
+                                   get_reference_kernel(spectral_mesh.discretization, reference_L))
         # C0 is read off the partitions (Voigt and homogenized), so Spectral LS needs them built too.
         offline_seconds["Spectral LS"] = partition_seconds + reference_seconds + time.perf_counter() - start_time
     if config.include_tfa_model:

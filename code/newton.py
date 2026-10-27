@@ -1,6 +1,7 @@
-# What every method shares to solve a load step by Newton–GMRES: the relative residual it converges on, the
-# convergence test, the GMRES solve of a Newton correction, the result of a step, and the errors that end a method's
-# load path early.
+# What every method shares to solve a load step by Newton–GMRES: the Newton loop with its backtracking line search, the
+# relative residual it converges on, the convergence test, the GMRES solve of a Newton correction, the result of a
+# step, and the errors that end a method's load path early. A method supplies only how to evaluate its residual at a
+# strain and how to compute a Newton correction there.
 
 from typing import Callable, NamedTuple
 import numpy as np
@@ -17,11 +18,19 @@ class StepResult(NamedTuple):
     residual_history: np.ndarray
     gmres_iteration_count: int
 
+class Evaluation(NamedTuple):
+    # A method's state at one strain: the strain itself (a method may adjust it while evaluating, as TFA's elastic reset
+    # does), the candidate plastic state and stress, and the residual.
+    strain: np.ndarray
+    plastic_state: PlasticState
+    stress: np.ndarray
+    residual: np.ndarray
+
 class Solver(NamedTuple):
-    # A method ready to run along the load path: solve_step(macro_strain, partition_materials, plastic_history)
-    # returns a StepResult, on the lattice partition_materials describes.
+    # A method ready to run along the load path: solve_step(macro_strain, plastic_history) returns a StepResult whose
+    # stress and plastic state have one row per cluster of clusters (fe.Clusters).
     solve_step: Callable
-    partition_materials: tuple
+    clusters: tuple
 
 class LoadPathAbandoned(RuntimeError):
     # A load step the method cannot solve. The method stops there; the others carry on.
@@ -37,16 +46,17 @@ class MaterialFullySoftened(LoadPathAbandoned):
 # Engineering shear (ER-2) is twice the tensor shear, so its squares are weighted by ½ to give the tensor norm.
 tensor_norm_weights = np.array([1, 1, 1, 0.5, 0.5, 0.5])
 
-def get_strain_norm(strain):
-    # The root mean square over the partitions of each partition's tensor norm.
+def get_strain_norm(strain, average=np.mean):
+    # The root mean square of each row's tensor norm, the mean taken by average: a plain mean for rows of equal
+    # volume (partitions), a volume average (Clusters.average) for TFA's clusters.
     squared_tensor_norms = np.sum(tensor_norm_weights * np.atleast_2d(strain)**2, axis=1)
-    return np.sqrt(np.mean(squared_tensor_norms))
+    return np.sqrt(average(squared_tensor_norms))
 
-def get_relative_residual(residual, macro_strain):
+def get_relative_residual(residual, macro_strain, average=np.mean):
     # The strain residual relative to the imposed strain, never divided by less than residual_strain_scale_floor
     # (3_tfa_baseline.md section 12).
     strain_scale = max(get_strain_norm(macro_strain), config.residual_strain_scale_floor)
-    return get_strain_norm(residual) / strain_scale
+    return get_strain_norm(residual, average) / strain_scale
 
 def has_converged(residual_history, divergence_limit):
     # Whether the latest relative residual is below convergence_tolerance. Diverging means exceeding divergence_limit
@@ -62,6 +72,36 @@ def has_converged(residual_history, divergence_limit):
         raise SolverDidNotConverge(f"did not converge within {config.newton_max_iterations} Newton iterations "
                                    f"(relative residual {relative_residual:.3e})")
     return False
+
+def solve_load_step(evaluate, get_correction, initial_strain, macro_strain, divergence_limit, average=np.mean):
+    # Newton from initial_strain: evaluate(strain) returns an Evaluation, get_correction(evaluation) returns the Newton
+    # correction there and its GMRES iteration count. Each correction is applied through take_step's line search.
+    # average is how the residual norm averages over the unknowns' rows (get_strain_norm).
+    current = evaluate(initial_strain)
+    residual_history = [get_relative_residual(current.residual, macro_strain, average)]
+    gmres_iteration_count = 0
+    while not has_converged(residual_history, divergence_limit):
+        correction, iteration_count = get_correction(current)
+        gmres_iteration_count += iteration_count
+        current, relative_residual = take_step(evaluate, current, correction, residual_history[-1], macro_strain,
+                                               average)
+        residual_history.append(relative_residual)
+    return StepResult(current.strain, current.stress, current.plastic_state, np.array(residual_history),
+                      gmres_iteration_count)
+
+def take_step(evaluate, current, correction, relative_residual, macro_strain, average):
+    # Backtracking line search: the full Newton step if it lowers the relative residual enough (by the fraction
+    # line_search_sufficient_decrease of the step length), otherwise the step shortened by line_search_step_reduction,
+    # at most line_search_max_reductions times; the shortest step is taken if none does. Where the full step
+    # works, this is plain Newton.
+    step_length = 1.0
+    for _ in range(config.line_search_max_reductions + 1):
+        trial = evaluate(current.strain + step_length * correction)
+        trial_relative_residual = get_relative_residual(trial.residual, macro_strain, average)
+        if trial_relative_residual < (1 - config.line_search_sufficient_decrease * step_length) * relative_residual:
+            break
+        step_length *= config.line_search_step_reduction
+    return trial, trial_relative_residual
 
 def solve_newton_correction(apply_jacobian, residual):
     # Solves J δε = -r by GMRES, with J given as its product apply_jacobian on partition fields (partitions × 6).

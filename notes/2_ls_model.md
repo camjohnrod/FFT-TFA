@@ -14,7 +14,7 @@ Sections 1-7 state the assumptions, derive the model, explain its approximation,
 
 - A connected periodic RVE $\Theta$, small strains, perfect bonding, no body forces, and prescribed mean strain $\bar{\boldsymbol\varepsilon}$.
 - Periodic displacement fluctuation $\mathbf u$; fix its arbitrary translation by zero mean or by pinning one node. These choices give the same strains.
-- Fixed, symmetric positive-definite elastic stiffness $\mathbf L^A$ in each partition $\Omega_A$. Every partition contains one material. Mixed-material partitions require an additional constitutive construction and are not covered here.
+- Fixed, symmetric positive-definite elastic stiffness $\mathbf L^A$ in each partition $\Omega_A$. A partition may contain both phases; Section 4.4 gives the constitutive construction for it (added 2026-10-26).
 - For the constitutive specialization developed here, use isotropic elasticity and associative, rate-independent $J_2$ plasticity with linear isotropic hardening. Require positive shear and bulk moduli, $H^A\geq0$, and initial yield stress $\sigma_{\mathrm y0}^A>0$. One local backward-Euler return map is evaluated at the **partition-average total strain**, with one plastic history per partition. Purely elastic phases are also allowed.
 - During load step $n+1$, the committed history $\mathbf z_n^A=(\boldsymbol\mu_n^A,p_n^A)$ stays fixed while nonlinear trial strains change. Candidate histories are committed only after convergence. The scalar $p\geq0$ is accumulated equivalent plastic strain; $\boldsymbol\mu$ is plastic strain.
 - Choose a fixed, homogeneous, symmetric positive-definite reference stiffness $\mathbf C_0$. Changing it changes the approximation defined below, not just the solver.
@@ -23,7 +23,7 @@ Section 1.4 specifies the local return map. An update at average strain need not
 
 ### 1.2 Spatial discretization assumptions
 
-For a concrete three-dimensional realization, take $N=n_e^3$ regular Hex8 elements with $2\times2\times2$ Gauss integration and $M=n_p^3$ congruent cubic partitions. Require $n_e/n_p$ to be an integer and material interfaces to lie on partition boundaries. The fine reference FE mesh, quadrature, and partition averages must respect translations by one partition.
+For a concrete three-dimensional realization, take $N=n_e^3$ regular Hex8 elements with $2\times2\times2$ Gauss integration and $M=n_p^3$ congruent cubic partitions. Require $n_e/n_p$ to be an integer. Material interfaces need not lie on partition boundaries (Section 4.4). The fine reference FE mesh, quadrature, and partition averages must respect translations by one partition.
 
 The partitions cover $\Theta$ without overlapping interiors. Their indicators satisfy $\chi_A(x)=1$ in $\Omega_A$, zero elsewhere, and $\sum_A\chi_A=1$ almost everywhere.
 
@@ -297,6 +297,34 @@ $$
 
 For congruent partitions $c^A=1/M$. The computed mean is automatic at a converged root if the operator satisfies this identity. It does not imply that every partition strain equals the prescribed mean.
 
+### 4.4 Partitions holding both phases (added 2026-10-26)
+
+The equation above uses each partition's polarization only through its stress $\boldsymbol\sigma^A$ at the partition strain $\boldsymbol\varepsilon^A$. A partition that holds both phases needs a constitutive law for that pair. Call its part in each phase a **cluster**, with volume fractions $c_m^A+c_f^A=1$, one material state (strain, plastic strain, history) each:
+
+**(LS-22) Composite partition law**
+
+$$
+c_m^A\boldsymbol\varepsilon_m^A+c_f^A\boldsymbol\varepsilon_f^A=\boldsymbol\varepsilon^A,
+\qquad
+\boldsymbol\sigma_m(\boldsymbol\varepsilon_m^A;\mathbf z_{m,n}^A)=\boldsymbol\sigma_f(\boldsymbol\varepsilon_f^A;\mathbf z_{f,n}^A),
+\qquad
+\boldsymbol\sigma^A=c_m^A\boldsymbol\sigma_m^A+c_f^A\boldsymbol\sigma_f^A .
+$$
+
+Both clusters carry the same stress (equal stress, the Reuss rule). Requiring instead the same polarization in both clusters, $\boldsymbol\sigma_m-\mathbf C_0\boldsymbol\varepsilon_m=\boldsymbol\sigma_f-\mathbf C_0\boldsymbol\varepsilon_f$ (constant polarization taken pointwise, Brisard–Dormieux's rule in elasticity), fixes the ratio of the two clusters' strains through $\mathbf C_0$ alone: with $\mathbf C_0$ equal to the matrix stiffness the fiber cluster takes no strain, with $\mathbf C_0$ between the phases the clusters strain in opposite directions and fiber-rich partitions lose stiffness, and with plasticity the local problem fails for these choices. LS-22 is that rule's limit $\mathbf C_0\to\mathbf0$ inside the split only; the global $\mathbf C_0$ of LS-7 is unchanged. Since LS-7 uses only $\boldsymbol\sigma^A$, the polarization relative to $\mathbf C_0$ is then uniform in each partition on average, not pointwise.
+
+The split is solved per mixed partition by Newton on $\boldsymbol\varepsilon_f^A$ with $\boldsymbol\varepsilon_m^A=(\boldsymbol\varepsilon^A-c_f^A\boldsymbol\varepsilon_f^A)/c_m^A$, and differentiating LS-22 gives the partition tangent for LS-20:
+
+$$
+\mathbf D_f=\big(\mathbf L_{t,f}+\tfrac{c_f}{c_m}\mathbf L_{t,m}\big)^{-1}\tfrac{1}{c_m}\mathbf L_{t,m},
+\qquad
+\mathbf D_m=\tfrac{1}{c_m}(\mathbf I-c_f\mathbf D_f),
+\qquad
+\mathbf L_t^A=c_m\mathbf L_{t,m}\mathbf D_m+c_f\mathbf L_{t,f}\mathbf D_f .
+$$
+
+LS-22 is exact for a laminate loaded in transverse shear and wrong, in that limit, for loading along the layers; it uses no interface direction. Measured on circular fibers against element-level TFA (one region per element), the macroscopic stress stayed within 1–5 %, about as close as one partition per element; stresses and plastic strains next to the fiber were as close with $2\times2$-element partitions and 2–5 times further off with $4\times4$. TFA uses the same clusters as its regions, so the two models share their material states.
+
 ## 5. Understand exactly what is approximated
 
 ### 5.1 The discarded polarization fluctuation
@@ -548,7 +576,7 @@ The elastic branch has $\mathbf H_\mu^A=\mathbf0$, including elastic unloading f
 
 1. Hold $\mathbf z_n$ fixed. Initialize $\mathbf e^{(0)}=\mathbf e_n+\mathbf1_M\otimes(\bar{\boldsymbol\varepsilon}_{n+1}-\bar{\boldsymbol\varepsilon}_n)$.
 2. Evaluate candidate stress/history and $\mathbf R$. Check a scaled strain residual and verify that all values are finite.
-3. If not converged, solve $\mathbf J\Delta\mathbf e=-\mathbf R$ by GMRES using LS-20, and update the strain guess. Check the linear solver's status; globalization or load-step reduction may be needed if full Newton fails.
+3. If not converged, solve $\mathbf J\Delta\mathbf e=-\mathbf R$ by GMRES using LS-20, and update the strain guess through a backtracking line search: take $\alpha\Delta\mathbf e$ with $\alpha=1,\tfrac12,\tfrac14,\ldots$, the first that lowers the scaled residual by the fraction $10^{-4}\alpha$ (the code applies the same search to every method). Check the linear solver's status.
 4. Repeat from the same committed history. On convergence, commit the final candidate history and return LS-9. On failure, do not commit it.
 
 Use a convergence criterion such as $\|\mathbf R\|\le\epsilon_{\rm abs}+\epsilon_{\rm rel}\|\mathbf e\|$, where $\epsilon_{\rm abs}$ has a meaningful strain scale and $\epsilon_{\rm rel}$ is dimensionless. The absolute term avoids division by a vanishing strain norm at zero loading. Choose Krylov tolerances and restart length to control linear-solve error and storage; they are algorithm settings, not part of the reduced constitutive model.

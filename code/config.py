@@ -25,16 +25,15 @@ import numpy as np  # noqa: E402, after the thread count is set
 # A periodic square cell of side domain_side_length, meshed with element_number_per_side² × element_number_along_z
 # hexahedra and divided into partition_number_per_side² partitions, each a column of elements through the thickness.
 # element_number_per_side must be a multiple of partition_number_per_side. inclusion_shape is one of
-#   "square"    a centred square inclusion of side inclusion_side_length
-#   "circle"    a centred circular inclusion of radius inclusion_radius
-#   "laminate"  a centred inclusion layer of thickness inclusion_side_length, with interfaces normal to x
-# Each partition has one material law, so the run stops if a partition holds both phases: a square or laminate needs
-# its edges on partition edges (0.5e-3 does on 32 partitions), and a circle needs one partition per element
-# (partition_number_per_side = element_number_per_side).
+#   "circle"    a centred circular fiber of radius inclusion_radius, running through the thickness
+#   "laminate"  a centred fiber layer of thickness layer_thickness, with interfaces normal to x (check.py uses it: its
+#               solution is known exactly)
+# The geometry is resolved on the elements. A partition may hold both phases: its part in each phase is a cluster, with
+# its own material state.
 domain_side_length          = 1e-3
-inclusion_shape             = "square"
-inclusion_side_length       = 0.5e-3
+inclusion_shape             = "circle"
 inclusion_radius            = 0.35e-3
+layer_thickness             = 0.5e-3
 element_number_per_side     = 64
 element_number_along_z      = 1
 partition_number_per_side   = 32
@@ -101,10 +100,23 @@ newton_max_iterations       = 50
 newton_krylov_tolerance     = 1e-3
 newton_krylov_restart       = 50
 newton_krylov_max_restarts  = None
+# Each Newton correction goes through a backtracking line search: the full step if it lowers the relative residual by
+# at least the fraction line_search_sufficient_decrease of the step length, otherwise the step times
+# line_search_step_reduction, at most line_search_max_reductions times (the shortest step is taken if none does).
+# Where full Newton steps work, the line search changes nothing.
+line_search_sufficient_decrease = 1e-4
+line_search_step_reduction  = 0.5
+line_search_max_reductions  = 10
 # A method gives up the rest of the load path when its relative residual exceeds its divergence limit times the
 # larger of 1 and the step's first relative residual. ls_divergence_limit is for CP and Spectral LS.
 ls_divergence_limit         = 1e3
 tfa_divergence_limit        = 1.0
+
+# In a partition holding both phases, the partition strain is shared between the matrix and fiber clusters so that
+# both carry the same stress, found by Newton until the stress difference is below mixed_partition_tolerance times the
+# largest cluster stress, within mixed_partition_max_iterations.
+mixed_partition_tolerance   = 1e-12
+mixed_partition_max_iterations = 50
 
 ## ------- Offline Step ------- ##
 
@@ -114,10 +126,13 @@ offline_columns_per_solve   = 100
 
 ## ------- Figures ------- ##
 
-# Colour-scale limits (MPa) of the von Mises stress maps, so that maps from different runs can share a scale. None
-# takes that limit from the plotted maps.
+# Colour-scale limits of the von Mises stress maps (MPa) and the accumulated plastic strain maps (%), so that maps from
+# different runs can share a scale. None takes that limit from the plotted maps; for plastic strain, from the Spectral
+# LS map alone (every map when Spectral LS is off), so the other methods are read on its scale.
 von_mises_min_MPa           = None
-von_mises_max_MPa           = None
+von_mises_max_MPa           = 2.0
+plastic_strain_min_percent  = None
+plastic_strain_max_percent  = None
 
 ## ------- Checks (check.py) ------- ##
 
@@ -143,16 +158,16 @@ def check_inputs():
     if element_number_per_side % partition_number_per_side != 0:
         raise ValueError("The number of elements per side must be a multiple of the number of partitions per side.")
 
-    if inclusion_shape in ("square", "laminate"):
-        if not 0 < inclusion_side_length < domain_side_length:
-            raise ValueError("The inclusion's side (the layer's thickness for the laminate) must be positive and below "
-                             f"the domain side, so matrix surrounds it. Got {inclusion_side_length}.")
-    elif inclusion_shape == "circle":
+    if inclusion_shape == "circle":
         if not 0 < inclusion_radius < domain_side_length / 2:
-            raise ValueError("The circular inclusion's radius must be positive and below half the domain side, so "
-                             f"neighbouring inclusions do not touch. Got {inclusion_radius}.")
+            raise ValueError("The fiber's radius must be positive and below half the domain side, so neighbouring "
+                             f"fibers do not touch. Got {inclusion_radius}.")
+    elif inclusion_shape == "laminate":
+        if not 0 < layer_thickness < domain_side_length:
+            raise ValueError("The fiber layer's thickness must be positive and below the domain side, so matrix "
+                             f"surrounds it. Got {layer_thickness}.")
     else:
-        raise ValueError(f"inclusion_shape must be \"square\", \"circle\" or \"laminate\". Got {inclusion_shape!r}.")
+        raise ValueError(f"inclusion_shape must be \"circle\" or \"laminate\". Got {inclusion_shape!r}.")
 
     # The radial return divides by 3G + H, so at or below zero it has no admissible solution.
     for phase, elastic_modulus, poisson_ratio, yield_stress, hardening_modulus in (
@@ -169,7 +184,9 @@ def check_inputs():
     if reference_stiffness not in ("matrix", "voigt", "homogenized"):
         raise ValueError("reference_stiffness must be \"matrix\", \"voigt\" or \"homogenized\". "
                          f"Got {reference_stiffness!r}.")
-    if von_mises_min_MPa is not None and von_mises_max_MPa is not None and von_mises_min_MPa >= von_mises_max_MPa:
-        raise ValueError("The von Mises colour-scale minimum must be below its maximum.")
+    for name, minimum, maximum in (("von Mises", von_mises_min_MPa, von_mises_max_MPa),
+                                   ("plastic strain", plastic_strain_min_percent, plastic_strain_max_percent)):
+        if minimum is not None and maximum is not None and minimum >= maximum:
+            raise ValueError(f"The {name} colour-scale minimum must be below its maximum.")
 
 check_inputs()

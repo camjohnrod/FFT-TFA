@@ -4,19 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A research codebase for reduced-order homogenization of elastoplastic composites (a stiff square, circular or
-laminate inclusion in a softer J2-plastic matrix) on uniform partitions. The research question is how the operator
-through which partitions interact decides accuracy and cost (README, "Research question";
-`notes/1_research_context.md`). Three methods, all solved by Newton–GMRES, in this order everywhere (table, figures,
-code):
+A research codebase for reduced-order homogenization of elastoplastic composites (a stiff circular fiber, or a
+laminate layer for the exact checks, in a softer J2-plastic matrix). Three grids: elements (the FE mesh, which resolves
+the geometry); CP's uniform partitions (k × k element columns); and clusters, each partition's part in each phase
+(`fe.Clusters`, built by the shared `fe.get_clusters`: one cluster per single-phase partition, two per mixed one).
+Every method keeps one material state per cluster. The research question is how the operator through which material
+states interact decides accuracy and cost (README, "Research question"; `notes/1_research_context.md`). Three methods,
+all solved by Newton–GMRES with a backtracking line search, in this order everywhere (table, figures, code):
 
 - **CP**: the partition-averaged Lippmann–Schwinger (LS) equation of `notes/2_ls_model.md` on the partitions, the
   method under development. Its only nonlocal operator is the FFT convolution with the Moulinec–Suquet kernel P0,
-  averaged over partitions (LS-21). Always solved.
+  averaged over partitions (LS-21). Unknowns are partition strains; a mixed partition's strain is shared between its
+  two clusters at equal stress (`ls_model.get_cluster_strain`), the C0 → 0 limit of the user's slide-14 rule (equal
+  polarization in both clusters); with C0 itself (matrix) that rule gives the fiber zero strain and fails with
+  plasticity. Always solved.
 - **Spectral LS** (`config.include_spectral_ls`): the same LS code on the element lattice (one partition per element
   column), i.e. the standard Moulinec–Suquet spectral method. A comparison, not a reference solution.
 - **TFA** (`config.include_tfa_model`): the actual E/P model of `notes/3_tfa_baseline.md` (ER-4,
-  `r = ε - Eε̄ - Pμ(ε)`), Strategy 2 (Newton–GMRES, unpreconditioned), the baseline.
+  `r = ε - Eε̄ - Pμ(ε)`), Strategy 2 (Newton–GMRES, unpreconditioned), the baseline. Its regions (the notes'
+  "partitions") are CP's clusters, so E and P are built on clusters and CP and TFA share their material states.
 
 CP and TFA are *different* models: their difference is modelling error, not a solver bug. Use these method names
 exactly; "fine LS", "coarse LS", "LS Newton" and "MAIN_*" are retired names.
@@ -33,13 +39,16 @@ map onto the notes' symbols and numbered equations (ER-*, LS-*), which code comm
 
 ```bash
 python code/run.py           # solve config.py's problem with every enabled method; table + figures to code/output/
-python code/check.py         # the test: two small problems, a few seconds
-python code/check.py save    # the same, then save the results as the reference (only if all passed)
+python code/check.py         # the test: three small problems, a few seconds
+python code/check.py save    # the same, minus the old-reference comparison, then save the new reference
 ```
 
-There is no pytest suite. `check.py` solves a cyclic laminate (every method must match the exact solution in every
-partition, each phase on its own stress scale, to `laminate_tolerance`) and a square inclusion; on both every method
-must complete every step and, once `code/cache/check_reference.npz` exists, reproduce it bit for bit. For a change
+There is no pytest suite. `check.py` solves a cyclic laminate aligned with the partitions and a laminate whose
+interfaces cut partitions, loaded in transverse shear where the equal-stress split is exact (every method must match
+the exact solution in every cluster, each phase on its own stress scale, to `laminate_tolerance`), and a circle with
+mixed partitions; on all, every method must complete every step and, once `code/cache/check_reference.npz` exists,
+reproduce it bit for bit. A wrong split tangent only slows Newton, so only the reference comparison catches it. For a
+change
 meant to leave results alone (a refactor), run `check.py save` before and `check.py` after. `check.py` pins every
 problem and solver input in `pinned_inputs` and sets them on the `config` module in memory (then calls
 `config.check_inputs()`), with a temporary cache folder, so it never touches the user's config, cache or outputs.
@@ -76,35 +85,44 @@ imports no project module; only `run.py` calls it.
 | Module | Contents |
 |---|---|
 | `config.py` | every input, `check_inputs()`, folders |
-| `run.py` | `get_applied_macro_strain`, `get_solvers` (method name → `Solver`), `run_load_path`, `solve_all`, timing table, figures, `main` |
-| `fe.py` | `Discretization` (partition and spectral), periodic mesh, materials, 8-node element matrices, E and P, C0, the Moulinec–Suquet P0 and its partition average, cache, `get_problem()` → `Problem` |
-| `newton.py` | `StepResult`, `Solver`, the `LoadPathAbandoned` errors, relative residual, `has_converged`, `solve_newton_correction` (GMRES with iteration count) |
-| `ls_model.py` | LS residual, Jacobian and Newton step, the warm-starting `LSSolver`, `get_ls_solver(lattice, …)` for CP and Spectral LS |
-| `tfa_model.py` | TFA residual with the elastic reset, column-restricted P products, Newton step, `get_tfa_solver` |
-| `material.py` | vectorized J2 radial return and its sensitivity H_μ, von Mises stress |
-| `plots.py` | stress–strain curves, cross-section, von Mises maps, `method_styles` keyed by method name |
+| `run.py` | `get_applied_macro_strain`, `get_solvers` (method name → `Solver`), `run_load_path` (per-cluster stress and accumulated plastic strain), `solve_all`, timing table, figures (element maps via `get_element_map`, each method's cells via `get_cell_maps`), `main` |
+| `fe.py` | `Discretization` (partition and spectral), periodic mesh, `Materials`, `Clusters` and `get_clusters`, 8-node element matrices, E and P on clusters, C0, the Moulinec–Suquet P0 and its partition average, cache, `get_problem()` → `Problem` |
+| `newton.py` | `solve_load_step` (the one Newton loop) and `take_step` (line search), `Evaluation`, `StepResult`, `Solver`, the `LoadPathAbandoned` errors, relative residual, `has_converged`, `solve_newton_correction` (GMRES with iteration count) |
+| `ls_model.py` | the partition stress from its clusters (`get_cluster_strain`: equal-stress split of mixed partitions; `get_partition_stress`, `get_partition_tangent`), LS residual, Jacobian and Newton step, the warm-starting `LSSolver`, `get_ls_solver(lattice, …)` for CP and Spectral LS |
+| `tfa_model.py` | TFA residual with the elastic reset, column-restricted P products, Newton step, `get_tfa_solver` (on CP's clusters) |
+| `material.py` | vectorized J2 radial return, its sensitivity H_μ and algorithmic stiffness L_t, von Mises stress |
+| `plots.py` | stress–strain curves, cross-section (one panel per method with its cells), field maps (`plot_field_maps`: von Mises and plastic strain), `method_styles` keyed by method name |
 | `check.py` | the checks, and the laminate's exact solution (Newton on ε11, γ12, γ13 of the matrix) |
 
 Non-obvious points:
 - **Strain convention (ER-2):** engineering shear, `(ε11, ε22, ε33, 2ε12, 2ε23, 2ε13)`. `get_relative_residual`
   weights shear by ½, and divides by the imposed strain's norm but never by less than `residual_strain_scale_floor`.
 - **No global lattice size online:** solvers, the FFT and the load path take sizes from the arrays they are given
-  (`reshape(-1, 6)`, the kernel's shape, `len(partition_materials.L)`), never from `config.partition_*` or
+  (`reshape(-1, 6)`, the kernel's shape, the `Clusters` they carry), never from `config.partition_*` or
   `config.element_*`; that is what lets CP and Spectral LS run on different lattices with the same code.
 - **Half spectrum:** P0 and every lattice field are real, so `P0_transformed` holds only `rfftn`'s half
   (shape `(N, N//2 + 1, 6, 6)`), transformed back with `irfftn(..., s=(N, N))`. Anything new reading it must too.
-- **Induced strain (TFA):** within a step Pμ = Pμₙ + PΔμ, Δμ zero outside yielding partitions. P is stored
-  column-major so each run of consecutive yielding partitions is a contiguous column block (`apply_P_to_partitions`);
+- **Induced strain (TFA):** within a step Pμ = Pμₙ + PΔμ, Δμ zero outside yielding clusters. P is stored
+  column-major so each run of consecutive yielding clusters is a contiguous column block (`apply_P_to_partitions`);
   Newton's Jacobian products use the same function. Don't fancy-index `P[:, columns]`: the copy costs more than the
   full product.
-- **Geometry and partitions:** geometry is resolved on element-column centres; `get_partition_material_ids` stops the
-  run before any offline solve if a partition holds both phases. One z-layer of partitions spans the thickness.
+- **Geometry, partitions, clusters:** geometry is resolved on element-column centres. Clusters are ordered by
+  partition, matrix first, so a mixed partition's fiber cluster directly follows its matrix cluster. Clusters have
+  unequal volumes: every cell average goes through `Clusters.average` (volume-weighted; written so that with one
+  cluster per partition it is bit-identical to a plain mean), including the macroscopic stress and TFA's residual
+  norm. Results (`LoadPathResult`, maps) are per cluster; maps paint each element with its cluster's value, and
+  unset plastic strain colour limits come from the Spectral LS map (clipping the others). One
+  z-layer of partitions spans the thickness.
+- **Line search:** `newton.solve_load_step` is the one Newton loop; `take_step` tries the full step and halves it until
+  the relative residual drops by `line_search_sufficient_decrease` × step. Where full steps work it changes nothing
+  (bit-identical on every earlier test problem); it fixed the step-1 failure when the inclusion can yield and the
+  stalls with mixed partitions. Backtracking evaluations cost residual evaluations that show only in the time.
 - **E is built only when needed:** by TFA, or by `reference_stiffness = "homogenized"`. A CP/Spectral LS run with
   `"matrix"` or `"voigt"` C0 does no FE solve at all. C0 changes the LS answer; TFA doesn't use it.
 - **Iterations:** "Newton its" are Newton corrections (residual evaluations − 1), "GMRES its" the inner GMRES
   iterations summed over them (scipy callback, `callback_type='pr_norm'`). "Online" is `solve_step` wall time only;
   "Offline" (`Problem.offline_seconds`) is what each method's operators cost to build as if it ran alone: the
-  partition mesh and materials for all three, plus C0 and P0 for CP and Spectral LS (C0 includes E's build time
+  partition mesh and clusters for all three, plus C0 and P0 for CP and Spectral LS (C0 includes E's build time
   under `"homogenized"`), plus E and P for TFA at the time they took to compute.
 - **Failed load steps:** an unsolvable step raises a `LoadPathAbandoned` subclass (`SolverDidNotConverge`, or
   `MaterialFullySoftened` when a flow stress reaches zero); `run_load_path` stops that method there and the others
@@ -158,13 +176,16 @@ Roadmap, in order:
    Spectral LS on identical partitions against the reference.
 5. Cost at equal accuracy: time and memory against resolution for each method, compared at the same error.
 
-Later: a mixing rule for partitions holding both phases (so circles run on coarse partitions; TFA will not get one;
-composite voxels and Brisard–Dormieux's rule are the precedents), a reference stiffness that follows plastic softening
-(as in SCA), a Newton line search (CP's Newton fails at step 1 on a square whose inclusion can yield at 20 MPa, though
-the converged inclusion stays elastic, probably because the uniform-strain start pushes the stiff inclusion past
-yield; not yet confirmed), a Fourier
-preconditioner for the LS Newton solver of CP and Spectral LS (its GMRES is
-unpreconditioned), and the consistent kernel (exact LS-7, the limit of the
+Mixed partitions, done 2026-10-26: tests in a scratch prototype first. On a laminate whose interfaces cut partitions,
+every split rule without geometry is badly wrong in one direction (equal stress across the interface, equal strain
+along it), and slide 14 with C0 = matrix or C_hom fails or gives negative stiffness. On circles (loads mixed, uniaxial,
+cyclic; contrast 100 and 10; radius 0.35 and 0.25 mm; 32 and 48 elements) equal stress gave macroscopic errors of
+1–5 % against element-level TFA, about Spectral LS's; local errors next to the fiber matched Spectral LS at
+2 × 2-element partitions and were 2–5× larger at 4 × 4, worst for the small fiber. The user rejects geometric
+(laminate) rules and single-phase-only partitions, and requires O(M log M).
+
+Later: a reference stiffness that follows plastic softening (as in SCA), a Fourier preconditioner for the LS Newton
+solver of CP and Spectral LS (its GMRES is unpreconditioned), and the consistent kernel (exact LS-7, the limit of the
 averaged MS kernel as the element grid is refined; its alias series converges as 1/T, and assigning the tail to the
 axis directions, whose sinc² weights sum to one in closed form, makes it 1/T², checked in a scratch test on
 2026-10-12).

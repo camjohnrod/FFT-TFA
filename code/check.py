@@ -1,16 +1,20 @@
-# Checks the code on two small problems, each solved by every method (CP, Spectral LS, TFA). Run it after any change
-# to the code:
+# Checks the code on three small problems, each solved by every method (CP, Spectral LS, TFA). Run it after any
+# change to the code:
 #
 #   python code/check.py         run the checks (a few seconds)
-#   python code/check.py save    run the checks and, if they all pass, save the results as the reference that later
-#                                runs must reproduce exactly
+#   python code/check.py save    run the checks (except the comparison with the old reference) and, if they all
+#                                pass, save the results as the reference that later runs must reproduce exactly
 #
 # The problems:
-#   laminate  a laminate loaded in tension and shear, then unloaded and loaded in reverse. Its exact solution (below)
-#             is known, and every method must reproduce it in every partition.
-#   square    a square inclusion under tension and shear, the kind of problem config.py sets up by default.
-# On both, every method must complete every load step and, once a reference is saved, reproduce it bit for bit. So a
-# change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
+#   laminate      a laminate loaded in tension and shear, then unloaded and loaded in reverse. Its exact solution
+#                 (below) is known, and every method must reproduce it in every cluster.
+#   cut laminate  a laminate whose interfaces cut through partitions, so CP's partitions there hold both phases,
+#                 loaded in transverse shear, where splitting a mixed partition by equal stress is exact: every method
+#                 must again reproduce the exact solution in every cluster.
+#   circle        a circular fiber under tension and shear, the kind of problem config.py sets up by default, with a
+#                 band of mixed partitions around the fiber.
+# On all three, every method must complete every load step and, once a reference is saved, reproduce it bit for bit.
+# So a change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
 # results, then save a new reference. The reference is code/cache/check_reference.npz, and holds bit for bit only at
 # the config.thread_count it was saved with.
 #
@@ -34,8 +38,8 @@ reference_path = config.cache_folder / "check_reference.npz"
 # Every config.py input that shapes the problems or the solvers, pinned to a fixed value: a 27 × 27 element mesh
 # with 9 × 9 partitions, a yielding and hardening matrix, every method switched on.
 pinned_inputs = {
-    "domain_side_length": 1e-3, "inclusion_shape": "square", "inclusion_side_length": (5 / 9) * 1e-3,
-    "inclusion_radius": 0.35e-3, "element_number_per_side": 27, "element_number_along_z": 1,
+    "domain_side_length": 1e-3, "inclusion_shape": "circle", "inclusion_radius": 0.35e-3,
+    "layer_thickness": (3 / 9) * 1e-3, "element_number_per_side": 27, "element_number_along_z": 1,
     "partition_number_per_side": 9,
     "elastic_modulus_inclusion": 10e9, "elastic_modulus_matrix": 100e6, "poisson_ratio_inclusion": 0.3,
     "poisson_ratio_matrix": 0.19, "inclusion_yield_stress": np.inf, "matrix_yield_stress": 1.0e6,
@@ -45,17 +49,23 @@ pinned_inputs = {
     "include_spectral_ls": True, "include_tfa_model": True, "reference_stiffness": "matrix",
     "convergence_tolerance": 1e-6, "residual_strain_scale_floor": 1e-4, "newton_max_iterations": 50,
     "newton_krylov_tolerance": 1e-3, "newton_krylov_restart": 50, "newton_krylov_max_restarts": None,
-    "ls_divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "offline_columns_per_solve": 100}
+    "ls_divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "offline_columns_per_solve": 100,
+    "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
+    "mixed_partition_tolerance": 1e-12, "mixed_partition_max_iterations": 50}
 
 # What each problem changes from pinned_inputs.
 check_problems = {
     # A layer 3 partitions thick, loaded so that every interface-normal component (ε11, γ12, γ13) takes part, over a
     # cyclic path: the only test of unloading, reverse yielding and zero imposed strain. 4 increments per quarter
     # still yield at both zero crossings. The homogenized C0 is the only test of that choice.
-    "laminate": {"inclusion_shape": "laminate", "inclusion_side_length": (3 / 9) * 1e-3,
-                 "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.01]), "load_path_shape": "cyclic",
-                 "strain_increment_count": 4, "reference_stiffness": "homogenized"},
-    "square": {},
+    "laminate": {"inclusion_shape": "laminate", "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.01]),
+                 "load_path_shape": "cyclic", "strain_increment_count": 4, "reference_stiffness": "homogenized"},
+    # A layer 7 elements thick, so each interface cuts a partition (2/3 fiber). In transverse shear γ12 both phases
+    # carry the same stress, so the equal-stress split is exact there and every method must match the exact solution.
+    "cut laminate": {"inclusion_shape": "laminate", "layer_thickness": (7 / 27) * 1e-3,
+                     "max_macro_strain": np.array([0.0, 0.0, 0.0, 0.03, 0.0, 0.0]), "load_path_shape": "cyclic",
+                     "strain_increment_count": 4},
+    "circle": {},
 }
 
 ## ------- Exact Laminate Solution ------- ##
@@ -71,10 +81,10 @@ check_problems = {
 # stress components at the same positions, the tractions σ11, σ12, σ13, may not.
 interface_normal_components = [0, 3, 5]
 
-def get_phase_materials(partition_materials):
-    # One row per phase, matrix first, copied from the first partition of each phase.
-    rows = [np.flatnonzero(partition_materials.material_ids == material_id)[0] for material_id in (0, 1)]
-    return partition_materials._make(field[rows] for field in partition_materials)
+def get_phase_materials(materials):
+    # One row per phase, matrix first, copied from the first cluster of each phase.
+    rows = [np.flatnonzero(materials.material_ids == material_id)[0] for material_id in (0, 1)]
+    return materials._make(field[rows] for field in materials)
 
 def get_phase_strains(macro_strain, matrix_normal_strain, inclusion_fraction):
     # The strain of each phase, matrix first, given the matrix's interface-normal components.
@@ -103,10 +113,10 @@ def solve_laminate_step(macro_strain, matrix_normal_strain, phase_materials, pha
         matrix_normal_strain = matrix_normal_strain - np.linalg.solve(jacobian, traction_jump)
     raise RuntimeError(f"the laminate's exact solution did not converge at macrostrain {macro_strain}.")
 
-def get_laminate_phase_stress(partition_materials, applied_macro_strain):
+def get_laminate_phase_stress(clusters, applied_macro_strain):
     # The exact stress of each phase at every load step, shape (load steps, 2, 6), matrix first.
-    phase_materials = get_phase_materials(partition_materials)
-    inclusion_fraction = partition_materials.material_ids.mean()
+    phase_materials = get_phase_materials(clusters.materials)
+    inclusion_fraction = clusters.average(clusters.materials.material_ids)
     phase_history = get_unloaded_plastic_state(2)
     matrix_normal_strain = np.zeros(len(interface_normal_components))
     previous_macro_strain = np.zeros(6)
@@ -124,13 +134,15 @@ def get_relative_difference(stress, exact_stress):
     return np.abs(stress - exact_stress).max() / np.abs(exact_stress).max()
 
 def get_laminate_error(result, exact_phase_stress):
-    # The larger of the macroscopic stress's difference and every partition's, partitions judged phase by phase on
-    # their own phase's stress scale: on the inclusion's, about a hundred times larger, a matrix error would hide.
-    exact_partition_stress = exact_phase_stress[:, result.material_ids]
-    errors = [get_relative_difference(result.macroscopic_stress, exact_partition_stress.mean(axis=1))]
-    for phase_partitions in (result.material_ids == 0, result.material_ids == 1):
-        errors.append(get_relative_difference(result.partition_stress_per_step[:, phase_partitions],
-                                              exact_partition_stress[:, phase_partitions]))
+    # The larger of the macroscopic stress's difference and every cluster's, clusters judged phase by phase on their
+    # own phase's stress scale: on the fiber's, about a hundred times larger, a matrix error would hide.
+    material_ids = result.clusters.materials.material_ids
+    exact_cluster_stress = exact_phase_stress[:, material_ids]
+    exact_macroscopic_stress = result.clusters.average(np.moveaxis(exact_cluster_stress, 1, 0))
+    errors = [get_relative_difference(result.macroscopic_stress, exact_macroscopic_stress)]
+    for phase_clusters in (material_ids == 0, material_ids == 1):
+        errors.append(get_relative_difference(result.cluster_stress_per_step[:, phase_clusters],
+                                              exact_cluster_stress[:, phase_clusters]))
     return max(errors)
 
 ## ------- Checks ------- ##
@@ -157,7 +169,7 @@ def get_result_arrays(problem_name, results):
     # Every array the reference holds, keyed "<problem>/<method>/<array>".
     arrays = {}
     for method, result in results.items():
-        for field in ("macroscopic_stress", "partition_stress_per_step", "newton_iterations_per_step",
+        for field in ("macroscopic_stress", "cluster_stress_per_step", "newton_iterations_per_step",
                       "gmres_iterations_per_step", "completed_step_count"):
             arrays[f"{problem_name}/{method}/{field}"] = np.asarray(getattr(result, field))
     return arrays
@@ -182,7 +194,7 @@ def main():
                                      f"{problem_name}: {method} completed {result.completed_step_count} of "
                                      f"{step_count} load steps")
             if config.inclusion_shape == "laminate":
-                exact_phase_stress = get_laminate_phase_stress(problem.partitions.partition_materials,
+                exact_phase_stress = get_laminate_phase_stress(problem.partitions.clusters,
                                                                run.get_applied_macro_strain())
                 for method, result in results.items():
                     error = get_laminate_error(result, exact_phase_stress)
@@ -191,7 +203,7 @@ def main():
                                          f"difference {error:.1e}, tolerance {config.laminate_tolerance:.0e})")
             arrays = get_result_arrays(problem_name, results)
             result_arrays.update(arrays)
-            if reference is not None:
+            if reference is not None and mode == "check":
                 changed = [name for name in arrays if name not in reference
                            or not np.array_equal(arrays[name], reference[name])]
                 all_passed &= report(not changed, f"{problem_name}: identical to the saved reference"
