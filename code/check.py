@@ -1,4 +1,4 @@
-# Checks the code on four small problems, each solved by every method (CP, Spectral LS, TFA). Run it after any
+# Checks the code on five small problems, each solved by every method (CP, Spectral LS, TFA). Run it after any
 # change to the code:
 #
 #   python code/check.py         run the checks (a few seconds)
@@ -16,8 +16,9 @@
 #                 band of mixed partitions around the fiber.
 #   z laminate    a laminate with interfaces normal to z, so the geometry varies along z: meshed and partitioned in 3D,
 #                 the only test of the kernel's ξ_z frequencies. Every method must reproduce its exact solution.
-# On all four, every method must complete every load step and, once a reference is saved, reproduce it bit for bit.
-# Where CP has mixed partitions (cut laminate, circle), their elastic law must match its closed form (LS-22 in
+#   sphere        a spherical inclusion, meshed and partitioned in 3D, with mixed partitions all around it.
+# On all five, every method must complete every load step and, once a reference is saved, reproduce it bit for bit.
+# Where CP has mixed partitions (cut laminate, circle, sphere), their elastic law must match its closed form (LS-22 in
 # elasticity, notes/2_ls_model.md section 4.4): a wrong split or split tangent fails there.
 # So a change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
 # results, then save a new reference. The reference is code/check_reference.npz, and holds bit for bit only at
@@ -80,6 +81,9 @@ check_problems = {
     "z laminate": {"inclusion_shape": "laminate_z", "element_number_per_side": 9, "partition_number_per_side": 3,
                    "max_macro_strain": np.array([0.020, 0.0, 0.015, 0.0, 0.03, 0.01]), "load_path_shape": "cyclic",
                    "strain_increment_count": 4},
+    # A sphere on a 12³ mesh with 4³ partitions, loaded with z components: the only test of mixed partitions in 3D.
+    "sphere": {"inclusion_shape": "sphere", "element_number_per_side": 12, "partition_number_per_side": 4,
+               "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03])},
 }
 
 # The methods whose model is not exact on a problem: compared with the exact solution, but not judged by it.

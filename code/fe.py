@@ -39,6 +39,8 @@ def is_inside_inclusion(centres):
         return np.abs(offsets_from_centre[:, 0]) < config.layer_thickness / 2
     if config.inclusion_shape == "laminate_z":
         return np.abs(offsets_from_centre[:, 2]) < config.layer_thickness / 2
+    if config.inclusion_shape == "sphere":
+        return np.sum(offsets_from_centre**2, axis=1) < config.inclusion_radius**2
     return np.sum(offsets_from_centre[:, :2]**2, axis=1) < config.inclusion_radius**2
 
 ## ------- Discretization ------- ##

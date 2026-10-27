@@ -27,6 +27,7 @@ import numpy as np  # noqa: E402, after the thread count is set
 #   "laminate"    a centred fiber layer of thickness layer_thickness, with interfaces normal to x (check.py uses it: its
 #                 solution is known exactly)
 #   "laminate_z"  the same layer with interfaces normal to z (check.py's test of the 3D kernel)
+#   "sphere"      a centred spherical inclusion of radius inclusion_radius
 # A shape whose geometry does not vary along z (circle, laminate) is meshed with element_number_per_side² ×
 # element_number_along_z hexahedra and divided into partition_number_per_side² partitions, each a column of elements
 # through the thickness. Any other shape is meshed with element_number_per_side³ hexahedra (element_number_along_z is
@@ -34,12 +35,12 @@ import numpy as np  # noqa: E402, after the thread count is set
 # partition_number_per_side. The geometry is resolved on the elements. A partition may hold both phases: its part in
 # each phase is a cluster, with its own material state.
 domain_side_length          = 1e-3
-inclusion_shape             = "circle"
+inclusion_shape             = "sphere"
 inclusion_radius            = 0.35e-3
 layer_thickness             = 0.5e-3
-element_number_per_side     = 64
-element_number_along_z      = 1
-partition_number_per_side   = 32
+element_number_per_side     = 18
+element_number_along_z      = 6
+partition_number_per_side   = 9
 
 ## ------- Materials ------- ##
 
@@ -95,7 +96,7 @@ include_tfa_model           = True
 # path, or that sharing has no solution: a yielding phase's shear tangent drops to about G H / (3G + H), and to zero
 # without hardening. A smaller C0 shares the strain closer to equal stress. TFA does not use C0.
 reference_stiffness         = "matrix"
-reference_stiffness_scale   = 0.01
+reference_stiffness_scale   = 0.05
 
 # The reference stiffness of Spectral LS, its own: its solution does not depend on it (its kernel is a projection), so
 # it is only a solver setting, unlike CP's C0, which is part of CP's model. One of
@@ -189,16 +190,16 @@ def check_inputs():
     if element_number_per_side % partition_number_per_side != 0:
         raise ValueError("The number of elements per side must be a multiple of the number of partitions per side.")
 
-    if inclusion_shape == "circle":
+    if inclusion_shape in ("circle", "sphere"):
         if not 0 < inclusion_radius < domain_side_length / 2:
-            raise ValueError("The fiber's radius must be positive and below half the domain side, so neighbouring "
-                             f"fibers do not touch. Got {inclusion_radius}.")
+            raise ValueError("The inclusion's radius must be positive and below half the domain side, so neighbouring "
+                             f"inclusions do not touch. Got {inclusion_radius}.")
     elif inclusion_shape in ("laminate", "laminate_z"):
         if not 0 < layer_thickness < domain_side_length:
             raise ValueError("The fiber layer's thickness must be positive and below the domain side, so matrix "
                              f"surrounds it. Got {layer_thickness}.")
     else:
-        raise ValueError("inclusion_shape must be \"circle\", \"laminate\" or \"laminate_z\". Got "
+        raise ValueError("inclusion_shape must be \"circle\", \"laminate\", \"laminate_z\" or \"sphere\". Got "
                          f"{inclusion_shape!r}.")
 
     # The radial return divides by 3G + H, so at or below zero it has no admissible solution.
