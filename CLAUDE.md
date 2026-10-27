@@ -16,11 +16,19 @@ and papers, never the history of a decision.
 ## The user's standing decisions
 
 - **All settings live in `code/config.py`, and only there**: a new knob goes there with a comment, never as a literal
-  elsewhere. Exceptions: plot appearance in `plots.py`, check problems in `check.py`. config.py is often left at a
-  local study configuration; "default" means `git show HEAD:code/config.py`.
-- **One C0 for everything in CP, constant polarization in every partition.** The same C0 builds P0 and splits mixed
-  partitions (LS-22, `ls_model.get_cluster_strain`). C0 must stay below every cluster's tangent or the split has no
-  solution (`check_reference_below_tangents` stops with that message). Don't reintroduce a separate C0 for the split.
+  elsewhere. config.py runs from the settings changed most to those changed least (problem, methods, figures,
+  materials, solver details, checks), after a table of what each grid means to each method. A setting of one method
+  carries its prefix (`cp_`, `spectral_ls_`, `tfa_`, `k_means_`), and the same setting for two methods sits as a
+  pair. Exceptions: plot appearance in `plots.py`, check problems in `check.py`. config.py is often left at a local
+  study configuration; "default" means `git show HEAD:code/config.py`. The user edits it while you work: change it by
+  targeted edits, never by rewriting it from an earlier read.
+- **One C0 for everything in CP, constant polarization in every partition.** The same C0 builds P0 and sets how a
+  partition's strain is shared among its pieces (LS-25; LS-22 for partition-phase clusters). C0 must stay below the
+  tangent of every coupled cluster or LS-26 has no solution (`check_reference_below_tangents` stops with that
+  message). Don't reintroduce a separate C0 for the split.
+- **Clusters are a per-method setting** (`cp_clusters`, `tfa_clusters`: `"partition phases"` or `"k-means"`). The
+  setting only chooses how `fe.Clusters` is built; nothing downstream branches on it. Spectral LS stays per element.
+  CP keeps its partitions and one polarization each; k-means changes only where its eigenstrains live.
 - **Spectral LS's reference stiffness is its own** (`spectral_ls_reference_stiffness`): its answer doesn't depend on
   it, so it is a solver setting, not CP's C0.
 - **Fairness between CP and Spectral LS:** each gets its best setting from the same principles, justified from the
@@ -35,17 +43,18 @@ and papers, never the history of a decision.
 
 ```bash
 python code/run.py           # solve config.py's problem with every enabled method; table + figures to code/output/
-python code/check.py         # the test: five small problems, a few seconds
+python code/check.py         # the test: seven small problems, about 15 seconds
 python code/check.py save    # the same, then save the results as the new reference
 ```
 
-There is no pytest suite and no way to run one check problem alone. `check.py` solves `"laminate"`,
-`"cut laminate"`, `"circle"`, `"z laminate"` and `"sphere"` with every method. On the laminates every method must match the
-exact solution to `laminate_tolerance`, except CP on the cut laminate (`inexact_methods`: printed as INFO). CP's
-mixed partitions must match LS-22's elastic closed form to `mixed_partition_check_tolerance`; that is what catches a
-wrong split or split tangent. Every method must complete every step and reproduce `code/check_reference.npz`
-(untracked) bit for bit, at the `thread_count` it was saved with. For a refactor: `check.py save` before,
-`check.py` after.
+There is no pytest suite and no way to run one check problem alone. `check.py` solves `"laminate"`, `"cut laminate"`,
+`"circle"`, `"z laminate"`, `"sphere"`, `"k-means laminate"` and `"k-means sphere"` with every method. On the laminates
+every method must match the exact solution to `laminate_tolerance`, except CP on the cut laminate (`inexact_methods`:
+printed as INFO). CP's sparse LS-25 matrices (E, F, Λ, D_e) must match LS-25 computed piece by piece in `check.py`, with
+no solver code, to `piece_law_check_tolerance`; that is what catches a wrong piece law or piece indexing. The
+coupled-cluster terms are tested only where a coupled cluster has a piece filling a partition (the k-means sphere has
+such pieces). Every method must complete every step and reproduce `code/check_reference.npz` (untracked) bit for bit, at
+the `thread_count` it was saved with. For a refactor: `check.py save` before, `check.py` after.
 
 Not covered by `check.py`, so recheck by hand after touching them: the Fourier preconditioner must leave answers
 alone (compare with it on and off), and every method must stop at the same accuracy (compare against a solve at
@@ -59,7 +68,7 @@ A renamed config input must be renamed in `pinned_inputs` too.
 Entry points import `config` before numpy, since config.py sets the thread environment variables; online FFTs use
 `scipy.fft` with `workers=config.thread_count`.
 
-TFA's offline step builds a dense P of (6 × partitions)² doubles (4.8 GB at 64² or 16³ partitions), cached in
+TFA's offline step builds a dense P of (6 × TFA's clusters)² doubles (4.8 GB at 64² or 16³ partitions), cached in
 `code/cache/` under a hash of its parameters (`fe.get_cache_path`). Bump `fe.cache_version` when a change alters E
 or P. Estimate the cost of large configurations and run them in the background.
 
@@ -71,17 +80,18 @@ imports no project module; only `run.py` calls it.
 | Module | Contents |
 |---|---|
 | `config.py` | every input, `check_inputs()`, folders |
-| `run.py` | `Lattice`, `Problem`, `get_problem()` (builds everything, times each method's offline step), `get_solvers`, `run_load_path`, `solve_all`, timing table, figures, `main` |
-| `fe.py` | shapes (`is_inside_inclusion`, `shapes_constant_along_z`), `Discretization`, `Mesh`, `Materials`, `Clusters`/`get_clusters`, element matrices, `FEModel`, TFA's E and P (`compute_E_and_P`) and their cache (`get_E_and_P`) |
+| `run.py` | `Lattice`, `Problem`, `get_problem()` (builds everything, each method's clusters, times each method's offline step), `get_k_means_labels`, `get_solvers`, `run_load_path`, `solve_all`, timing table, figures, `main` |
+| `fe.py` | shapes (`is_inside_inclusion`, `shapes_constant_along_z`), `Discretization`, `Mesh`, `Materials`, `Clusters` (clusters and their pieces), `label_partition_phases`, `label_k_means`, `get_clusters`, element matrices, `FEModel`, TFA's E and P (`compute_E_and_P`) and their cache (`get_E_and_P`) |
 | `newton.py` | `solve_load_step` (the one Newton loop), `take_step` (line search), relative residual, `has_converged`, `solve_newton_correction` (GMRES), the `LoadPathAbandoned` errors |
-| `ls_model.py` | `apply_on_lattice` (FFT convolution), C0, P0 and its partition average (`get_P0_transformed`), `get_fourier_preconditioner`, the mixed-partition split, `LSSolver` for CP and Spectral LS |
+| `ls_model.py` | `apply_on_lattice` (FFT convolution), C0, P0 and its partition average (`get_P0_transformed`), LS-24, `get_fourier_preconditioner`, `LatticeSolver` (Newton–GMRES shared by CP and Spectral LS), `SpectralLSSolver`, `get_elastic_strain_concentration` (k-means features), CP's piece law (`PieceLaw`, LS-25) and `CPSolver` |
 | `tfa_model.py` | TFA residual with the elastic reset, column-restricted P products, `get_tfa_solver` |
 | `material.py` | vectorized J2 radial return, its sensitivity H_μ and algorithmic stiffness L_t |
-| `plots.py` | the figures, `method_styles` keyed by method name |
+| `plots.py` | the figures: `method_styles` keyed by method name; the cross-section's `boundary_styles` (voxel, cluster, partition lines) and k-means cluster colours |
 | `check.py` | the checks and the laminate's exact solution |
 
-`LSSolver` maps onto the LS note: `evaluate` → LS-18, `get_newton_correction` → LS-20 and LS-23, `solve_step` →
-section 7.3, `residual_in_matrix_units` → LS-24.
+The LS solvers map onto the LS note: `evaluate` → LS-18, `get_newton_correction` → LS-20 and LS-23 with each
+subclass's `get_D` (CP's is LS-27), `solve_step` → section 7.3, `residual_in_matrix_units` → LS-24,
+`CPSolver.solve_eigenstrain` → LS-26.
 
 ## Non-obvious points
 
@@ -96,15 +106,23 @@ section 7.3, `residual_in_matrix_units` → LS-24.
   `apply_on_lattice` transforms only axes longer than one (length-1 transforms are identities but slow).
 - **Half spectrum:** `P0_transformed` holds only `rfftn`'s half (shape `(N_z, N, N//2 + 1, 6, 6)`), transformed back
   with `irfftn(..., s=(N_z, N, N))`. Anything new reading it must do the same.
-- **Clusters** are ordered by partition, matrix first, so a mixed partition's inclusion cluster follows its matrix
-  cluster. They have unequal volumes: every cell average goes through `Clusters.average`.
+- **Clusters and pieces:** `fe.Clusters` holds the clusters (material states; `volume` in partition volumes) and
+  their pieces (cluster ∩ partition, ordered by partition). Clusters have unequal volumes: every cell average goes
+  through `Clusters.average`. Every method reports stress and plastic state per cluster. A **coupled** cluster has a
+  piece in a partition holding several; CP solves only those clusters' eigenstrains iteratively (LS-26), by Newton
+  with sparse LU and the outer Newton's line search, with no FFT.
 - **A new shape** goes in `is_inside_inclusion`, `check_inputs`, the E/P cache parameters (`fe.get_E_and_P`: every
   parameter of the shape, or a stale E and P is reused silently) and, if constant along z, `shapes_constant_along_z`.
 - **TFA's P** is stored column-major so consecutive yielding clusters form a contiguous column block
   (`apply_P_to_partitions`). Don't fancy-index `P[:, columns]`: the copy costs more than the full product.
-- **E is built only when needed:** by TFA, or by `reference_stiffness = "homogenized"`.
-- **Fourier preconditioner (LS-23):** I − P̂0(ξ)⟨D⟩ with ⟨D⟩ the lattice mean of I − C0⁻¹ L_t, rebuilt at every Newton
-  correction, applied on the right. On by default for CP, off for Spectral LS (where it changes nothing).
+- **E is built only when needed:** by TFA, or by `cp_reference_stiffness = "homogenized"`, on TFA's clusters when TFA
+  runs. The E/P cache key includes every element's cluster label, so each clustering finds its own cache.
+- **k-means** runs on each element's elastic strain concentration from six elastic Spectral LS steps, per phase, with
+  a fixed seed; a phase gets no more clusters than distinct features, and empty clusters are dropped. Its time counts
+  in the offline time of each method that uses it.
+- **Fourier preconditioner (LS-23):** I − P̂0(ξ)⟨D⟩ with ⟨D⟩ the lattice mean of D (for CP, of D's response to uniform
+  fields, LS-27), rebuilt at every Newton correction, applied on the right. On by default for CP, off for Spectral LS
+  (where it changes nothing).
 - **Iteration counts:** "Newton its" are corrections, "GMRES its" the inner iterations summed. "Online" is
   `solve_step` wall time; "Offline" is each method's operator build as if it ran alone (cached E and P report their
   stored `build_seconds`).
@@ -117,7 +135,9 @@ section 7.3, `residual_in_matrix_units` → LS-24.
 
 The roadmap is in the README's "Status and roadmap"; keep the two in step. Things tried and rejected, not to redo
 without the user asking: block-Jacobi preconditioning on top of the Fourier one (CP stopped less accurately),
-geometric (interface-aware) split rules for mixed partitions, and single-phase-only partitions. Mixed partitions must
+geometric (interface-aware) split rules for mixed partitions, single-phase-only partitions, and CP's cluster
+eigenstrains as Newton unknowns with a polarization-form correction (more Newton iterations and a 20–50× less accurate
+stop; LS note section 7.6). Mixed partitions must
 stay O(M log M).
 
 Known behaviour (seen with the FE kernel, since removed): element-level LS rang along high-contrast interfaces, an

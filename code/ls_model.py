@@ -1,23 +1,27 @@
 # The partition-averaged Lippmann–Schwinger (LS) equation of notes/2_ls_model.md, solved by Newton–GMRES. Partitions
 # interact only through the homogeneous reference medium C0, so the whole nonlocal operator is one FFT convolution
-# with the kernel P0 (LS-17). Two methods solve it with this same code: CP on the partitions, and Spectral LS on the
-# element lattice (one partition per element); the lattice is whatever its kernel and clusters describe.
-#
-# The unknowns are the partition strains ε_A. A partition's stress σ_A comes from its clusters (fe.Clusters), one
-# material state per phase: a single-phase partition's cluster takes ε_A; a mixed partition shares ε_A between its
-# matrix and inclusion clusters so that both carry the same polarization σ − C0 ε (LS-22), so the polarization is
-# constant in every partition.
+# with the kernel P0 (LS-17). Two methods solve it, sharing the lattice code:
+#   Spectral LS  on the element lattice: one partition per element, each one cluster, so a partition's stress is its
+#                cluster's at the partition strain (SpectralLSSolver);
+#   CP           on the partitions, whose material states are clusters (fe.Clusters) that may span several
+#                partitions. Every piece of a partition carries the partition's polarization τ_A = σ − C0 ε, and every
+#                piece of a cluster its eigenstrain μ_g; the pieces' strains follow from both in closed form (LS-25),
+#                and each cluster's eigenstrain from the return map at its average strain (LS-26, CPSolver).
 #
 # The reference medium's operators are built here too: C0, and the kernel P0 averaged over partitions (LS-21); and the
-# Fourier preconditioner of the Newton solver (LS-23). Both are translation invariant, so they are stored as one 6 × 6
+# Fourier preconditioner of the Newton solvers (LS-23). They are translation invariant, so they are stored as one 6 × 6
 # block per lattice frequency, rfftn's non-redundant half (shape (N_z, N, N//2 + 1, 6, 6), lattices indexed [z, y, x]
 # and square in-plane), and applied by FFT (apply_on_lattice).
 
+from typing import NamedTuple
 import numpy as np
 import scipy.fft
+import scipy.sparse
+import scipy.sparse.linalg
 
 import config
-from material import get_algorithmic_stiffness, get_plastic_eigenstrain
+from material import (get_algorithmic_stiffness, get_eigenstrain_sensitivity, get_plastic_eigenstrain,
+                      get_unloaded_plastic_state)
 from newton import Evaluation, SolverDidNotConverge, solve_load_step, solve_newton_correction
 
 ## ------- Convolution on a Lattice ------- ##
@@ -38,17 +42,17 @@ def apply_on_lattice(fourier_blocks, field):
 ## ------- Reference Stiffness ------- ##
 
 def get_named_stiffness(clusters, E, matrix_L):
-    # The stiffness config.reference_stiffness names: volume averages over the clusters.
-    if config.reference_stiffness == "homogenized":
+    # The stiffness config.cp_reference_stiffness names: volume averages over the clusters.
+    if config.cp_reference_stiffness == "homogenized":
         return clusters.average(clusters.materials.L @ E.reshape(-1, 6, 6))    # <L E>
-    if config.reference_stiffness == "voigt":
+    if config.cp_reference_stiffness == "voigt":
         return clusters.average(clusters.materials.L)                          # <L>
     return matrix_L
 
 def get_cp_reference_L(named_L):
     # CP's C0, part of its model: a fraction of the named stiffness. The same C0 sets the interaction (P0) and how a
-    # mixed partition shares its strain (LS-22), so it must stay below every phase's tangent stiffness.
-    return config.reference_stiffness_scale * named_L
+    # partition's strain is shared among its pieces (LS-25), so it must stay below the tangent of every coupled cluster.
+    return config.cp_reference_stiffness_scale * named_L
 
 def get_spectral_reference_L(matrix_L, inclusion_L):
     # Spectral LS's reference stiffness. Its solution does not depend on it (its P0 is a projection; Schneider 2021,
@@ -128,149 +132,76 @@ def get_P0_transformed(discretization, reference_L):
     element_P0 = get_moulinec_suquet_kernel(discretization.element_lattice_shape, reference_L)
     return get_transformed(average_over_partitions(element_P0, discretization), discretization.partition_lattice_shape)
 
-## ------- Fourier Preconditioner (LS-23) ------- ##
+## ------- Residual in Matrix Units (LS-24) ------- ##
 
-def get_fourier_preconditioner(P0_transformed, jacobian_blocks):
-    # The best Fourier-diagonal approximation of the Newton Jacobian J v = v − P0 (D v) (LS-20), inverted. P0 is
-    # diagonal in Fourier space; D = I − C0⁻¹ L_t is diagonal in real space, and in Fourier space its diagonal is its
-    # mean ⟨D⟩ over the lattice. So the Fourier-diagonal operator closest to J (Frobenius norm) is
+def get_residual_in_matrix_units(P0_transformed, reference_L, matrix_L):
+    # LS-24: the LS residual r is a strain of the reference medium, so its size depends on C0. Convergence is judged
+    # instead on the strain correction an all-matrix cell would need to cancel r, M_m⁻¹ r, with M_m the Newton
+    # Jacobian of a homogeneous cell of matrix stiffness C_m (LS-20 with L_t = C_m everywhere):
+    #   M̂_m(ξ) = I − P̂0(ξ) (I − C0⁻¹ C_m),
+    # a fixed Fourier operator like P0, so the tolerance means the same whatever C0. Returns M̂_m⁻¹ per frequency.
+    matrix_cell_jacobian = np.eye(6) - P0_transformed @ (np.eye(6) - np.linalg.solve(reference_L, matrix_L))
+    return np.linalg.inv(matrix_cell_jacobian)
+
+## ------- Block Helpers ------- ##
+
+def apply_blocks(blocks, rows):
+    # One 6 × 6 block times one row of 6, row by row.
+    return np.einsum('pij,pj->pi', blocks, rows)
+
+def assemble_blocks(blocks, block_rows, block_columns, shape_in_blocks):
+    # A sparse matrix of 6 × 6 blocks, each block at its block row and column, blocks at the same position summed.
+    rows = np.broadcast_to(6 * block_rows[:, None, None] + np.arange(6)[:, None], blocks.shape)
+    columns = np.broadcast_to(6 * block_columns[:, None, None] + np.arange(6), blocks.shape)
+    return scipy.sparse.coo_matrix((blocks.ravel(), (rows.ravel(), columns.ravel())),
+                                   shape=(6 * shape_in_blocks[0], 6 * shape_in_blocks[1])).tocsr()
+
+def get_block_diagonal(blocks):
+    return assemble_blocks(blocks, np.arange(len(blocks)), np.arange(len(blocks)), (len(blocks), len(blocks)))
+
+def apply_sparse(matrix, rows):
+    # A sparse matrix on stacked rows of 6.
+    return (matrix @ rows.reshape(-1)).reshape(-1, 6)
+
+## ------- Newton–GMRES on a Lattice ------- ##
+
+def get_fourier_preconditioner(P0_transformed, mean_D):
+    # LS-23: the best Fourier-diagonal approximation of the Newton Jacobian J v = v − P0 (D v) (LS-20), inverted. P0
+    # is diagonal in Fourier space; when D is one block per partition (D = I − C0⁻¹ L_t), its Fourier-space diagonal
+    # is its lattice mean ⟨D⟩. So the Fourier-diagonal operator closest to J (Frobenius norm) is
     #   M̂(ξ) = I − P̂0(ξ) ⟨D⟩,
-    # the Jacobian of a homogeneous cell with the mean tangent ⟨L_t⟩, and its inverse is one 6 × 6 inverse per
-    # frequency. Built from each method's own kernel and tangents, so the same rule serves CP and Spectral LS.
-    return np.linalg.inv(np.eye(6) - P0_transformed @ jacobian_blocks.mean(axis=0))
+    # the Jacobian of a homogeneous cell with the mean current tangent ⟨L_t⟩, and its inverse is one 6 × 6 inverse per
+    # frequency.
+    return np.linalg.inv(np.eye(6) - P0_transformed @ mean_D)
 
-## ------- Partition Stress from Clusters (LS-22) ------- ##
-
-def get_mixed_partition_clusters(clusters):
-    # The matrix and inclusion cluster of every mixed partition (an inclusion cluster directly follows its matrix
-    # cluster).
-    matrix = np.flatnonzero((clusters.volume_fraction < 1) & (clusters.materials.material_ids == 0))
-    return matrix, matrix + 1
-
-def take_rows(rows_tuple, rows):
-    return rows_tuple._make(field[rows] for field in rows_tuple)
-
-def get_cluster_strain(strain, clusters, plastic_history, reference_L):
-    # Each cluster's strain: its partition's, except in a mixed partition, where c_m ε_m + c_f ε_f = ε_A is shared so
-    # that both clusters carry the same polarization σ − C0 ε (LS-22). Newton on ε_f, with ε_m = (ε_A − c_f ε_f) / c_m:
-    #   residual  (σ_m − C0 ε_m) − (σ_f − C0 ε_f),   derivative  −[(L_t,f − C0) + (c_f / c_m)(L_t,m − C0)].
-    # It has a solution only while C0 is below both clusters' tangents.
-    cluster_strain = strain[clusters.partition]
-    matrix, inclusion = get_mixed_partition_clusters(clusters)
-    if len(matrix) == 0:
-        return cluster_strain
-    c_m, c_f = clusters.volume_fraction[matrix, None], clusters.volume_fraction[inclusion, None]
-    matrix_materials = take_rows(clusters.materials, matrix)
-    inclusion_materials = take_rows(clusters.materials, inclusion)
-    matrix_history = take_rows(plastic_history, matrix)
-    inclusion_history = take_rows(plastic_history, inclusion)
-    partition_strain = cluster_strain[matrix]
-    inclusion_strain = partition_strain.copy()
-    for _ in range(config.mixed_partition_max_iterations):
-        matrix_strain = (partition_strain - c_f * inclusion_strain) / c_m
-        _, matrix_stress = get_plastic_eigenstrain(matrix_strain, matrix_materials, matrix_history)
-        _, inclusion_stress = get_plastic_eigenstrain(inclusion_strain, inclusion_materials, inclusion_history)
-        polarization_difference = ((matrix_stress - matrix_strain @ reference_L.T)
-                                   - (inclusion_stress - inclusion_strain @ reference_L.T))
-        stress_scale = max(np.abs(matrix_stress).max(), np.abs(inclusion_stress).max())
-        if np.abs(polarization_difference).max() <= config.mixed_partition_tolerance * stress_scale:
-            break
-        jacobian = ((get_algorithmic_stiffness(inclusion_strain, inclusion_materials, inclusion_history) - reference_L)
-                    + (c_f / c_m)[:, :, None] * (get_algorithmic_stiffness(matrix_strain, matrix_materials,
-                                                                            matrix_history) - reference_L))
-        inclusion_strain = inclusion_strain + np.linalg.solve(jacobian, polarization_difference[..., None])[..., 0]
-    else:
-        raise SolverDidNotConverge("the equal-polarization split of a mixed partition did not converge: C0 may be "
-                                   "above a cluster's tangent stiffness (lower config.reference_stiffness_scale)")
-    cluster_strain[matrix], cluster_strain[inclusion] = matrix_strain, inclusion_strain
-    return cluster_strain
-
-def get_partition_stress(cluster_stress, clusters):
-    # σ_A = Σ c σ over the partition's clusters.
-    stress = np.zeros((clusters.partition_count, 6))
-    np.add.at(stress, clusters.partition, clusters.volume_fraction[:, None] * cluster_stress)
-    return stress
-
-def check_reference_below_tangents(mixed_cluster_tangents, reference_L):
-    # LS-22 has a solution only while C0 is below the tangent of both clusters of every mixed partition, i.e. while
-    # L_t − C0 is positive definite there. Otherwise its tangent below is singular and GMRES fails, so stop with the
-    # cause instead.
-    differences = mixed_cluster_tangents - reference_L
-    lowest_eigenvalues = np.linalg.eigvalsh((differences + np.swapaxes(differences, -1, -2)) / 2)[:, 0]
-    if np.any(lowest_eigenvalues <= 0):
-        raise SolverDidNotConverge(
-            f"C0 is not below the tangent stiffness of {np.count_nonzero(lowest_eigenvalues <= 0)} clusters in mixed "
-            "partitions, so their equal-polarization split (LS-22) has no solution: lower "
-            "config.reference_stiffness_scale (a yielding phase's shear tangent is about G H / (3G + H))")
-
-def get_partition_tangent(cluster_strain, clusters, plastic_history, reference_L):
-    # dσ_A/dε_A: a single-phase partition's cluster tangent L_t. For a mixed partition, differentiating LS-22 gives
-    #   dε_f = D_f dε_A,  D_f = [(L_t,f − C0) + (c_f / c_m)(L_t,m − C0)]⁻¹ (L_t,m − C0) / c_m,
-    #   dε_m = D_m dε_A,  D_m = (I − c_f D_f) / c_m,     and the tangent c_m L_t,m D_m + c_f L_t,f D_f.
-    cluster_tangent = get_algorithmic_stiffness(cluster_strain, clusters.materials, plastic_history)
-    tangent = np.zeros((clusters.partition_count, 6, 6))
-    tangent[clusters.partition] = cluster_tangent
-    matrix, inclusion = get_mixed_partition_clusters(clusters)
-    if len(matrix) > 0:
-        c_m = clusters.volume_fraction[matrix, None, None]
-        c_f = clusters.volume_fraction[inclusion, None, None]
-        L_m, L_f = cluster_tangent[matrix], cluster_tangent[inclusion]
-        check_reference_below_tangents(np.concatenate([L_m, L_f]), reference_L)
-        D_f = np.linalg.solve((L_f - reference_L) + (c_f / c_m) * (L_m - reference_L), (L_m - reference_L) / c_m)
-        D_m = (np.eye(6) - c_f * D_f) / c_m
-        tangent[clusters.partition[matrix]] = c_m * L_m @ D_m + c_f * L_f @ D_f
-    return tangent
-
-## ------- Newton–GMRES Solver ------- ##
-
-class LSSolver:
-    # One LS method on its lattice (run.Lattice), as a load-path solver: solve_step(macro_strain, plastic_history)
-    # solves one load step. Each step starts from the previous step's converged strain shifted by the macrostrain
-    # increment. With use_fourier_preconditioner, GMRES is preconditioned by LS-23.
+class LatticeSolver:
+    # What CP and Spectral LS share as load-path solvers on their lattice (run.Lattice): Newton on the partition
+    # strains, each correction solving the LS-20 system J δε = −r by GMRES, convergence judged in matrix units (LS-24).
+    # solve_step(macro_strain, plastic_history) solves one load step, from the previous step's converged strain
+    # shifted by the macrostrain increment. A subclass supplies evaluate (the LS-18 residual) and get_D, which gives
+    # LS-20's operator D at the current state and a function for its lattice mean ⟨D⟩.
     def __init__(self, lattice, matrix_L, use_fourier_preconditioner):
         self.clusters = lattice.clusters
         self.reference_L = lattice.reference_L                  # C0
         self.P0_transformed = lattice.P0_transformed
         self.use_fourier_preconditioner = use_fourier_preconditioner
-        # LS-24: the residual r is a strain of the reference medium, so its size depends on C0. Convergence is judged
-        # instead on the strain correction an all-matrix cell would need to cancel r, M_m⁻¹ r, with M_m the Newton
-        # Jacobian of a homogeneous cell of matrix stiffness C_m (LS-20 with L_t = C_m everywhere):
-        #   M̂_m(ξ) = I − P̂0(ξ) (I − C0⁻¹ C_m),
-        # a fixed Fourier operator like P0, so the tolerance means the same whatever C0.
-        matrix_cell_jacobian = np.eye(6) - self.P0_transformed @ (np.eye(6) - np.linalg.solve(self.reference_L,
-                                                                                                matrix_L))
-        self.residual_in_matrix_units = np.linalg.inv(matrix_cell_jacobian)
+        self.residual_in_matrix_units = get_residual_in_matrix_units(self.P0_transformed, self.reference_L, matrix_L)
         self.previous_strain = np.zeros((self.clusters.partition_count, 6))
         self.previous_macro_strain = np.zeros(6)
 
-    def evaluate(self, strain, macro_strain, plastic_history):
-        # The LS-18 residual r = ε − ε̄ − P0 μ*, with μ* = ε − C0⁻¹ σ the equivalent eigenstrain (LS-6), and the
-        # clusters' candidate plastic state and stress.
-        cluster_strain = get_cluster_strain(strain, self.clusters, plastic_history, self.reference_L)
-        plastic_state, cluster_stress = get_plastic_eigenstrain(cluster_strain, self.clusters.materials,
-                                                                plastic_history)
-        partition_stress = get_partition_stress(cluster_stress, self.clusters)
-        equivalent_eigenstrain = strain - np.linalg.solve(self.reference_L, partition_stress.T).T
-        b = np.tile(macro_strain, (len(strain), 1))
-        residual = strain - b - apply_on_lattice(self.P0_transformed, equivalent_eigenstrain)
-        return Evaluation(strain, plastic_state, cluster_stress, residual)
-
     def get_newton_correction(self, current, plastic_history):
-        # Solves the LS-20 system J δε = −r, J v = v − P0 (D v) with D = I − C0⁻¹ L_t and L_t each partition's
-        # tangent, by GMRES. The Fourier preconditioner M⁻¹ acts on the right: GMRES solves J M⁻¹ y = −r and
-        # δε = M⁻¹ y, so it still measures the residual of J δε = −r, and M⁻¹ changes only how many iterations that
-        # takes, not the correction.
-        cluster_strain = get_cluster_strain(current.strain, self.clusters, plastic_history, self.reference_L)
-        partition_tangent = get_partition_tangent(cluster_strain, self.clusters, plastic_history, self.reference_L)
-        jacobian_blocks = np.eye(6) - np.linalg.solve(self.reference_L, partition_tangent)
+        # Solves J δε = −r with J v = v − P0 (D v) (LS-20). The Fourier preconditioner M⁻¹ (LS-23) acts on the right:
+        # GMRES solves J M⁻¹ y = −r and δε = M⁻¹ y, so it still measures the residual of J δε = −r, and M⁻¹ changes
+        # only how many iterations that takes, not the correction.
+        apply_D, get_mean_D = self.get_D(current, plastic_history)
 
         def apply_jacobian(vector):
-            return vector - apply_on_lattice(self.P0_transformed, np.einsum('pij,pj->pi', jacobian_blocks, vector))
+            return vector - apply_on_lattice(self.P0_transformed, apply_D(vector))
 
         if not self.use_fourier_preconditioner:
             return solve_newton_correction(apply_jacobian, current.residual)
 
-        preconditioner = get_fourier_preconditioner(self.P0_transformed, jacobian_blocks)
+        preconditioner = get_fourier_preconditioner(self.P0_transformed, get_mean_D())
 
         def apply_preconditioner(vector):
             return apply_on_lattice(preconditioner, vector)
@@ -288,3 +219,222 @@ class LSSolver:
             measure_residual=lambda residual: apply_on_lattice(self.residual_in_matrix_units, residual))
         self.previous_strain, self.previous_macro_strain = step_result.strain, macro_strain
         return step_result
+
+## ------- Spectral LS: One Cluster per Partition ------- ##
+
+class SpectralLSSolver(LatticeSolver):
+    # Spectral LS: LS-18 with one partition per element (per element column), each partition one cluster, so a
+    # partition's stress is its cluster's at the partition strain.
+    def __init__(self, lattice, matrix_L, use_fourier_preconditioner):
+        super().__init__(lattice, matrix_L, use_fourier_preconditioner)
+        if self.clusters.cluster_count != self.clusters.partition_count:
+            raise ValueError("Spectral LS needs exactly one cluster per partition.")
+
+    def evaluate(self, strain, macro_strain, plastic_history):
+        # The LS-18 residual r = ε − ε̄ − P0 μ*, with μ* = ε − C0⁻¹ σ the equivalent eigenstrain (LS-6), and the
+        # candidate plastic state and stress.
+        plastic_state, stress = get_plastic_eigenstrain(strain, self.clusters.materials, plastic_history)
+        equivalent_eigenstrain = strain - np.linalg.solve(self.reference_L, stress.T).T
+        b = np.tile(macro_strain, (len(strain), 1))
+        residual = strain - b - apply_on_lattice(self.P0_transformed, equivalent_eigenstrain)
+        return Evaluation(strain, plastic_state, stress, residual)
+
+    def get_D(self, current, plastic_history):
+        # D = I − C0⁻¹ L_t (LS-20), one block per partition.
+        tangent = get_algorithmic_stiffness(current.strain, self.clusters.materials, plastic_history)
+        D_blocks = np.eye(6) - np.linalg.solve(self.reference_L, tangent)
+        return (lambda vector: apply_blocks(D_blocks, vector)), (lambda: D_blocks.mean(axis=0))
+
+def get_elastic_strain_concentration(lattice, matrix_L):
+    # The strain of every partition of the lattice per unit macrostrain in elasticity, partitions × 6 × 6 (column k for
+    # the k-th unit macrostrain): the strain concentration tensor that k-means clusters on (Liu–Bessa–Liu 2016,
+    # section 2.2.1). Each column is one Spectral LS load step with every phase elastic.
+    materials = lattice.clusters.materials
+    elastic_materials = materials._replace(yield_stress=np.full(len(materials.yield_stress), np.inf))
+    elastic_lattice = lattice._replace(clusters=lattice.clusters._replace(materials=elastic_materials))
+    unloaded = get_unloaded_plastic_state(lattice.clusters.cluster_count)
+    return np.stack([SpectralLSSolver(elastic_lattice, matrix_L, config.spectral_ls_fourier_preconditioner)
+                     .solve_step(unit_strain, unloaded).strain for unit_strain in np.eye(6)], axis=-1)
+
+## ------- CP: Pieces of Clusters (LS-25) ------- ##
+
+class PieceLaw(NamedTuple):
+    # LS-25 on a lattice, fixed along the load path. With K_g = (L_g − C0)⁻¹, N_g = K_g L_g and
+    # T_A = (Σ c_p K_g)⁻¹ = C*_A − C0 over partition A's pieces p (slide 15), every piece of cluster g in partition A
+    # has the strain ε_p = K_g τ_A + N_g μ_g, with τ_A = T_A (ε_A − λ*_A) and λ*_A = Σ c_p N_g μ_g. That is linear in
+    # the partition strains ε and cluster eigenstrains μ, so it is kept as sparse block matrices:
+    #   ε_g = E ε + F μ        each cluster's average strain over its pieces (F only between coupled clusters),
+    #   μ*  = D_e (ε − Λ μ)    each partition's equivalent eigenstrain −C0⁻¹ τ_A, with Λ μ = λ*_A.
+    # A coupled cluster has a piece in a partition holding several pieces; an uncoupled one's pieces each fill their
+    # partition, so its strain does not depend on μ.
+    coupled_clusters: np.ndarray
+    strain_to_cluster_strain: scipy.sparse.csr_matrix                # E, blocks w_p K_g T_A
+    coupled_eigenstrain_to_cluster_strain: scipy.sparse.csr_matrix   # F, on the coupled clusters
+    eigenstrain_to_lambda_star: scipy.sparse.csr_matrix              # Λ, blocks c_p N_g
+    elastic_D: scipy.sparse.csr_matrix                               # D_e, blocks −C0⁻¹ T_A
+
+def get_partition_pairs(clusters, pieces):
+    # Every pair (p, q) of a given piece p with a piece q of p's partition, q = p included. Pieces are ordered by
+    # partition, so a partition's pieces are consecutive, from its first.
+    pieces_per_partition = np.bincount(clusters.piece_partition)
+    first_piece = np.cumsum(pieces_per_partition) - pieces_per_partition
+    pair_counts = pieces_per_partition[clusters.piece_partition[pieces]]
+    pair_first = np.repeat(pieces, pair_counts)
+    position_in_partition = np.arange(len(pair_first)) - np.repeat(np.cumsum(pair_counts) - pair_counts, pair_counts)
+    return pair_first, first_piece[clusters.piece_partition[pair_first]] + position_in_partition
+
+def get_coupled_eigenstrain_to_cluster_strain(clusters, coupled, K, N, T):
+    # F of LS-25 on the coupled clusters:
+    #   ∂ε_g/∂μ_h = δ_gh N_g − Σ w_p c_q K_g T_A N_h
+    # over the pairs (p, q) of pieces of one partition A, p of cluster g and q of cluster h, w_p = c_p / v_g the
+    # piece's weight in its cluster's average.
+    position = np.zeros(clusters.cluster_count, dtype=int)
+    position[coupled] = np.arange(len(coupled))
+    p, q = get_partition_pairs(clusters, np.flatnonzero(np.isin(clusters.piece_cluster, coupled)))
+    g, h, A = clusters.piece_cluster[p], clusters.piece_cluster[q], clusters.piece_partition[p]
+    weight = clusters.piece_volume_fraction[p] / clusters.volume[g] * clusters.piece_volume_fraction[q]
+    return assemble_blocks(np.concatenate([N[coupled], -weight[:, None, None] * K[g] @ T[A] @ N[h]]),
+                           np.concatenate([np.arange(len(coupled)), position[g]]),
+                           np.concatenate([np.arange(len(coupled)), position[h]]), (len(coupled), len(coupled)))
+
+def get_piece_law(clusters, reference_L):
+    partition, cluster = clusters.piece_partition, clusters.piece_cluster
+    share = clusters.piece_volume_fraction                   # c_p, the piece's share of its partition
+    weight = share / clusters.volume[cluster]                # w_p, its weight in its cluster's average
+    partition_count, cluster_count = clusters.partition_count, clusters.cluster_count
+    K = np.linalg.inv(clusters.materials.L - reference_L)
+    N = K @ clusters.materials.L
+    partition_sum = scipy.sparse.csr_matrix((share, (partition, np.arange(len(partition)))),
+                                            shape=(partition_count, len(partition)))
+    T = np.linalg.inv((partition_sum @ K[cluster].reshape(-1, 36)).reshape(-1, 6, 6))
+    coupled = np.unique(cluster[np.bincount(partition)[partition] > 1])
+    return PieceLaw(
+        coupled,
+        assemble_blocks(weight[:, None, None] * K[cluster] @ T[partition], cluster, partition,
+                        (cluster_count, partition_count)),
+        get_coupled_eigenstrain_to_cluster_strain(clusters, coupled, K, N, T),
+        assemble_blocks(share[:, None, None] * N[cluster], partition, cluster, (partition_count, cluster_count)),
+        get_block_diagonal(-np.linalg.solve(reference_L, T)))
+
+def get_cluster_strain(strain, eigenstrain, law):
+    # ε_g = E ε + F μ (LS-25).
+    cluster_strain = apply_sparse(law.strain_to_cluster_strain, strain)
+    cluster_strain[law.coupled_clusters] += apply_sparse(law.coupled_eigenstrain_to_cluster_strain,
+                                                         eigenstrain[law.coupled_clusters])
+    return cluster_strain
+
+def get_equivalent_eigenstrain(strain, eigenstrain, law):
+    # μ*_A = ε_A − C0⁻¹ σ_A = −C0⁻¹ τ_A = D_e (ε − Λ μ) (LS-6 and LS-25, σ_A = C0 ε_A + τ_A).
+    return apply_sparse(law.elastic_D, strain - apply_sparse(law.eigenstrain_to_lambda_star, eigenstrain))
+
+def get_cluster_jacobian_solver(sensitivity, law):
+    # Z⁻¹ (LS-27) as a function on one row per cluster, with Z = I − H F the derivative of LS-26's cluster residual
+    # r_g = μ_g − μ(ε_g) at fixed partition strains, H_g = ∂μ/∂ε at each cluster's average strain. Z is the identity
+    # on the uncoupled clusters, and sparse on the coupled ones, factorized here.
+    coupled = law.coupled_clusters
+    if len(coupled) == 0:
+        return lambda rows: rows
+    F = law.coupled_eigenstrain_to_cluster_strain
+    Z = scipy.sparse.identity(F.shape[0], format="csr") - get_block_diagonal(sensitivity[coupled]) @ F
+    factorization = scipy.sparse.linalg.splu(Z.tocsc())
+
+    def solve(rows):
+        result = rows.copy()
+        result[coupled] = factorization.solve(rows[coupled].reshape(-1)).reshape(-1, 6)
+        return result
+
+    return solve
+
+def check_reference_below_tangents(cluster_tangents, reference_L):
+    # LS-26 has a solution only while C0 is below the tangent of every coupled cluster, i.e. while L_t − C0 is positive
+    # definite there (Brisard–Dormieux's Assumption 1 on the soft side). Otherwise the cluster Jacobian Z is singular,
+    # so stop with the cause instead.
+    differences = cluster_tangents - reference_L
+    lowest_eigenvalues = np.linalg.eigvalsh((differences + np.swapaxes(differences, -1, -2)) / 2)[:, 0]
+    if np.any(lowest_eigenvalues <= 0):
+        raise SolverDidNotConverge(
+            f"C0 is not below the tangent stiffness of {np.count_nonzero(lowest_eigenvalues <= 0)} clusters sharing a "
+            "partition, so their eigenstrains (LS-26) have no solution: lower config.cp_reference_stiffness_scale "
+            "(a yielding phase's shear tangent is about G H / (3G + H))")
+
+## ------- CP Solver (LS-26, LS-27) ------- ##
+
+class CPSolver(LatticeSolver):
+    # CP: LS-18 on the partitions, whose stress comes from clusters that may span several partitions (LS-25). Newton's
+    # unknowns are the partition strains; every evaluation solves the clusters' eigenstrains from them (LS-26), so
+    # every Newton iterate satisfies every cluster's return map.
+    def __init__(self, lattice, matrix_L, use_fourier_preconditioner):
+        super().__init__(lattice, matrix_L, use_fourier_preconditioner)
+        self.law = get_piece_law(self.clusters, self.reference_L)
+
+    def solve_eigenstrain(self, strain, plastic_history):
+        # LS-26: the cluster eigenstrains μ_g = μ(ε_g; z_n,g) at the given partition strains, ε_g the cluster's average
+        # strain (LS-25), by Newton on r_g = μ_g − μ(ε_g) with the Jacobian Z (LS-27), from the accepted history. An
+        # uncoupled cluster's ε_g does not depend on μ, so one Newton step settles it. Each step goes through the outer
+        # Newton's backtracking line search (line_search_*) on the residual in stress units, ‖L_g r_g‖: the return
+        # map's switch between elastic and plastic clusters can make full steps cycle. Converged when every |L_g r_g|
+        # is below cp_eigenstrain_tolerance times the largest cluster stress. Returns the eigenstrains, and the
+        # clusters' plastic state and stress.
+        materials = self.clusters.materials
+
+        def evaluate(eigenstrain):
+            # The clusters' average strains, their return map, and the residual r_g and L_g r_g.
+            cluster_strain = get_cluster_strain(strain, eigenstrain, self.law)
+            plastic_state, stress = get_plastic_eigenstrain(cluster_strain, materials, plastic_history)
+            residual = eigenstrain - plastic_state.plastic_strain
+            return cluster_strain, plastic_state, stress, residual, apply_blocks(materials.L, residual)
+
+        eigenstrain = plastic_history.plastic_strain
+        cluster_strain, plastic_state, stress, residual, stress_residual = evaluate(eigenstrain)
+        for iteration in range(config.cp_eigenstrain_max_iterations + 1):
+            if np.abs(stress_residual).max() <= config.cp_eigenstrain_tolerance * np.abs(stress).max():
+                return eigenstrain, plastic_state, stress
+            if iteration == config.cp_eigenstrain_max_iterations:
+                break
+            sensitivity = get_eigenstrain_sensitivity(cluster_strain, materials, plastic_history)
+            correction = -get_cluster_jacobian_solver(sensitivity, self.law)(residual)
+            residual_size = np.linalg.norm(stress_residual)
+            step_length = 1.0
+            for _ in range(config.line_search_max_reductions + 1):
+                trial = evaluate(eigenstrain + step_length * correction)
+                sufficient_size = (1 - config.line_search_sufficient_decrease * step_length) * residual_size
+                if np.linalg.norm(trial[-1]) < sufficient_size:
+                    break
+                step_length *= config.line_search_step_reduction
+            eigenstrain = eigenstrain + step_length * correction
+            cluster_strain, plastic_state, stress, residual, stress_residual = trial
+        raise SolverDidNotConverge("CP's cluster eigenstrains (LS-26) did not converge: C0 may be above a cluster's "
+                                   "tangent stiffness (lower config.cp_reference_stiffness_scale)")
+
+    def evaluate(self, strain, macro_strain, plastic_history):
+        # The LS-18 residual r = ε − ε̄ − P0 μ* at the eigenstrains LS-26 gives; the stress returned is each cluster's.
+        eigenstrain, plastic_state, cluster_stress = self.solve_eigenstrain(strain, plastic_history)
+        residual = (strain - macro_strain
+                    - apply_on_lattice(self.P0_transformed, get_equivalent_eigenstrain(strain, eigenstrain, self.law)))
+        return Evaluation(strain, plastic_state, cluster_stress, residual)
+
+    def get_D(self, current, plastic_history):
+        # LS-27: D v, the equivalent eigenstrain's response to a partition strain change v with the eigenstrains
+        # following through LS-26 (Z δμ = H E v):
+        #   D v = D_e (v − Λ Z⁻¹ H E v).
+        # When every cluster lies in one partition, D is one block per partition, the derivative of its stress;
+        # otherwise the eigenstrains couple the partitions a cluster spans. Its lattice mean ⟨D⟩, for LS-23, is the
+        # mean response to uniform fields: the mean block in the first case.
+        law, clusters = self.law, self.clusters
+        cluster_strain = get_cluster_strain(current.strain, current.plastic_state.plastic_strain, law)
+        sensitivity = get_eigenstrain_sensitivity(cluster_strain, clusters.materials, plastic_history)
+        cluster_tangents = clusters.materials.L @ (np.eye(6) - sensitivity)
+        check_reference_below_tangents(cluster_tangents[law.coupled_clusters], self.reference_L)
+        solve_cluster_jacobian = get_cluster_jacobian_solver(sensitivity, law)
+        eigenstrain_load = get_block_diagonal(sensitivity) @ law.strain_to_cluster_strain     # H E
+
+        def apply_D(vector):
+            eigenstrain_change = solve_cluster_jacobian(apply_sparse(eigenstrain_load, vector))
+            return apply_sparse(law.elastic_D,
+                                vector - apply_sparse(law.eigenstrain_to_lambda_star, eigenstrain_change))
+
+        def get_mean_D():
+            return np.stack([apply_D(np.tile(unit, (clusters.partition_count, 1))).mean(axis=0)
+                             for unit in np.eye(6)], axis=-1)
+
+        return apply_D, get_mean_D

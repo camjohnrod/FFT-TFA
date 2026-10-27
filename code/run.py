@@ -2,7 +2,8 @@
 # a timing table and saves it with the figures in code/output/:
 #   timing.txt              each method's offline and online time, Newton and GMRES iterations, over the load path
 #   stress_strain.png       macroscopic stress against applied strain, every method
-#   cross_section.png       the fiber on the element grid, with each method's cells (partitions, elements, clusters)
+#   cross_section.png       the fiber on the element grid, with each method's cells (partitions, elements, clusters),
+#                           k-means clusters coloured in
 #   von_mises_stress.png    von Mises stress at the last load step, one map per method
 #   plastic_strain.png      accumulated plastic strain at the last load step, one map per method
 # The maps show the element layer at mid-thickness.
@@ -19,8 +20,10 @@ import tqdm
 
 import plots
 from fe import (Clusters, get_clusters, get_E_and_P, get_inclusion_L, get_matrix_L, get_partition_discretization,
-                get_periodic_mesh, get_spectral_discretization, is_shape_constant_along_z)
-from ls_model import LSSolver, get_cp_reference_L, get_named_stiffness, get_P0_transformed, get_spectral_reference_L
+                get_periodic_mesh, get_spectral_discretization, is_shape_constant_along_z, label_k_means,
+                label_partition_phases)
+from ls_model import (CPSolver, SpectralLSSolver, get_cp_reference_L, get_elastic_strain_concentration,
+                      get_named_stiffness, get_P0_transformed, get_spectral_reference_L)
 from material import get_flow_stress, get_unloaded_plastic_state, get_von_mises_stress
 from newton import LoadPathAbandoned, MaterialFullySoftened
 from tfa_model import get_tfa_solver
@@ -28,9 +31,10 @@ from tfa_model import get_tfa_solver
 ## ------- Problem ------- ##
 
 # Everything a run needs, built from config.py, and what each method's offline step costs:
-#   CP           the partitions and their clusters, C0, the partition-averaged kernel P0;
+#   CP           the partitions and its clusters (config.cp_clusters), C0, the partition-averaged kernel P0;
 #   Spectral LS  the element lattice and its clusters, its own reference stiffness and kernel P0;
-#   TFA          the partitions' clusters (its regions) and the FE influence functions E and P on them.
+#   TFA          its clusters (config.tfa_clusters, its regions) and the FE influence functions E and P on them.
+# k-means clusters are found on each element's elastic strain concentration, from Spectral LS's lattice.
 
 class Lattice(NamedTuple):
     # What an LS method needs on its lattice: the clusters, the reference stiffness C0, and the kernel P̂0 as one
@@ -40,12 +44,28 @@ class Lattice(NamedTuple):
     P0_transformed: np.ndarray
 
 class Problem(NamedTuple):
-    partitions: Lattice          # CP's lattice; its clusters are also TFA's regions
+    partitions: Lattice          # CP's lattice
     spectral_lattice: Lattice    # Spectral LS's lattice, None when it is switched off
+    tfa_clusters: Clusters       # TFA's regions, None when it is switched off
     E: np.ndarray                # TFA's influence functions, None when no method needs them
     P: np.ndarray
     matrix_L: np.ndarray         # the unit in which the LS methods judge convergence (LS-24)
     offline_seconds: dict        # by method: everything it needs built, as if it ran alone
+
+def get_spectral_lattice(matrix_L, inclusion_L):
+    # Spectral LS's lattice, and its mesh: the same elements with one partition per element (column).
+    spectral_mesh = get_periodic_mesh(get_spectral_discretization())
+    spectral_reference_L = get_spectral_reference_L(matrix_L, inclusion_L)
+    return spectral_mesh, Lattice(get_clusters(spectral_mesh, label_partition_phases(spectral_mesh)),
+                                  spectral_reference_L,
+                                  get_P0_transformed(spectral_mesh.discretization, spectral_reference_L))
+
+def get_k_means_labels(mesh, matrix_L, inclusion_L):
+    # Every element's k-means cluster (fe.label_k_means), on its elastic strain concentration (36 numbers) from
+    # Spectral LS on the same elements.
+    spectral_mesh, spectral_lattice = get_spectral_lattice(matrix_L, inclusion_L)
+    concentration = get_elastic_strain_concentration(spectral_lattice, matrix_L)
+    return label_k_means(mesh, concentration.reshape(-1, 36)[spectral_mesh.element_partition_ids])
 
 def get_problem():
     # E and P come from the cache when it matches; their offline time is the time they took to compute.
@@ -53,35 +73,50 @@ def get_problem():
 
     start_time = time.perf_counter()
     mesh = get_periodic_mesh(get_partition_discretization())
-    clusters = get_clusters(mesh)
-    partition_seconds = time.perf_counter() - start_time
+    mesh_seconds = time.perf_counter() - start_time
 
-    # E is needed by TFA and by the homogenized reference stiffness, P by TFA only.
+    # The clusters of each setting in use (config.cp_clusters, config.tfa_clusters), each built once, with its time.
+    clusters, cluster_seconds = {}, {}
+    for setting in dict.fromkeys([config.cp_clusters] + ([config.tfa_clusters] if config.include_tfa else [])):
+        start_time = time.perf_counter()
+        element_cluster = (get_k_means_labels(mesh, matrix_L, inclusion_L) if setting == "k-means"
+                           else label_partition_phases(mesh))
+        clusters[setting] = get_clusters(mesh, element_cluster)
+        cluster_seconds[setting] = time.perf_counter() - start_time
+        if setting == "k-means":
+            matrix_cluster_count = np.count_nonzero(clusters[setting].materials.material_ids == 0)
+            print(f"k-means: {matrix_cluster_count} matrix and "
+                  f"{clusters[setting].cluster_count - matrix_cluster_count} inclusion clusters")
+    cp_clusters = clusters[config.cp_clusters]
+    tfa_clusters = clusters[config.tfa_clusters] if config.include_tfa else None
+
+    # E is needed by TFA and by the homogenized reference stiffness, P by TFA only; both on TFA's clusters when TFA
+    # runs.
     E, P, build_seconds = None, None, {}
-    if config.include_tfa_model or config.reference_stiffness == "homogenized":
-        E, P, build_seconds = get_E_and_P(mesh, clusters, include_P=config.include_tfa_model)
+    E_clusters = tfa_clusters if config.include_tfa else cp_clusters
+    if config.include_tfa or config.cp_reference_stiffness == "homogenized":
+        E, P, build_seconds = get_E_and_P(mesh, E_clusters, include_P=config.include_tfa)
 
     start_time = time.perf_counter()
-    reference_L = get_cp_reference_L(get_named_stiffness(clusters, E, matrix_L))
+    named_clusters = E_clusters if config.cp_reference_stiffness == "homogenized" else cp_clusters
+    reference_L = get_cp_reference_L(get_named_stiffness(named_clusters, E, matrix_L))
     print(f"CP's C0: C0_1111 = {reference_L[0, 0] / 1e6:.4g} MPa")
-    partitions = Lattice(clusters, reference_L, get_P0_transformed(mesh.discretization, reference_L))
-    offline_seconds = {"CP": partition_seconds + time.perf_counter() - start_time
-                             + (build_seconds["E"] if config.reference_stiffness == "homogenized" else 0)}
+    partitions = Lattice(cp_clusters, reference_L, get_P0_transformed(mesh.discretization, reference_L))
+    offline_seconds = {"CP": mesh_seconds + cluster_seconds[config.cp_clusters] + time.perf_counter() - start_time
+                             + (build_seconds["E"] if config.cp_reference_stiffness == "homogenized" else 0)}
 
     spectral_lattice = None
     if config.include_spectral_ls:
         start_time = time.perf_counter()
-        spectral_mesh = get_periodic_mesh(get_spectral_discretization())
-        spectral_reference_L = get_spectral_reference_L(matrix_L, inclusion_L)
-        print(f"Spectral LS's C0: C0_1111 = {spectral_reference_L[0, 0] / 1e6:.4g} MPa")
-        spectral_lattice = Lattice(get_clusters(spectral_mesh), spectral_reference_L,
-                                   get_P0_transformed(spectral_mesh.discretization, spectral_reference_L))
+        _, spectral_lattice = get_spectral_lattice(matrix_L, inclusion_L)
+        print(f"Spectral LS's C0: C0_1111 = {spectral_lattice.reference_L[0, 0] / 1e6:.4g} MPa")
         offline_seconds["Spectral LS"] = time.perf_counter() - start_time
 
-    if config.include_tfa_model:
-        offline_seconds["TFA"] = partition_seconds + build_seconds["E"] + build_seconds["P"]
+    if config.include_tfa:
+        offline_seconds["TFA"] = (mesh_seconds + cluster_seconds[config.tfa_clusters] + build_seconds["E"]
+                                  + build_seconds["P"])
 
-    return Problem(partitions, spectral_lattice, E, P, matrix_L, offline_seconds)
+    return Problem(partitions, spectral_lattice, tfa_clusters, E, P, matrix_L, offline_seconds)
 
 ## ------- Load Path ------- ##
 
@@ -98,12 +133,12 @@ def get_applied_macro_strain():
 
 def get_solvers(problem):
     # Every method config.py switches on, in the order of the table and the figures.
-    solvers = {"CP": LSSolver(problem.partitions, problem.matrix_L, config.cp_fourier_preconditioner)}
+    solvers = {"CP": CPSolver(problem.partitions, problem.matrix_L, config.cp_fourier_preconditioner)}
     if config.include_spectral_ls:
-        solvers["Spectral LS"] = LSSolver(problem.spectral_lattice, problem.matrix_L,
-                                          config.spectral_ls_fourier_preconditioner)
-    if config.include_tfa_model:
-        solvers["TFA"] = get_tfa_solver(problem.E, problem.P, problem.partitions.clusters)
+        solvers["Spectral LS"] = SpectralLSSolver(problem.spectral_lattice, problem.matrix_L,
+                                                  config.spectral_ls_fourier_preconditioner)
+    if config.include_tfa:
+        solvers["TFA"] = get_tfa_solver(problem.E, problem.P, problem.tfa_clusters)
     return solvers
 
 class LoadPathResult(NamedTuple):
@@ -129,7 +164,7 @@ def run_load_path(method, solver, applied_macro_strain):
     # Solves every load step in turn, each from the plastic history the previous one accepted. A step the method
     # cannot solve ends its load path there (the other methods carry on), unless it is the first step.
     clusters = solver.clusters
-    cluster_count = len(clusters.partition)
+    cluster_count = clusters.cluster_count
     plastic_history = get_unloaded_plastic_state(cluster_count)
 
     step_count = len(applied_macro_strain)
@@ -192,13 +227,16 @@ def get_timing_table(results, offline_seconds, step_count):
               for method, result in results.items() if result.completed_step_count < step_count]
     return "\n".join(lines)
 
-def get_element_map(clusters, cluster_values):
-    # One value per element on the element grid [j, i] of the element layer at mid-thickness, each element taking its
-    # cluster's value. For a shape constant along z every layer is the same.
+def get_layer_map(element_values):
+    # The values of the element layer at mid-thickness on its element grid [j, i]. For a shape constant along z every
+    # layer is the same.
     side = config.element_number_per_side
-    middle_layer = len(clusters.element_cluster) // side**2 // 2
-    layer_elements = slice(middle_layer * side**2, (middle_layer + 1) * side**2)
-    return cluster_values[clusters.element_cluster[layer_elements]].reshape(side, side)
+    middle_layer = len(element_values) // side**2 // 2
+    return element_values[middle_layer * side**2:(middle_layer + 1) * side**2].reshape(side, side)
+
+def get_element_map(clusters, cluster_values):
+    # get_layer_map of one value per cluster, each element taking its cluster's value.
+    return get_layer_map(cluster_values[clusters.element_cluster])
 
 def get_lattice_label(count_per_side):
     # "N×N" for a shape constant along z (cells are columns through the thickness), "N×N×N" otherwise.
@@ -207,25 +245,42 @@ def get_lattice_label(count_per_side):
 
 def get_reference_label():
     # CP's C0 as config.py states it, e.g. "0.01 × matrix", or "matrix" at scale 1.
-    if config.reference_stiffness_scale == 1:
-        return config.reference_stiffness
-    return f"{config.reference_stiffness_scale:g} × {config.reference_stiffness}"
+    if config.cp_reference_stiffness_scale == 1:
+        return config.cp_reference_stiffness
+    return f"{config.cp_reference_stiffness_scale:g} × {config.cp_reference_stiffness}"
+
+def get_cluster_map(clusters):
+    # Every element's cluster on the mid-thickness layer.
+    return get_element_map(clusters, np.arange(clusters.cluster_count))
 
 def get_cell_maps(problem, methods):
-    # Each method's cells on the element grid of the mid-thickness layer, with its settings: CP's partitions, Spectral
-    # LS's elements, TFA's clusters (CP's partitions, the mixed ones split by phase).
-    clusters = problem.partitions.clusters
+    # Each method's discretization on the element grid of the mid-thickness layer, with its settings: CP's partitions
+    # and clusters, Spectral LS's voxels (one element each), TFA's clusters; k-means clusters coloured in.
+    cp_clusters = problem.partitions.clusters
     partitions, elements = config.partition_number_per_side, config.element_number_per_side
-    mixed_count = np.count_nonzero(clusters.volume_fraction < 1) // 2
+    cp_settings = f"{get_lattice_label(partitions)} partitions"
+    if config.cp_clusters == "k-means":
+        cp_settings += f", C0: {get_reference_label()}\n{cp_clusters.cluster_count} k-means clusters"
+    else:
+        cp_settings += (f", {np.count_nonzero(np.bincount(cp_clusters.piece_partition) > 1)} mixed, "
+                        f"C0: {get_reference_label()}")
     cell_maps = {
-        "CP": plots.CellMap("CP", f"{get_lattice_label(partitions)} partitions, {mixed_count} mixed, "
-                                  f"C0: {get_reference_label()}", get_element_map(clusters, clusters.partition)),
+        "CP": plots.CellMap(
+            "CP", cp_settings,
+            {"cluster": get_cluster_map(cp_clusters),
+             "partition": get_layer_map(cp_clusters.piece_partition[cp_clusters.element_piece])},
+            get_cluster_map(cp_clusters) if config.cp_clusters == "k-means" else None),
         "Spectral LS": plots.CellMap("Spectral LS",
-                                     f"{get_lattice_label(elements)} elements, "
+                                     f"{get_lattice_label(elements)} voxels, "
                                      f"C0: {config.spectral_ls_reference_stiffness}",
-                                     np.arange(elements**2).reshape(elements, elements)),
-        "TFA": plots.CellMap("TFA", f"{len(clusters.partition)} clusters: partitions, mixed ones split by phase",
-                             get_element_map(clusters, np.arange(len(clusters.partition))))}
+                                     {"voxel": np.arange(elements**2).reshape(elements, elements)})}
+    if problem.tfa_clusters is not None:
+        tfa_clusters = problem.tfa_clusters
+        tfa_cluster_label = ("k-means clusters" if config.tfa_clusters == "k-means"
+                             else "clusters: partitions, mixed ones split by phase")
+        cell_maps["TFA"] = plots.CellMap(
+            "TFA", f"{tfa_clusters.cluster_count} {tfa_cluster_label}", {"cluster": get_cluster_map(tfa_clusters)},
+            get_cluster_map(tfa_clusters) if config.tfa_clusters == "k-means" else None)
     return [cell_maps[method] for method in methods]
 
 def save_figures(problem, results, applied_macro_strain):
@@ -237,13 +292,21 @@ def save_figures(problem, results, applied_macro_strain):
                              applied_macro_strain, config.max_macro_strain,
                              config.output_folder / "stress_strain.png")
 
-    # The maps compare the same load: the last step every method completed.
+    # The maps compare the same load: the last step every method completed. With von_mises_matrix_only the inclusion's
+    # elements have no von Mises value (NaN), so the maps grey them out and take their limits from the matrix.
     step_count = min(result.completed_step_count for result in results.values())
-    von_mises_maps = [plots.FieldMap(method, get_element_map(
-        result.clusters, get_von_mises_stress(result.cluster_stress_per_step[step_count - 1]) / 1e6))
-        for method, result in results.items()]
-    plots.plot_field_maps(von_mises_maps, "von Mises stress (MPa)", step_count, len(applied_macro_strain),
-                          config.von_mises_min_MPa, config.von_mises_max_MPa,
+    inclusion_elements = get_element_map(clusters, clusters.materials.material_ids) == 1
+    von_mises_maps = []
+    for method, result in results.items():
+        values = get_element_map(result.clusters,
+                                 get_von_mises_stress(result.cluster_stress_per_step[step_count - 1]) / 1e6)
+        if config.von_mises_matrix_only:
+            values = np.where(inclusion_elements, np.nan, values)
+        von_mises_maps.append(plots.FieldMap(method, values))
+    plots.plot_field_maps(von_mises_maps,
+                          "von Mises stress in the matrix (MPa)" if config.von_mises_matrix_only
+                          else "von Mises stress (MPa)",
+                          step_count, len(applied_macro_strain), config.von_mises_min_MPa, config.von_mises_max_MPa,
                           config.output_folder / "von_mises_stress.png")
     plastic_strain_maps = [plots.FieldMap(method, get_element_map(
         result.clusters, 100 * result.accumulated_plastic_strain_per_step[step_count - 1]))

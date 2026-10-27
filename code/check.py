@@ -1,7 +1,7 @@
-# Checks the code on five small problems, each solved by every method (CP, Spectral LS, TFA). Run it after any
+# Checks the code on seven small problems, each solved by every method (CP, Spectral LS, TFA). Run it after any
 # change to the code:
 #
-#   python code/check.py         run the checks (a few seconds)
+#   python code/check.py         run the checks (about 15 seconds)
 #   python code/check.py save    run the checks (except the comparison with the old reference) and, if they all
 #                                pass, save the results as the reference that later runs must reproduce exactly
 #
@@ -17,9 +17,13 @@
 #   z laminate    a laminate with interfaces normal to z, so the geometry varies along z: meshed and partitioned in 3D,
 #                 the only test of the kernel's ξ_z frequencies. Every method must reproduce its exact solution.
 #   sphere        a spherical inclusion, meshed and partitioned in 3D, with mixed partitions all around it.
-# On all five, every method must complete every load step and, once a reference is saved, reproduce it bit for bit.
-# Where CP has mixed partitions (cut laminate, circle, sphere), their elastic law must match its closed form (LS-22 in
-# elasticity, notes/2_ls_model.md section 4.4): a wrong split or split tangent fails there.
+#   k-means laminate, k-means sphere
+#                 the laminate and the sphere with k-means clusters for CP and TFA (config.cp_clusters,
+#                 config.tfa_clusters). On the laminate every method must still reproduce the exact solution.
+# On all seven, every method must complete every load step and, once a reference is saved, reproduce it bit for bit.
+# Where CP's partitions hold several pieces (cut laminate, circle, sphere, k-means), CP's piece law must match LS-25
+# computed independently, piece by piece (notes/2_ls_model.md section 4.5): a wrong piece law or piece indexing fails
+# there.
 # So a change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
 # results, then save a new reference. The reference is code/check_reference.npz, and holds bit for bit only at
 # the config.thread_count it was saved with.
@@ -54,14 +58,17 @@ pinned_inputs = {
     "inclusion_hardening_modulus": 0.0, "matrix_hardening_modulus": 10e6,
     "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0]), "strain_increment_count": 12,
     "load_path_shape": "monotonic",
-    "include_spectral_ls": True, "include_tfa_model": True, "reference_stiffness": "matrix",
-    "reference_stiffness_scale": 0.01, "spectral_ls_reference_stiffness": "midpoint", "cp_fourier_preconditioner": True,
+    "include_spectral_ls": True, "include_tfa": True, "cp_reference_stiffness": "matrix",
+    "cp_reference_stiffness_scale": 0.01, "spectral_ls_reference_stiffness": "midpoint",
+    "cp_fourier_preconditioner": True,
     "spectral_ls_fourier_preconditioner": False,
     "convergence_tolerance": 1e-6, "residual_strain_scale_floor": 1e-4, "newton_max_iterations": 50,
     "newton_krylov_tolerance": 1e-3, "newton_krylov_restart": 50, "newton_krylov_max_restarts": None,
-    "ls_divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "offline_columns_per_solve": 100,
+    "ls_divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "fe_columns_per_solve": 100,
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
-    "mixed_partition_tolerance": 1e-12, "mixed_partition_max_iterations": 50}
+    "cp_eigenstrain_tolerance": 1e-12, "cp_eigenstrain_max_iterations": 50,
+    "cp_clusters": "partition phases", "tfa_clusters": "partition phases", "k_means_matrix_clusters": 8,
+    "k_means_inclusion_clusters": 1, "k_means_iterations": 50, "k_means_seed": 0}
 
 # What each problem changes from pinned_inputs.
 check_problems = {
@@ -69,7 +76,7 @@ check_problems = {
     # cyclic path: the only test of unloading, reverse yielding and zero imposed strain. 4 increments per quarter
     # still yield at both zero crossings. The homogenized C0 is the only test of that choice.
     "laminate": {"inclusion_shape": "laminate", "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.01]),
-                 "load_path_shape": "cyclic", "strain_increment_count": 4, "reference_stiffness": "homogenized"},
+                 "load_path_shape": "cyclic", "strain_increment_count": 4, "cp_reference_stiffness": "homogenized"},
     # A layer 7 elements thick, so each interface cuts a partition (2/3 fiber). In transverse shear γ12 both phases
     # carry the same stress, so the equal-stress split is exact there and every method must match the exact solution.
     "cut laminate": {"inclusion_shape": "laminate", "layer_thickness": (7 / 27) * 1e-3,
@@ -84,6 +91,18 @@ check_problems = {
     # A sphere on a 12³ mesh with 4³ partitions, loaded with z components: the only test of mixed partitions in 3D.
     "sphere": {"inclusion_shape": "sphere", "element_number_per_side": 12, "partition_number_per_side": 4,
                "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03])},
+    # The laminate with k-means clusters for CP and TFA, up to two per phase (the inclusion's strain concentration is
+    # uniform, so it gets one). Each phase's exact state is uniform, so every method must still reproduce it, however
+    # k-means divides a phase; the matrix clusters cut through partitions.
+    "k-means laminate": {"inclusion_shape": "laminate",
+                         "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.01]),
+                         "load_path_shape": "cyclic", "strain_increment_count": 4, "cp_clusters": "k-means",
+                         "tfa_clusters": "k-means", "k_means_matrix_clusters": 2, "k_means_inclusion_clusters": 2},
+    # The sphere with k-means clusters for CP and TFA, so clusters span partitions, and some clusters sharing a
+    # partition also fill others: the only test of LS-25's coupling across partitions.
+    "k-means sphere": {"inclusion_shape": "sphere", "element_number_per_side": 12, "partition_number_per_side": 4,
+                       "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03]), "cp_clusters": "k-means",
+                       "tfa_clusters": "k-means"},
 }
 
 # The methods whose model is not exact on a problem: compared with the exact solution, but not judged by it.
@@ -104,7 +123,8 @@ interface_normal_components_by_shape = {"laminate": [0, 3, 5], "laminate_z": [2,
 
 def get_phase_materials(materials):
     # One row per phase, matrix first, copied from the first cluster of each phase.
-    return ls_model.take_rows(materials, [np.flatnonzero(materials.material_ids == phase)[0] for phase in (0, 1)])
+    rows = [np.flatnonzero(materials.material_ids == phase)[0] for phase in (0, 1)]
+    return materials._make(field[rows] for field in materials)
 
 def get_phase_strains(macro_strain, matrix_normal_strain, inclusion_fraction, interface_normal_components):
     # The strain of each phase, matrix first, given the matrix's interface-normal components.
@@ -168,29 +188,40 @@ def get_laminate_error(result, exact_phase_stress):
                                               exact_cluster_stress[:, phase_clusters]))
     return max(errors)
 
-## ------- Mixed Partition Law ------- ##
+## ------- Partition Law ------- ##
 
-def get_mixed_partition_law_error(clusters, reference_L):
-    # In elasticity the equal-polarization split LS-22 has a closed form: σ_A = C*_A ε_A with
-    # C*_A = C0 + [c_m (L_m − C0)⁻¹ + c_f (L_f − C0)⁻¹]⁻¹. The largest relative difference of the mixed partitions'
-    # stress and tangent from it, at small random partition strains (well below yield); None without mixed partitions.
-    matrix, inclusion = ls_model.get_mixed_partition_clusters(clusters)
-    if len(matrix) == 0:
+def get_partition_law_error(clusters, reference_L):
+    # CP's piece law (LS-25) against its defining equations, at random partition strains and cluster eigenstrains,
+    # computed here piece by piece, with no code of ls_model's: every piece p of cluster g in partition A carries the
+    # partition's polarization, σ_p − C0 ε_p = τ_A with σ_p = L_g (ε_p − μ_g), so ε_p = (L_g − C0)⁻¹ (τ_A + L_g μ_g),
+    # and the pieces' strains average to the partition strain, which gives τ_A. The solver's sparse matrices must then
+    # give each cluster's average strain (E ε + F μ) and each partition's equivalent eigenstrain −C0⁻¹ τ_A
+    # (D_e (ε − Λ μ)). The largest relative difference; None when no partition holds several pieces.
+    if np.all(np.bincount(clusters.piece_partition) == 1):
         return None
-    strain = 1e-4 * np.random.default_rng(0).standard_normal((clusters.partition_count, 6))
-    history = get_unloaded_plastic_state(len(clusters.partition))
-    cluster_strain = ls_model.get_cluster_strain(strain, clusters, history, reference_L)
-    _, cluster_stress = get_plastic_eigenstrain(cluster_strain, clusters.materials, history)
-    mixed = clusters.partition[matrix]
-    stress = ls_model.get_partition_stress(cluster_stress, clusters)[mixed]
-    tangent = ls_model.get_partition_tangent(cluster_strain, clusters, history, reference_L)[mixed]
+    rng = np.random.default_rng(0)
+    strain = 1e-3 * rng.standard_normal((clusters.partition_count, 6))
+    eigenstrain = 1e-3 * rng.standard_normal((clusters.cluster_count, 6))
 
-    c_m, c_f = clusters.volume_fraction[matrix, None, None], clusters.volume_fraction[inclusion, None, None]
-    L = clusters.materials.L
-    exact_tangent = reference_L + np.linalg.inv(c_m * np.linalg.inv(L[matrix] - reference_L)
-                                                + c_f * np.linalg.inv(L[inclusion] - reference_L))
-    exact_stress = np.einsum('pij,pj->pi', exact_tangent, strain[mixed])
-    return max(get_relative_difference(stress, exact_stress), get_relative_difference(tangent, exact_tangent))
+    share = clusters.piece_volume_fraction[:, None]
+    piece_L = clusters.materials.L[clusters.piece_cluster]
+    piece_compliance = np.linalg.inv(piece_L - reference_L)
+    piece_eigenstrain = np.einsum('pij,pj->pi', piece_compliance @ piece_L, eigenstrain[clusters.piece_cluster])
+    partition_compliance = np.zeros((clusters.partition_count, 6, 6))
+    np.add.at(partition_compliance, clusters.piece_partition, share[:, :, None] * piece_compliance)
+    eigenstrain_part = np.zeros_like(strain)
+    np.add.at(eigenstrain_part, clusters.piece_partition, share * piece_eigenstrain)
+    polarization = np.linalg.solve(partition_compliance, (strain - eigenstrain_part)[..., None])[..., 0]
+    piece_strain = (np.einsum('pij,pj->pi', piece_compliance, polarization[clusters.piece_partition])
+                    + piece_eigenstrain)
+    cluster_strain = np.zeros_like(eigenstrain)
+    np.add.at(cluster_strain, clusters.piece_cluster, share * piece_strain)
+    cluster_strain /= clusters.volume[:, None]
+
+    law = ls_model.get_piece_law(clusters, reference_L)
+    return max(get_relative_difference(ls_model.get_cluster_strain(strain, eigenstrain, law), cluster_strain),
+               get_relative_difference(ls_model.get_equivalent_eigenstrain(strain, eigenstrain, law),
+                                       -np.linalg.solve(reference_L, polarization.T).T))
 
 ## ------- Checks ------- ##
 
@@ -252,12 +283,12 @@ def main():
                     all_passed &= report(error <= config.laminate_tolerance,
                                          f"{problem_name}: {method} matches the exact solution (largest relative "
                                          f"difference {error:.1e}, tolerance {config.laminate_tolerance:.0e})")
-            law_error = get_mixed_partition_law_error(problem.partitions.clusters, problem.partitions.reference_L)
+            law_error = get_partition_law_error(problem.partitions.clusters, problem.partitions.reference_L)
             if law_error is not None:
-                all_passed &= report(law_error <= config.mixed_partition_check_tolerance,
-                                     f"{problem_name}: CP's mixed partitions match the elastic closed form (largest "
-                                     f"relative difference {law_error:.1e}, tolerance "
-                                     f"{config.mixed_partition_check_tolerance:.0e})")
+                all_passed &= report(law_error <= config.piece_law_check_tolerance,
+                                     f"{problem_name}: CP's piece law matches LS-25 (largest relative difference "
+                                     f"{law_error:.1e}, tolerance "
+                                     f"{config.piece_law_check_tolerance:.0e})")
             arrays = get_result_arrays(problem_name, results)
             result_arrays.update(arrays)
             if reference is not None and mode == "check":

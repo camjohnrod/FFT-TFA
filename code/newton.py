@@ -28,8 +28,8 @@ class Evaluation(NamedTuple):
 
 class Solver(NamedTuple):
     # A method ready to run along the load path: solve_step(macro_strain, plastic_history) returns a StepResult whose
-    # stress and plastic state have one row per cluster of clusters (fe.Clusters). TFA uses this; ls_model.LSSolver
-    # is a class with the same two attributes.
+    # stress and plastic state have one row per cluster of clusters (fe.Clusters). TFA uses this; ls_model's solvers
+    # are classes with the same two attributes.
     solve_step: Callable
     clusters: tuple
 

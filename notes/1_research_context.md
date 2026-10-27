@@ -184,7 +184,7 @@ The closest, in their own words:
   composition of the heterogeneous cell, but not on the spatial organization". With the reference equal to one phase
   they enforce zero polarization in that phase (2010, §4.1); our reading is that the rule then gives any cell
   containing that phase the reference stiffness, so it would not serve as our mixing rule with
-  `reference_stiffness = "matrix"`. Elastic only.
+  `cp_reference_stiffness = "matrix"`. Elastic only.
 - **Schneider 2019** extends "the work of Brisard–Dormieux [45,46], who investigated the clustered Lippmann–Schwinger
   equation for identically shaped voxel clusters, to arbitrary cluster shape and nonlinear material behavior".
   Uniform partitions with hardening plasticity are covered by his convergence theory, not by his examples.

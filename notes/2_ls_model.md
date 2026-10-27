@@ -311,23 +311,51 @@ c_m^A\boldsymbol\varepsilon_m^A+c_f^A\boldsymbol\varepsilon_f^A=\boldsymbol\vare
 \boldsymbol\sigma^A=c_m^A\boldsymbol\sigma_m^A+c_f^A\boldsymbol\sigma_f^A .
 $$
 
-One $\mathbf C_0$ serves both the interaction and this law, so the polarization LS-7 receives, $\boldsymbol\tau^A=\boldsymbol\sigma^A-\mathbf C_0\boldsymbol\varepsilon^A$, is also the polarization of each cluster. In elasticity LS-22 has the closed form of slide 15, $\boldsymbol\sigma^A=\mathbf C_*^A\boldsymbol\varepsilon^A$ with $\mathbf C_*^A=\mathbf C_0+\big[c_m(\mathbf L_m-\mathbf C_0)^{-1}+c_f(\mathbf L_f-\mathbf C_0)^{-1}\big]^{-1}$, Brisard–Dormieux's (2012) consistent equivalent stiffness (their rule 23), which `check.py` tests the code against. LS-22 uses no interface direction, so it holds for any number of phases or interfaces in a partition.
+One $\mathbf C_0$ serves both the interaction and this law, so the polarization LS-7 receives, $\boldsymbol\tau^A=\boldsymbol\sigma^A-\mathbf C_0\boldsymbol\varepsilon^A$, is also the polarization of each cluster. In elasticity LS-22 has the closed form of slide 15, $\boldsymbol\sigma^A=\mathbf C_*^A\boldsymbol\varepsilon^A$ with $\mathbf C_*^A=\mathbf C_0+\big[c_m(\mathbf L_m-\mathbf C_0)^{-1}+c_f(\mathbf L_f-\mathbf C_0)^{-1}\big]^{-1}$, Brisard–Dormieux's (2012) consistent equivalent stiffness (their rule 23), which LS-25 gives with one piece per cluster. LS-22 uses no interface direction, so it holds for any number of phases or interfaces in a partition.
 
-**Choosing $\mathbf C_0$.** As $\mathbf C_0\to\mathbf0$ LS-22 tends to equal stress (the Reuss average); with $\mathbf C_0$ equal to the matrix stiffness the fiber cluster takes no strain; with $\mathbf C_0$ between the phases the clusters strain in opposite directions and fiber-rich partitions lose stiffness; above every phase it tends to equal strain. The law has a solution only while $\mathbf C_0$ stays below every cluster's tangent (Brisard–Dormieux's Assumption 1 on the soft side): a yielding phase's shear tangent drops to about $GH/(3G+H)$, and to zero without hardening, so a fixed $\mathbf C_0>\mathbf 0$ eventually fails for a perfectly plastic or softening phase. The code sets $\mathbf C_0$ as a fraction of a named stiffness (`reference_stiffness_scale`, default $0.01\times$ matrix), and section 7.4's preconditioner removes the cost of a small $\mathbf C_0$. Measured on `check.py`'s circle (27² elements, 9² partitions, contrast 100, $H=10$ MPa), CP's largest macroscopic error against element-level TFA: 4.3 % at $0.01$, 4.5 % at $0.05$, 4.8 % at $0.07$ (just below the yielding matrix's shear tangent, $0.074\,G$), no solution at $0.1$; 64–66 % at $2$ and $10\times$ the fiber stiffness; 16 % with the matrix's bulk modulus and a shear modulus below the plastic tangent. The interaction alone prefers $\mathbf C_0$ near the matrix, where the polarization of matrix partitions vanishes: with LS-22 replaced by equal stress, the same scan gave 2.4 % at $1$, 3.4 % at $0.1$, 4.1 % at $0.01$.
+**Choosing $\mathbf C_0$.** As $\mathbf C_0\to\mathbf0$ LS-22 tends to equal stress (the Reuss average); with $\mathbf C_0$ equal to the matrix stiffness the fiber cluster takes no strain; with $\mathbf C_0$ between the phases the clusters strain in opposite directions and fiber-rich partitions lose stiffness; above every phase it tends to equal strain. The law has a solution only while $\mathbf C_0$ stays below every cluster's tangent (Brisard–Dormieux's Assumption 1 on the soft side): a yielding phase's shear tangent drops to about $GH/(3G+H)$, and to zero without hardening, so a fixed $\mathbf C_0>\mathbf 0$ eventually fails for a perfectly plastic or softening phase. The code sets $\mathbf C_0$ as a fraction of a named stiffness (`cp_reference_stiffness_scale`, default $0.05\times$ matrix), and section 7.4's preconditioner removes the cost of a small $\mathbf C_0$. Measured on `check.py`'s circle (27² elements, 9² partitions, contrast 100, $H=10$ MPa), CP's largest macroscopic error against element-level TFA: 4.3 % at $0.01$, 4.5 % at $0.05$, 4.8 % at $0.07$ (just below the yielding matrix's shear tangent, $0.074\,G$), no solution at $0.1$; 64–66 % at $2$ and $10\times$ the fiber stiffness; 16 % with the matrix's bulk modulus and a shear modulus below the plastic tangent. The interaction alone prefers $\mathbf C_0$ near the matrix, where the polarization of matrix partitions vanishes: with LS-22 replaced by equal stress, the same scan gave 2.4 % at $1$, 3.4 % at $0.1$, 4.1 % at $0.01$.
 
 **History (2026-10-26).** The law was first equal stress with the matrix stiffness in LS-7, i.e. two reference media ($\mathbf C_0=\mathbf0$ inside the partition only). Its cluster polarizations against the interaction's $\mathbf C_0$ differ, $\boldsymbol\tau_m-\boldsymbol\tau_f=\mathbf C_0(\boldsymbol\varepsilon_f-\boldsymbol\varepsilon_m)\neq\mathbf 0$ (in elasticity with $\mathbf C_0$ the matrix: $\boldsymbol\tau_m=\mathbf0$ and $\boldsymbol\tau_f\approx0.99\,\boldsymbol\sigma^A$), and LS-7 received only their average. It was more accurate (2.4 % above; the cut laminate exact) and as fast, but not constant polarization; the user chose the slides' single $\mathbf C_0$. Either way the online cost is $O(M\log M)$: LS-7 receives one polarization per partition. A Hashin–Shtrikman form of the split, $\boldsymbol\varepsilon+\mathbf P(\mathbf C_0)\boldsymbol\tau$ equal in both clusters with $\mathbf P$ the direction average of $\widehat{\boldsymbol\Gamma}_0(\mathbf n;\mathbf C_0)$, keeps one $\mathbf C_0$ but not constant polarization (LS-22 is $\mathbf P\to\infty$, equal stress $\mathbf P=\mathbf C_0^{-1}$); at $\mathbf C_0$ the matrix it gave 3.9 % and halved the worst cluster error. Not adopted.
 
-The split is solved per mixed partition by Newton on $\boldsymbol\varepsilon_f^A$ with $\boldsymbol\varepsilon_m^A=(\boldsymbol\varepsilon^A-c_f^A\boldsymbol\varepsilon_f^A)/c_m^A$, and differentiating LS-22 gives the partition tangent for LS-20:
+LS-22 is the case of section 4.5's LS-25 and LS-26 in which every cluster is one partition's part in one phase; the code solves it in that general form (`ls_model.CPSolver`).
+
+LS-22 is not exact for a laminate whose interfaces cut partitions: in transverse shear the exact state has equal stress, which LS-22 reaches only as $\mathbf C_0\to\mathbf0$ (at $0.01\times$ matrix the cut laminate of `check.py` is off by 1.4 %). Measured with the earlier equal-stress law on circular fibers against element-level TFA (one region per element): the macroscopic stress stayed within 1–5 %, about as close as one partition per element; stresses and plastic strains next to the fiber were as close with $2\times2$-element partitions and 2–5 times further off with $4\times4$. By default TFA uses the same clusters as its regions, so the two models share their material states.
+
+### 4.5 Clusters spanning partitions (added 2026-10-27)
+
+The material states need not follow the partitions. Let a **cluster** $g$ be any set of elements of one phase, with one material state (one uniform plastic eigenstrain $\boldsymbol\mu_g$, one history $\mathbf z_{n,g}$), and a **piece** $p=(A,g)$ the part of cluster $g$ inside partition $A$, with share $c_p$ of the partition's volume ($\sum_{p\in A}c_p=1$) and weight $w_p=c_p/v_g$ in its cluster's average ($v_g$ the cluster's volume in partition volumes, $\sum_{p\in g}w_p=1$). A partition still carries one polarization $\boldsymbol\tau^A$ (LS-7). Its "partition phases" clusters are LS-22's; `config.cp_clusters = "k-means"` takes k-means clusters of the elements' elastic strain concentration instead, found in each phase apart (Liu–Bessa–Liu 2016, section 2.2.1), which span many partitions.
+
+Every piece carries its partition's polarization and its cluster's eigenstrain, with the cluster's elastic stiffness: $\boldsymbol\sigma_p=\mathbf L_g(\boldsymbol\varepsilon_p-\boldsymbol\mu_g)$ and $\boldsymbol\sigma_p-\mathbf C_0\boldsymbol\varepsilon_p=\boldsymbol\tau^A$. With the eigenstrains given, this is linear (slides 14 and 15 of `references/10.20.2026 Progress.pptx`, with $\boldsymbol\mu(x)=\boldsymbol\mu_g$ on each piece):
+
+**(LS-25) Piece law**
 
 $$
-\mathbf D_f=\big[(\mathbf L_{t,f}-\mathbf C_0)+\tfrac{c_f}{c_m}(\mathbf L_{t,m}-\mathbf C_0)\big]^{-1}\tfrac{1}{c_m}(\mathbf L_{t,m}-\mathbf C_0),
+\boldsymbol\varepsilon_p=\mathbf K_g\boldsymbol\tau^A+\mathbf N_g\boldsymbol\mu_g,
 \qquad
-\mathbf D_m=\tfrac{1}{c_m}(\mathbf I-c_f\mathbf D_f),
+\boldsymbol\tau^A=\mathbf T_A\big(\boldsymbol\varepsilon^A-\boldsymbol\lambda_*^A\big),
 \qquad
-\mathbf L_t^A=c_m\mathbf L_{t,m}\mathbf D_m+c_f\mathbf L_{t,f}\mathbf D_f .
+\boldsymbol\lambda_*^A=\sum_{p\in A}c_p\mathbf N_g\boldsymbol\mu_g,
 $$
 
-LS-22 is not exact for a laminate whose interfaces cut partitions: in transverse shear the exact state has equal stress, which LS-22 reaches only as $\mathbf C_0\to\mathbf0$ (at $0.01\times$ matrix the cut laminate of `check.py` is off by 1.4 %). Measured with the earlier equal-stress law on circular fibers against element-level TFA (one region per element): the macroscopic stress stayed within 1–5 %, about as close as one partition per element; stresses and plastic strains next to the fiber were as close with $2\times2$-element partitions and 2–5 times further off with $4\times4$. TFA uses the same clusters as its regions, so the two models share their material states.
+with $\mathbf K_g=(\mathbf L_g-\mathbf C_0)^{-1}$, $\mathbf N_g=\mathbf K_g\mathbf L_g$ and $\mathbf T_A=\big(\sum_{p\in A}c_p\mathbf K_g\big)^{-1}=\mathbf C_*^A-\mathbf C_0$; then $\boldsymbol\sigma^A=\mathbf C_0\boldsymbol\varepsilon^A+\boldsymbol\tau^A$ and the equivalent eigenstrain LS-18 receives is $\boldsymbol\mu_*^A=-\mathbf C_0^{-1}\boldsymbol\tau^A$. The pieces average to the partition strain by construction. A cluster's material update takes its **average** strain, $\boldsymbol\varepsilon_g=\sum_{p\in g}w_p\boldsymbol\varepsilon_p$, as TFA's regions do (`notes/3_tfa_baseline.md`, section 1), which closes the system:
+
+**(LS-26) Cluster eigenstrains**
+
+$$
+\mathbf r_g=\boldsymbol\mu_g-\boldsymbol\mu\big(\boldsymbol\varepsilon_g(\boldsymbol\varepsilon,\boldsymbol\mu);\mathbf z_{n,g}\big)=\mathbf 0 .
+$$
+
+Since $\mathbf L_g$ is uniform over a single-phase cluster, $\mathbf L_g(\boldsymbol\varepsilon_g-\boldsymbol\mu_g)$ is the cluster's average stress, so that average lies on the yield surface; a single piece's stress need not. With one piece per cluster, $\boldsymbol\varepsilon_g=\boldsymbol\varepsilon_p$ and LS-25 with LS-26 is LS-22.
+
+LS-25 is linear in the partition strains $\boldsymbol\varepsilon$ and eigenstrains $\boldsymbol\mu$, so the code keeps it as sparse block matrices, built once per lattice (`ls_model.PieceLaw`): $\boldsymbol\varepsilon_g=\mathbf E\boldsymbol\varepsilon+\mathbf F\boldsymbol\mu$ and $\boldsymbol\mu_*=\mathbf D_e(\boldsymbol\varepsilon-\boldsymbol\Lambda\boldsymbol\mu)$, with blocks $w_p\mathbf K_g\mathbf T_A$ in $\mathbf E$, $c_p\mathbf N_g$ in $\boldsymbol\Lambda$, $-\mathbf C_0^{-1}\mathbf T_A$ in $\mathbf D_e$, and
+
+$$
+\frac{\partial\boldsymbol\varepsilon_g}{\partial\boldsymbol\mu_h}=\delta_{gh}\mathbf N_g-\sum_{(p,q)}w_p\,c_q\,\mathbf K_g\mathbf T_A\mathbf N_h
+$$
+
+over the pairs of pieces $(p,q)$ of one partition $A$, $p$ of $g$ and $q$ of $h$ ($q=p$ included). A cluster all of whose pieces fill their partitions has $\boldsymbol\varepsilon_g=\langle\boldsymbol\varepsilon^A\rangle_g$ whatever $\boldsymbol\mu$, so its row of $\mathbf F$ vanishes; only the **coupled** clusters, those with a piece in a partition holding several, need $\mathbf F$. `check.py` computes LS-25 piece by piece, with no solver code, and checks these matrices against it. Like LS-22, LS-26 has a solution only while $\mathbf C_0$ stays below the tangent of every coupled cluster.
+
+TFA can take k-means clusters too (`config.tfa_clusters`), independently of CP; both on k-means share one clustering.
 
 ## 5. Understand exactly what is approximated
 
@@ -591,7 +619,7 @@ Fixed-point and Newton methods solve the same reduced equation for fixed $\mathb
 
 ### 7.4 Fourier preconditioner (added 2026-10-27)
 
-**Why a small $\mathbf C_0$ is slow.** LS-22 needs $\mathbf C_0$ below every cluster's tangent, so the code uses $\mathbf C_0=\alpha\,\mathbf C_n$, a small fraction $\alpha$ (default 0.01) of a named stiffness $\mathbf C_n$ (the matrix). The Moulinec–Suquet kernel does not depend on the scale of $\mathbf C_0$: $\widehat{\mathbf P}_0=\widehat{\boldsymbol\Gamma}_0(\mathbf C_0)\mathbf C_0$ and $\widehat{\boldsymbol\Gamma}_0(\alpha\mathbf C)=\widehat{\boldsymbol\Gamma}_0(\mathbf C)/\alpha$. Write $\mathbf A=\mathbf C_n^{-1}\mathbf L_{t,M}$; then LS-20 is
+**Why a small $\mathbf C_0$ is slow.** LS-22 needs $\mathbf C_0$ below every cluster's tangent, so the code uses $\mathbf C_0=\alpha\,\mathbf C_n$, a small fraction $\alpha$ (default 0.05) of a named stiffness $\mathbf C_n$ (the matrix). The Moulinec–Suquet kernel does not depend on the scale of $\mathbf C_0$: $\widehat{\mathbf P}_0=\widehat{\boldsymbol\Gamma}_0(\mathbf C_0)\mathbf C_0$ and $\widehat{\boldsymbol\Gamma}_0(\alpha\mathbf C)=\widehat{\boldsymbol\Gamma}_0(\mathbf C)/\alpha$. Write $\mathbf A=\mathbf C_n^{-1}\mathbf L_{t,M}$; then LS-20 is
 
 $$
 \mathbf J=\mathbf I-\mathbf P_0+\tfrac1\alpha\,\mathbf P_0\mathbf A ,
@@ -667,6 +695,34 @@ Neither limit depends on $\alpha$. Spectral LS lives entirely at $p=1$, so for i
 
 **Cost and effect.** One convolution per residual evaluation ($\widehat{\mathbf M}_m^{-1}$ is built once per lattice). Each method at the default tolerance against its own solution at $10^{-11}$ (macroscopic / worst cluster): cut laminate CP $1.1\times10^{-6}$ / $2.1\times10^{-6}$ (was $3.3\times10^{-5}$ / $4.4\times10^{-5}$); every other check problem and method unchanged to the bit. Default problem (64² elements, 32² partitions, 60 steps): CP $2.0\times10^{-8}$ / $7.8\times10^{-7}$ (182 Newton, 7 216 GMRES, 6.2 s), Spectral LS $1.2\times10^{-8}$ / $5.8\times10^{-7}$ (183, 11 487, 16.9 s), TFA $1.1\times10^{-8}$ / $2.2\times10^{-7}$ (112, 757, 7.5 s). All methods stop at the same accuracy. A first attempt that read the residual through the *mean* elastic stiffness instead of the matrix's loosened every method (to $10^{-5}$–$10^{-4}$ in the worst cluster): a stiff reading cell underestimates errors in the soft matrix, where they are largest.
 
+### 7.6 Newton with cluster eigenstrains (added 2026-10-27)
+
+With LS-25 and LS-26, Newton's unknowns stay the partition strains, and every residual evaluation solves the eigenstrains from them: Newton on LS-26 at fixed $\boldsymbol\varepsilon$, from the accepted history, with Jacobian
+
+$$
+\mathbf Z=\mathbf I-\mathbf H\,\mathbf F,
+\qquad
+\mathbf H=\operatorname{diag}(\mathbf H_{\mu,g})\ \text{at each cluster's average strain},
+$$
+
+the identity on uncoupled clusters (one step settles them: $\boldsymbol\mu_g=\boldsymbol\mu(\boldsymbol\varepsilon_g)$) and sparse on the coupled ones, factorized by sparse LU, each step through the outer Newton's backtracking line search on $\|\mathbf L_g\mathbf r_g\|$ (the return map's switch between elastic and plastic clusters can make full steps cycle), until $\|\mathbf L_g\mathbf r_g\|$ is below `cp_eigenstrain_tolerance` times the largest cluster stress. No FFT is involved. So every Newton iterate satisfies every cluster's return map, as LS-22's split did per mixed partition. Then LS-18's residual and its stopping test LS-24 are unchanged, and LS-20 holds with $\mathbf D$ replaced by the equivalent eigenstrain's response to a partition strain change $\mathbf v$, the eigenstrains following through LS-26 ($\mathbf Z\,\delta\boldsymbol\mu=\mathbf H\mathbf E\mathbf v$):
+
+**(LS-27) CP's Newton product**
+
+$$
+\boxed{
+\mathbf J\mathbf v=\mathbf v-\mathbf P_0(\mathbf D\mathbf v),
+\qquad
+\mathbf D\mathbf v=\mathbf D_e\big(\mathbf v-\boldsymbol\Lambda\,\mathbf Z^{-1}\mathbf H\mathbf E\,\mathbf v\big).
+}
+$$
+
+When every cluster lies in one partition, $\mathbf D$ is one block per partition, $\mathbf I-\mathbf C_0^{-1}\mathbf L_t^A$ with LS-22's tangent; otherwise the eigenstrains couple the partitions a cluster spans. LS-23 takes $\langle\mathbf D\rangle$ as the lattice mean of $\mathbf D$'s response to the six uniform fields, which is the mean block in the first case. One product costs four sparse matrix–vector products and one sparse triangular solve on the coupled clusters besides the FFTs. `check.py`'s checks and finite differences of the residual (on clusters cut across partitions as well) confirm LS-27.
+
+Measured on the default problem with LS-22's clusters (64² elements, 32² partitions, 60 steps, $\mathbf C_0=0.01\times$ matrix), against the previous code, which solved LS-22's split per mixed partition: 182 Newton corrections and 7 217 GMRES iterations (7 216 before), the same accuracy at the default tolerance against its own solution at $10^{-11}$ ($2.0\times10^{-8}$ macroscopic, $7.9\times10^{-7}$ worst cluster), the two solutions $9\times10^{-13}$ apart; online time 5–10 % longer (5.7–6.2 s against 5.4 s), the sparse products and solves. Without the preconditioner: 213 corrections, 55 449 GMRES iterations, 32.9 s, the same answer.
+
+**Tried and not adopted.** Making the eigenstrains Newton unknowns beside the partition strains, with each correction solved for the polarization $\delta\boldsymbol\tau$ (on which every piece's response is local), gave the same solutions but 295 Newton corrections against 182, stopped 20–50 times less accurately at the same tolerance ($1.3\times10^{-6}$ macroscopic, $3.5\times10^{-5}$ worst cluster), since the outer Newton then has to find which clusters flow, and needed $\mathbf C_0$ below the tangent of every yielding cluster, not only the coupled ones.
+
 ## 8. Relationship to other frameworks
 
 - **E/P TFA:** retains actual heterogeneous elastic fluctuations but assumes reduced plastic histories. Its dense implementation has quadratic interaction storage/application. The new model replaces those elastic fluctuations by a reference response; it is not simply a faster solver for LS-2.
@@ -682,6 +738,10 @@ The distinction between $N$ and $M$ is computational, not a guarantee of retaine
 
 These were found while implementing and testing the model, and are not yet resolved in the sections above.
 
+- **k-means clusters (section 4.5).** A first look on `check.py`'s circle and sphere with 8 matrix k-means clusters
+  put CP's last macroscopic stress 1.7 % and 3.1 % from Spectral LS, against 2.4 % and 3.8 % with LS-22's 105 and 96
+  clusters; TFA moved from 3.9 % and 12.5 % to 4.4 % and 13.7 %. Fewer material states coming closer is unexplained
+  and measured on one quantity only; not yet studied.
 - **Reference stiffness.** $\mathbf C_0$ changes CP's answer (Schneider 2019 notes the same for clustered
   Lippmann–Schwinger equations). With one $\mathbf C_0$ for LS-7 and LS-22, it must stay below every cluster's tangent
   in mixed partitions (section 4.4), so CP cannot run a perfectly plastic or softening phase at all, and on `check.py`'s

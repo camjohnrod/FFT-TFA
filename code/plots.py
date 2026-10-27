@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker
 import matplotlib.colors
+import matplotlib.lines
 
 ## ------- Shared Style ------- ##
 
@@ -111,35 +112,100 @@ def plot_stress_strain(stress_MPa_per_method, completed_step_count_per_method, a
 
 cross_section_style = {**figure_style, 'font.size': 12, 'axes.titlesize': 13}
 cross_section_panel_size = 4.2
+cross_section_legend_row_height = 0.3    # inches of figure height per row of the legend
+
+# A method's clusters, when it colours them in, fill their elements: each matrix cluster in its own colour, lightened so
+# the boundaries stay visible, and the inclusion's clusters in greys, so the fiber still reads as the fiber. Elements
+# of one cluster share its colour wherever they lie, and methods with the same clusters colour them alike. The matrix
+# colours are tab20's dark colours, then its light ones (so consecutive clusters differ), then tab20b's and tab20c's,
+# without any grey (no colour whose channels lie within grey_tolerance of each other), so no matrix cluster looks like
+# the inclusion; they repeat past 53 matrix clusters, where the cluster boundaries still tell clusters apart.
+grey_tolerance = 0.1
+matrix_cluster_colors = np.array([color for color in plt.cm.tab20.colors[::2] + plt.cm.tab20.colors[1::2]
+                                  + plt.cm.tab20b.colors + plt.cm.tab20c.colors
+                                  if max(color) - min(color) > grey_tolerance])
+cluster_color_lightening = 0.25
+inclusion_cluster_greys = (0.62, 0.48, 0.76)
 
 class CellMap(NamedTuple):
-    # One method's discretization on the element grid: the cell (unknown) each element belongs to, as an
-    # element_number_per_side² map, with a title and a line of its settings.
+    # One method's discretization on the element grid, with a title and a line of its settings. boundaries maps each
+    # kind of line it draws ("voxel", "cluster", "partition", boundary_styles) to an element_number_per_side² map
+    # of ids, the line running along every element edge whose two sides have different ids. fill_cluster_ids colours
+    # each element by its cluster (k-means clusters), or is None to show only the phases.
     title: str
     settings: str
-    cell_ids: np.ndarray
+    boundaries: dict
+    fill_cluster_ids: np.ndarray = None
 
-def draw_cell_boundaries(axis, cell_ids):
-    # A line along every element edge whose two sides belong to different cells, and around the cross-section.
-    edge_length = 1 / cell_ids.shape[0]
-    line_style = {'color': '0.15', 'linewidth': 0.6}
-    rows, columns = np.nonzero(cell_ids != np.roll(cell_ids, 1, axis=0))
-    axis.hlines(rows * edge_length, columns * edge_length, (columns + 1) * edge_length, **line_style)
-    rows, columns = np.nonzero(cell_ids != np.roll(cell_ids, 1, axis=1))
-    axis.vlines(columns * edge_length, rows * edge_length, (rows + 1) * edge_length, **line_style)
-    axis.plot([0, 1, 1, 0, 0], [0, 0, 1, 1, 0], **line_style)
+# The kinds of line, drawn in this order, each named in the legend by what it bounds: hairline grey for Spectral LS's
+# voxels, so its fine grid shows without competing; thin black for the clusters (one material state each); thin dark
+# blue for CP's partitions, told from the clusters by colour alone, drawn on top where the two coincide. Every panel is
+# framed alike.
+boundary_styles = {
+    "voxel":     {'label': "voxel", 'color': '0.45', 'linewidth': 0.3},
+    "cluster":   {'label': "cluster: uniform eigenstrain", 'color': '0.1', 'linewidth': 0.6},
+    "partition": {'label': "partition: uniform polarization", 'color': '#1f4e9c', 'linewidth': 0.9},
+}
+frame_style = {'color': '0.1', 'linewidth': 0.8}
+
+def get_runs(rows, columns):
+    # Element edges, by the row they lie on and their column (sorted by row, then column), merged into straight runs:
+    # each run's row, first column and stop column.
+    breaks = np.flatnonzero((np.diff(rows) != 0) | (np.diff(columns) != 1)) + 1
+    firsts = np.concatenate(([0], breaks))
+    lasts = np.concatenate((breaks, [len(rows)])) - 1
+    return rows[firsts], columns[firsts], columns[lasts] + 1
+
+def draw_boundaries(axis, ids, style):
+    # A line along every element edge inside the cross-section whose two sides have different ids, each straight run
+    # of edges drawn as one line. The edges on the cell's periodic boundary are left to the panel's frame.
+    edge_length = 1 / ids.shape[0]
+    line_style = {key: value for key, value in style.items() if key != 'label'}
+    rows, firsts, stops = get_runs(*np.nonzero(ids[1:] != ids[:-1]))
+    axis.hlines((rows + 1) * edge_length, firsts * edge_length, stops * edge_length, **line_style)
+    columns, firsts, stops = get_runs(*np.nonzero((ids[:, 1:] != ids[:, :-1]).T))
+    axis.vlines((columns + 1) * edge_length, firsts * edge_length, stops * edge_length, **line_style)
+
+def get_cluster_image(cluster_ids, element_material_ids):
+    # An RGB image of the cross-section with every element in its cluster's colour.
+    colors = np.zeros((cluster_ids.max() + 1, 3))
+    matrix_clusters = np.unique(cluster_ids[element_material_ids == 0])
+    inclusion_clusters = np.unique(cluster_ids[element_material_ids == 1])
+    matrix_colors = matrix_cluster_colors[np.arange(len(matrix_clusters)) % len(matrix_cluster_colors)]
+    colors[matrix_clusters] = matrix_colors + cluster_color_lightening * (1 - matrix_colors)
+    colors[inclusion_clusters] = np.array(inclusion_cluster_greys)[np.arange(len(inclusion_clusters))
+                                                                   % len(inclusion_cluster_greys), None]
+    return colors[cluster_ids]
 
 def plot_cross_section(element_material_ids, cell_maps, plot_path):
-    # One panel per method: the phase of every element (fiber dark), with the method's cells drawn on top.
+    # One panel per method: the phase of every element (fiber dark), or its cluster's colour when the method's clusters
+    # are coloured in, with the method's boundaries on top; one legend below for the kinds of line the panels use.
+    used_kinds = [kind for kind in boundary_styles if any(kind in cell_map.boundaries for cell_map in cell_maps)]
+    # The legend lies side by side under several panels, stacked under one, which is too narrow for a row.
+    legend_columns = len(used_kinds) if len(cell_maps) > 1 else 1
+    legend_rows = -(-len(used_kinds) // legend_columns)
+    figure_height = cross_section_panel_size + 0.6 + cross_section_legend_row_height * legend_rows
     with plt.rc_context(cross_section_style):
         figure, axes = plt.subplots(1, len(cell_maps), squeeze=False, layout='constrained',
-                                    figsize=(cross_section_panel_size * len(cell_maps), cross_section_panel_size + 0.6))
+                                    figsize=(cross_section_panel_size * len(cell_maps), figure_height))
         for axis, cell_map in zip(axes[0], cell_maps):
-            axis.imshow(element_material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.62']), vmin=0, vmax=1,
-                        origin='lower', extent=(0, 1, 0, 1))
-            draw_cell_boundaries(axis, cell_map.cell_ids)
+            if cell_map.fill_cluster_ids is None:
+                axis.imshow(element_material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.62']), vmin=0,
+                            vmax=1, origin='lower', extent=(0, 1, 0, 1))
+            else:
+                axis.imshow(get_cluster_image(cell_map.fill_cluster_ids, element_material_ids), origin='lower',
+                            extent=(0, 1, 0, 1))
+            for kind in boundary_styles:
+                if kind in cell_map.boundaries:
+                    draw_boundaries(axis, cell_map.boundaries[kind], boundary_styles[kind])
+            axis.plot([0, 1, 1, 0, 0], [0, 0, 1, 1, 0], **frame_style)
             axis.set_title(f"{cell_map.title}\n{cell_map.settings}")
             axis.set_axis_off()
+            # Square panels sit at the bottom of their slots, so the slots' spare height goes to the titles.
+            axis.set_anchor('S')
+        handles = [matplotlib.lines.Line2D([], [], **boundary_styles[kind]) for kind in used_kinds]
+        figure.legend(handles=handles, loc='outside lower center', ncols=legend_columns, frameon=False,
+                      handlelength=3)
         figure.savefig(plot_path)
     plt.close(figure)
 
@@ -147,6 +213,8 @@ def plot_cross_section(element_material_ids, cell_maps, plot_path):
 
 field_map_style = {**figure_style, 'font.size': 13, 'axes.titlesize': 15, 'figure.titlesize': 14}
 field_map_panel_size = 4.2
+field_map_colormap = 'jet'
+field_map_hidden_color = '0.8'    # elements a map leaves out (NaN), such as the inclusion in a matrix-only map
 
 class FieldMap(NamedTuple):
     # One method's map on the element grid (element_number_per_side², each element showing its cluster's value).
@@ -155,15 +223,17 @@ class FieldMap(NamedTuple):
 
 def plot_field_maps(field_maps, label, load_step, load_step_count, value_min, value_max, plot_path):
     # One map per method, side by side on one colour scale, between the given limits or, where a limit is None, the
-    # maps' own; label names the field and its unit on the colour bar.
+    # maps' own; label names the field and its unit on the colour bar. Elements without a value (NaN) are drawn in
+    # field_map_hidden_color and left out of the limits.
     with plt.rc_context(field_map_style):
         figure, axes = plt.subplots(1, len(field_maps), squeeze=False, layout='constrained',
                                     figsize=(field_map_panel_size * len(field_maps) + 1.2, field_map_panel_size))
         all_values = [field_map.values for field_map in field_maps]
-        limits = {'vmin': min(map(np.min, all_values)) if value_min is None else value_min,
-                  'vmax': max(map(np.max, all_values)) if value_max is None else value_max}
+        limits = {'vmin': min(map(np.nanmin, all_values)) if value_min is None else value_min,
+                  'vmax': max(map(np.nanmax, all_values)) if value_max is None else value_max}
+        colormap = plt.get_cmap(field_map_colormap).with_extremes(bad=field_map_hidden_color)
         for axis, field_map in zip(axes[0], field_maps):
-            image = axis.imshow(field_map.values, origin='lower', extent=(0, 1, 0, 1), cmap='jet', **limits)
+            image = axis.imshow(field_map.values, origin='lower', extent=(0, 1, 0, 1), cmap=colormap, **limits)
             axis.set_title(field_map.title)
             axis.set_axis_off()
         figure.colorbar(image, ax=axes[0], label=label, shrink=0.85)
