@@ -5,6 +5,7 @@
 #   cross_section.png       the fiber on the element grid, with each method's cells (partitions, elements, clusters)
 #   von_mises_stress.png    von Mises stress at the last load step, one map per method
 #   plastic_strain.png      accumulated plastic strain at the last load step, one map per method
+# The maps show the element layer at mid-thickness.
 #
 # Run from anywhere: python code/run.py
 
@@ -17,11 +18,72 @@ import numpy as np
 import tqdm
 
 import plots
-from fe import get_problem
-from ls_model import get_ls_solver
+from fe import (Clusters, get_clusters, get_E_and_P, get_inclusion_L, get_matrix_L, get_partition_discretization,
+                get_periodic_mesh, get_spectral_discretization, is_shape_constant_along_z)
+from ls_model import LSSolver, get_cp_reference_L, get_named_stiffness, get_P0_transformed, get_spectral_reference_L
 from material import get_flow_stress, get_unloaded_plastic_state, get_von_mises_stress
 from newton import LoadPathAbandoned, MaterialFullySoftened
 from tfa_model import get_tfa_solver
+
+## ------- Problem ------- ##
+
+# Everything a run needs, built from config.py, and what each method's offline step costs:
+#   CP           the partitions and their clusters, C0, the partition-averaged kernel P0;
+#   Spectral LS  the element lattice and its clusters, its own reference stiffness and kernel P0;
+#   TFA          the partitions' clusters (its regions) and the FE influence functions E and P on them.
+
+class Lattice(NamedTuple):
+    # What an LS method needs on its lattice: the clusters, the reference stiffness C0, and the kernel P̂0 as one
+    # 6 × 6 block per frequency.
+    clusters: Clusters
+    reference_L: np.ndarray
+    P0_transformed: np.ndarray
+
+class Problem(NamedTuple):
+    partitions: Lattice          # CP's lattice; its clusters are also TFA's regions
+    spectral_lattice: Lattice    # Spectral LS's lattice, None when it is switched off
+    E: np.ndarray                # TFA's influence functions, None when no method needs them
+    P: np.ndarray
+    matrix_L: np.ndarray         # the unit in which the LS methods judge convergence (LS-24)
+    offline_seconds: dict        # by method: everything it needs built, as if it ran alone
+
+def get_problem():
+    # E and P come from the cache when it matches; their offline time is the time they took to compute.
+    matrix_L, inclusion_L = get_matrix_L(), get_inclusion_L()
+
+    start_time = time.perf_counter()
+    mesh = get_periodic_mesh(get_partition_discretization())
+    clusters = get_clusters(mesh)
+    partition_seconds = time.perf_counter() - start_time
+
+    # E is needed by TFA and by the homogenized reference stiffness, P by TFA only.
+    E, P, build_seconds = None, None, {}
+    if config.include_tfa_model or config.reference_stiffness == "homogenized":
+        E, P, build_seconds = get_E_and_P(mesh, clusters, include_P=config.include_tfa_model)
+
+    start_time = time.perf_counter()
+    reference_L = get_cp_reference_L(get_named_stiffness(clusters, E, matrix_L))
+    print(f"CP's C0: C0_1111 = {reference_L[0, 0] / 1e6:.4g} MPa")
+    partitions = Lattice(clusters, reference_L, get_P0_transformed(mesh.discretization, reference_L))
+    offline_seconds = {"CP": partition_seconds + time.perf_counter() - start_time
+                             + (build_seconds["E"] if config.reference_stiffness == "homogenized" else 0)}
+
+    spectral_lattice = None
+    if config.include_spectral_ls:
+        start_time = time.perf_counter()
+        spectral_mesh = get_periodic_mesh(get_spectral_discretization())
+        spectral_reference_L = get_spectral_reference_L(matrix_L, inclusion_L)
+        print(f"Spectral LS's C0: C0_1111 = {spectral_reference_L[0, 0] / 1e6:.4g} MPa")
+        spectral_lattice = Lattice(get_clusters(spectral_mesh), spectral_reference_L,
+                                   get_P0_transformed(spectral_mesh.discretization, spectral_reference_L))
+        offline_seconds["Spectral LS"] = time.perf_counter() - start_time
+
+    if config.include_tfa_model:
+        offline_seconds["TFA"] = partition_seconds + build_seconds["E"] + build_seconds["P"]
+
+    return Problem(partitions, spectral_lattice, E, P, matrix_L, offline_seconds)
+
+## ------- Load Path ------- ##
 
 def get_applied_macro_strain():
     # The macroscopic strain at every load step, one row per step.
@@ -36,18 +98,17 @@ def get_applied_macro_strain():
 
 def get_solvers(problem):
     # Every method config.py switches on, in the order of the table and the figures.
-    solvers = {"CP": get_ls_solver(problem.partitions, problem.reference_compliance)}
+    solvers = {"CP": LSSolver(problem.partitions, problem.matrix_L, config.cp_fourier_preconditioner)}
     if config.include_spectral_ls:
-        solvers["Spectral LS"] = get_ls_solver(problem.spectral_lattice, problem.reference_compliance)
+        solvers["Spectral LS"] = LSSolver(problem.spectral_lattice, problem.matrix_L,
+                                          config.spectral_ls_fourier_preconditioner)
     if config.include_tfa_model:
         solvers["TFA"] = get_tfa_solver(problem.E, problem.P, problem.partitions.clusters)
     return solvers
 
-## ------- Load Path ------- ##
-
 class LoadPathResult(NamedTuple):
-    # One method's results at every load step: the stress and accumulated plastic strain per cluster (fe.Clusters), and
-    # the stress's volume average over the cell. Steps past completed_step_count were not solved and hold zeros.
+    # One method's results at every load step: the stress and accumulated plastic strain per cluster (fe.Clusters),
+    # and the stress's volume average over the cell. Steps past completed_step_count were not solved and hold zeros.
     clusters: tuple
     macroscopic_stress: np.ndarray
     cluster_stress_per_step: np.ndarray
@@ -132,22 +193,36 @@ def get_timing_table(results, offline_seconds, step_count):
     return "\n".join(lines)
 
 def get_element_map(clusters, cluster_values):
-    # One value per element column on the element grid [j, i], each element taking its cluster's value (the first
-    # element layer: the geometry and fields do not vary through the thickness).
+    # One value per element on the element grid [j, i] of the element layer at mid-thickness, each element taking its
+    # cluster's value. For a shape constant along z every layer is the same.
     side = config.element_number_per_side
-    return cluster_values[clusters.element_cluster[:side**2]].reshape(side, side)
+    middle_layer = len(clusters.element_cluster) // side**2 // 2
+    layer_elements = slice(middle_layer * side**2, (middle_layer + 1) * side**2)
+    return cluster_values[clusters.element_cluster[layer_elements]].reshape(side, side)
+
+def get_lattice_label(count_per_side):
+    # "N×N" for a shape constant along z (cells are columns through the thickness), "N×N×N" otherwise.
+    dimension = 2 if is_shape_constant_along_z() else 3
+    return "$\\times$".join([str(count_per_side)] * dimension)
+
+def get_reference_label():
+    # CP's C0 as config.py states it, e.g. "0.01 × matrix", or "matrix" at scale 1.
+    if config.reference_stiffness_scale == 1:
+        return config.reference_stiffness
+    return f"{config.reference_stiffness_scale:g} × {config.reference_stiffness}"
 
 def get_cell_maps(problem, methods):
-    # Each method's cells on the element grid, with its settings: CP's partitions, Spectral LS's elements, TFA's
-    # clusters (CP's partitions, the mixed ones split by phase).
+    # Each method's cells on the element grid of the mid-thickness layer, with its settings: CP's partitions, Spectral
+    # LS's elements, TFA's clusters (CP's partitions, the mixed ones split by phase).
     clusters = problem.partitions.clusters
     partitions, elements = config.partition_number_per_side, config.element_number_per_side
     mixed_count = np.count_nonzero(clusters.volume_fraction < 1) // 2
     cell_maps = {
-        "CP": plots.CellMap("CP", f"{partitions}$\\times${partitions} partitions, {mixed_count} mixed, "
-                                  f"C0: {config.reference_stiffness}", get_element_map(clusters, clusters.partition)),
+        "CP": plots.CellMap("CP", f"{get_lattice_label(partitions)} partitions, {mixed_count} mixed, "
+                                  f"C0: {get_reference_label()}", get_element_map(clusters, clusters.partition)),
         "Spectral LS": plots.CellMap("Spectral LS",
-                                     f"{elements}$\\times${elements} elements, C0: {config.reference_stiffness}",
+                                     f"{get_lattice_label(elements)} elements, "
+                                     f"C0: {config.spectral_ls_reference_stiffness}",
                                      np.arange(elements**2).reshape(elements, elements)),
         "TFA": plots.CellMap("TFA", f"{len(clusters.partition)} clusters: partitions, mixed ones split by phase",
                              get_element_map(clusters, np.arange(len(clusters.partition))))}

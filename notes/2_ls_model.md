@@ -297,33 +297,37 @@ $$
 
 For congruent partitions $c^A=1/M$. The computed mean is automatic at a converged root if the operator satisfies this identity. It does not imply that every partition strain equals the prescribed mean.
 
-### 4.4 Partitions holding both phases (added 2026-10-26)
+### 4.4 Partitions holding both phases (added 2026-10-26, revised 2026-10-27)
 
-The equation above uses each partition's polarization only through its stress $\boldsymbol\sigma^A$ at the partition strain $\boldsymbol\varepsilon^A$. A partition that holds both phases needs a constitutive law for that pair. Call its part in each phase a **cluster**, with volume fractions $c_m^A+c_f^A=1$, one material state (strain, plastic strain, history) each:
+The equation above uses each partition's polarization only through its stress $\boldsymbol\sigma^A$ at the partition strain $\boldsymbol\varepsilon^A$. A partition that holds both phases needs a constitutive law for that pair. Call its part in each phase a **cluster**, with volume fractions $c_m^A+c_f^A=1$, one material state (strain, plastic strain, history) each. The law is the one the constant-polarization assumption itself implies (slides 11 and 14 of `references/10.20.2026 Progress.pptx`): the polarization is the same at every point of the partition, so both clusters carry it, against the same $\mathbf C_0$ as LS-7:
 
 **(LS-22) Composite partition law**
 
 $$
 c_m^A\boldsymbol\varepsilon_m^A+c_f^A\boldsymbol\varepsilon_f^A=\boldsymbol\varepsilon^A,
 \qquad
-\boldsymbol\sigma_m(\boldsymbol\varepsilon_m^A;\mathbf z_{m,n}^A)=\boldsymbol\sigma_f(\boldsymbol\varepsilon_f^A;\mathbf z_{f,n}^A),
+\boldsymbol\sigma_m(\boldsymbol\varepsilon_m^A;\mathbf z_{m,n}^A)-\mathbf C_0\boldsymbol\varepsilon_m^A=\boldsymbol\sigma_f(\boldsymbol\varepsilon_f^A;\mathbf z_{f,n}^A)-\mathbf C_0\boldsymbol\varepsilon_f^A,
 \qquad
 \boldsymbol\sigma^A=c_m^A\boldsymbol\sigma_m^A+c_f^A\boldsymbol\sigma_f^A .
 $$
 
-Both clusters carry the same stress (equal stress, the Reuss rule). Requiring instead the same polarization in both clusters, $\boldsymbol\sigma_m-\mathbf C_0\boldsymbol\varepsilon_m=\boldsymbol\sigma_f-\mathbf C_0\boldsymbol\varepsilon_f$ (constant polarization taken pointwise, Brisard–Dormieux's rule in elasticity), fixes the ratio of the two clusters' strains through $\mathbf C_0$ alone: with $\mathbf C_0$ equal to the matrix stiffness the fiber cluster takes no strain, with $\mathbf C_0$ between the phases the clusters strain in opposite directions and fiber-rich partitions lose stiffness, and with plasticity the local problem fails for these choices. LS-22 is that rule's limit $\mathbf C_0\to\mathbf0$ inside the split only; the global $\mathbf C_0$ of LS-7 is unchanged. Since LS-7 uses only $\boldsymbol\sigma^A$, the polarization relative to $\mathbf C_0$ is then uniform in each partition on average, not pointwise.
+One $\mathbf C_0$ serves both the interaction and this law, so the polarization LS-7 receives, $\boldsymbol\tau^A=\boldsymbol\sigma^A-\mathbf C_0\boldsymbol\varepsilon^A$, is also the polarization of each cluster. In elasticity LS-22 has the closed form of slide 15, $\boldsymbol\sigma^A=\mathbf C_*^A\boldsymbol\varepsilon^A$ with $\mathbf C_*^A=\mathbf C_0+\big[c_m(\mathbf L_m-\mathbf C_0)^{-1}+c_f(\mathbf L_f-\mathbf C_0)^{-1}\big]^{-1}$, Brisard–Dormieux's (2012) consistent equivalent stiffness (their rule 23), which `check.py` tests the code against. LS-22 uses no interface direction, so it holds for any number of phases or interfaces in a partition.
+
+**Choosing $\mathbf C_0$.** As $\mathbf C_0\to\mathbf0$ LS-22 tends to equal stress (the Reuss average); with $\mathbf C_0$ equal to the matrix stiffness the fiber cluster takes no strain; with $\mathbf C_0$ between the phases the clusters strain in opposite directions and fiber-rich partitions lose stiffness; above every phase it tends to equal strain. The law has a solution only while $\mathbf C_0$ stays below every cluster's tangent (Brisard–Dormieux's Assumption 1 on the soft side): a yielding phase's shear tangent drops to about $GH/(3G+H)$, and to zero without hardening, so a fixed $\mathbf C_0>\mathbf 0$ eventually fails for a perfectly plastic or softening phase. The code sets $\mathbf C_0$ as a fraction of a named stiffness (`reference_stiffness_scale`, default $0.01\times$ matrix), and section 7.4's preconditioner removes the cost of a small $\mathbf C_0$. Measured on `check.py`'s circle (27² elements, 9² partitions, contrast 100, $H=10$ MPa), CP's largest macroscopic error against element-level TFA: 4.3 % at $0.01$, 4.5 % at $0.05$, 4.8 % at $0.07$ (just below the yielding matrix's shear tangent, $0.074\,G$), no solution at $0.1$; 64–66 % at $2$ and $10\times$ the fiber stiffness; 16 % with the matrix's bulk modulus and a shear modulus below the plastic tangent. The interaction alone prefers $\mathbf C_0$ near the matrix, where the polarization of matrix partitions vanishes: with LS-22 replaced by equal stress, the same scan gave 2.4 % at $1$, 3.4 % at $0.1$, 4.1 % at $0.01$.
+
+**History (2026-10-26).** The law was first equal stress with the matrix stiffness in LS-7, i.e. two reference media ($\mathbf C_0=\mathbf0$ inside the partition only). Its cluster polarizations against the interaction's $\mathbf C_0$ differ, $\boldsymbol\tau_m-\boldsymbol\tau_f=\mathbf C_0(\boldsymbol\varepsilon_f-\boldsymbol\varepsilon_m)\neq\mathbf 0$ (in elasticity with $\mathbf C_0$ the matrix: $\boldsymbol\tau_m=\mathbf0$ and $\boldsymbol\tau_f\approx0.99\,\boldsymbol\sigma^A$), and LS-7 received only their average. It was more accurate (2.4 % above; the cut laminate exact) and as fast, but not constant polarization; the user chose the slides' single $\mathbf C_0$. Either way the online cost is $O(M\log M)$: LS-7 receives one polarization per partition. A Hashin–Shtrikman form of the split, $\boldsymbol\varepsilon+\mathbf P(\mathbf C_0)\boldsymbol\tau$ equal in both clusters with $\mathbf P$ the direction average of $\widehat{\boldsymbol\Gamma}_0(\mathbf n;\mathbf C_0)$, keeps one $\mathbf C_0$ but not constant polarization (LS-22 is $\mathbf P\to\infty$, equal stress $\mathbf P=\mathbf C_0^{-1}$); at $\mathbf C_0$ the matrix it gave 3.9 % and halved the worst cluster error. Not adopted.
 
 The split is solved per mixed partition by Newton on $\boldsymbol\varepsilon_f^A$ with $\boldsymbol\varepsilon_m^A=(\boldsymbol\varepsilon^A-c_f^A\boldsymbol\varepsilon_f^A)/c_m^A$, and differentiating LS-22 gives the partition tangent for LS-20:
 
 $$
-\mathbf D_f=\big(\mathbf L_{t,f}+\tfrac{c_f}{c_m}\mathbf L_{t,m}\big)^{-1}\tfrac{1}{c_m}\mathbf L_{t,m},
+\mathbf D_f=\big[(\mathbf L_{t,f}-\mathbf C_0)+\tfrac{c_f}{c_m}(\mathbf L_{t,m}-\mathbf C_0)\big]^{-1}\tfrac{1}{c_m}(\mathbf L_{t,m}-\mathbf C_0),
 \qquad
 \mathbf D_m=\tfrac{1}{c_m}(\mathbf I-c_f\mathbf D_f),
 \qquad
 \mathbf L_t^A=c_m\mathbf L_{t,m}\mathbf D_m+c_f\mathbf L_{t,f}\mathbf D_f .
 $$
 
-LS-22 is exact for a laminate loaded in transverse shear and wrong, in that limit, for loading along the layers; it uses no interface direction. Measured on circular fibers against element-level TFA (one region per element), the macroscopic stress stayed within 1–5 %, about as close as one partition per element; stresses and plastic strains next to the fiber were as close with $2\times2$-element partitions and 2–5 times further off with $4\times4$. TFA uses the same clusters as its regions, so the two models share their material states.
+LS-22 is not exact for a laminate whose interfaces cut partitions: in transverse shear the exact state has equal stress, which LS-22 reaches only as $\mathbf C_0\to\mathbf0$ (at $0.01\times$ matrix the cut laminate of `check.py` is off by 1.4 %). Measured with the earlier equal-stress law on circular fibers against element-level TFA (one region per element): the macroscopic stress stayed within 1–5 %, about as close as one partition per element; stresses and plastic strains next to the fiber were as close with $2\times2$-element partitions and 2–5 times further off with $4\times4$. TFA uses the same clusters as its regions, so the two models share their material states.
 
 ## 5. Understand exactly what is approximated
 
@@ -496,7 +500,7 @@ Storage of the reference kernel is $O(M)$, and application costs $O(M\log M)$. T
 
 ### 6.5 Moulinec–Suquet kernel
 
-The alternative to LS-14 (the only kernel in the code since 2026-10-26) evaluates the continuum Green operator at the frequencies $\boldsymbol\xi$ of an $N\times N$ lattice of element columns:
+The alternative to LS-14 (the only kernel in the code since 2026-10-26) evaluates the continuum Green operator at the frequencies $\boldsymbol\xi$ of the $N_3\times N\times N$ lattice of elements of the cubic cell ($N_3=N$ for a geometry that varies along $x_3$; any $N_3$, often 1, for one that does not):
 
 **(LS-21) Moulinec–Suquet kernel**
 
@@ -508,15 +512,17 @@ $$
 \mathbf n=\boldsymbol\xi/|\boldsymbol\xi|,
 $$
 
-where $\mathbf B(\mathbf n)$ ($6\times3$) is the engineering strain of a displacement varying along $\mathbf n$, per unit gradient, and $n_3=0$ because the fields do not vary through the thickness. $\widehat{\mathbf P}_0(\mathbf 0)=\mathbf 0$ (LS-9). At every other frequency $\widehat{\mathbf P}_0$ is a projection, with eigenvalues 0 and 1, for any $\mathbf C_0$. On an even lattice, $\widehat{\boldsymbol\Gamma}_0$ is not even in a component $\xi_i=N/2$, so it has no real-valued meaning there; $\widehat{\mathbf P}_0=\mathbf I$ at those frequencies, Moulinec–Suquet's $\widehat{\boldsymbol\Gamma}_0=\mathbf C_0^{-1}$ (1998, §2.4.2), which makes the stress there zero.
+where $\mathbf B(\mathbf n)$ ($6\times3$) is the engineering strain of a displacement varying along $\mathbf n$, per unit gradient. The cell is a cube, so frequencies in units of $2\pi/L$ compare across axes whatever each axis's element count. $\widehat{\mathbf P}_0(\mathbf 0)=\mathbf 0$ (LS-9). At every other frequency $\widehat{\mathbf P}_0$ is a projection, with eigenvalues 0 and 1, for any $\mathbf C_0$. Along an axis with an even count $N_i$, $\widehat{\boldsymbol\Gamma}_0$ is not even in a component $\xi_i=N_i/2$, so it has no real-valued meaning there; $\widehat{\mathbf P}_0=\mathbf I$ at those frequencies, Moulinec–Suquet's $\widehat{\boldsymbol\Gamma}_0=\mathbf C_0^{-1}$ (1998, §2.4.2), which makes the stress there zero.
 
-The kernel of partitions of $k\times k$ element columns follows by linearity, exactly as the FE kernel of partitions follows from the FE kernel of element columns: a unit eigenstrain in a partition is one in each of its columns, and a partition's strain is the mean over its columns, so, with $|d_i|<k$,
+The kernel of partitions of $k\times k\times k_3$ elements follows by linearity, exactly as the FE kernel of partitions follows from the FE kernel of elements: a unit eigenstrain in a partition is one in each of its elements, and a partition's strain is the mean over its elements, so, with $|d_1|,|d_2|<k$, $|d_3|<k_3$ and $\mathbf K=(k,k,k_3)$ acting componentwise,
 
 $$
-\mathbf P_0[\mathbf D]=\sum_{\mathbf d}\frac{(k-|d_1|)(k-|d_2|)}{k^2}\,\mathbf p_0^{\rm el}[k\mathbf D+\mathbf d].
+\mathbf P_0[\mathbf D]=\sum_{\mathbf d}\frac{(k-|d_1|)(k-|d_2|)(k_3-|d_3|)}{k^2k_3}\,\mathbf p_0^{\rm el}[\mathbf K\mathbf D+\mathbf d].
 $$
 
-With $k=1$ (one partition per element, Spectral LS in the code) this is the standard Moulinec–Suquet scheme at that resolution; with $k>1$ it averages the fine operator over partitions as SCA does over clusters (Liu–Bessa–Liu 2016). The average is a congruence, so its eigenvalues stay in $[0,1]$. Like LS-14 it is non-consistent; as the element grid is refined it tends to the consistent operator of LS-7 (`1_research_context.md`, section 2).
+A geometry that varies along $x_3$ uses cubes, $k_3=k$. One that does not uses columns through the thickness, $k_3=N_3$ (one partition along $x_3$): the average over every $x_3$ offset is a Fejér filter that vanishes at every $\xi_3\neq0$, so only the $\xi_3=0$ frequencies survive, where $n_3=0$. That is the in-plane kernel, the same to round-off for any $N_3$ (checked 2026-10-26, a circle at $N_3=1$ and 3, and as cubes on a cubic mesh: every method agrees to $10^{-14}$ at a tight Newton tolerance).
+
+With one element per partition (Spectral LS in the code) this is the standard Moulinec–Suquet scheme at that resolution; with $k>1$ it averages the fine operator over partitions as SCA does over clusters (Liu–Bessa–Liu 2016). The average is a congruence, so its eigenvalues stay in $[0,1]$. Like LS-14 it is non-consistent; as the element grid is refined it tends to the consistent operator of LS-7 (`1_research_context.md`, section 2).
 
 ## 7. Solve the nonlinear equation without forming its Jacobian
 
@@ -583,6 +589,84 @@ Use a convergence criterion such as $\|\mathbf R\|\le\epsilon_{\rm abs}+\epsilon
 
 Fixed-point and Newton methods solve the same reduced equation for fixed $\mathbf C_0$. If both converge to the same root at matched tolerances, their predictions agree; changing the solver does not repair model error. Total online cost is approximately $O(kM\log M)$, where $k$ counts residual and Krylov convolution applications over the chosen load path. Near-linearithmic **total** scaling needs iteration counts to remain controlled. GMRES basis storage is $O(rM)$ for restart length $r$, not free storage beyond the $O(M)$ kernel.
 
+### 7.4 Fourier preconditioner (added 2026-10-27)
+
+**Why a small $\mathbf C_0$ is slow.** LS-22 needs $\mathbf C_0$ below every cluster's tangent, so the code uses $\mathbf C_0=\alpha\,\mathbf C_n$, a small fraction $\alpha$ (default 0.01) of a named stiffness $\mathbf C_n$ (the matrix). The Moulinec–Suquet kernel does not depend on the scale of $\mathbf C_0$: $\widehat{\mathbf P}_0=\widehat{\boldsymbol\Gamma}_0(\mathbf C_0)\mathbf C_0$ and $\widehat{\boldsymbol\Gamma}_0(\alpha\mathbf C)=\widehat{\boldsymbol\Gamma}_0(\mathbf C)/\alpha$. Write $\mathbf A=\mathbf C_n^{-1}\mathbf L_{t,M}$; then LS-20 is
+
+$$
+\mathbf J=\mathbf I-\mathbf P_0+\tfrac1\alpha\,\mathbf P_0\mathbf A ,
+$$
+
+whose eigenvalues spread like $\max\mathbf A/\alpha$: about $10^4$ for a fiber 100 times stiffer than the matrix at $\alpha=0.01$, against about 100 at $\alpha=1$.
+
+**The preconditioner.** Write LS-20 as $\mathbf J\mathbf v=\mathbf v-\mathbf P_0(\mathbf D\mathbf v)$ with $\mathbf D=\mathbf I-\mathbf C_0^{-1}\mathbf L_{t,M}$. $\mathbf P_0$ is diagonal in Fourier space (one $6\times6$ block per frequency); $\mathbf D$ is diagonal in real space (one block per partition), so in Fourier space it is a convolution whose diagonal is its mean $\langle\mathbf D\rangle$ over the lattice. The Fourier-diagonal operator closest to $\mathbf J$ in the Frobenius norm therefore keeps $\mathbf J$'s Fourier-space diagonal:
+
+**(LS-23) Fourier preconditioner**
+
+$$
+\widehat{\mathbf M}(\boldsymbol\xi)=\mathbf I-\widehat{\mathbf P}_0(\boldsymbol\xi)\,\langle\mathbf D\rangle=\mathbf I-\widehat{\mathbf P}_0(\boldsymbol\xi)\,\big(\mathbf I-\mathbf C_0^{-1}\langle\mathbf L_t\rangle\big),
+\qquad
+\mathbf M^{-1}\mathbf v=\operatorname{IFFT}\big[\widehat{\mathbf M}(\boldsymbol\xi)^{-1}\,\operatorname{FFT}(\mathbf v)\big].
+$$
+
+It is the Jacobian of a homogeneous cell with the mean current tangent (in linear algebra, the optimal circulant preconditioner of T. Chan, 1988; the derivation above is ours, the paper not read). The same rule, from each method's own kernel and tangents, applies to CP and Spectral LS (`ls_model.get_fourier_preconditioner`). The code rebuilds it at every Newton correction ($6\times6$ inversions per frequency, a fraction of a millisecond) and applies it on the right: GMRES solves $\mathbf J\mathbf M^{-1}\mathbf y=-\mathbf R$ and $\Delta\mathbf e=\mathbf M^{-1}\mathbf y$, so it still measures the residual of $\mathbf J\Delta\mathbf e=-\mathbf R$ and the Newton correction is unchanged; each GMRES iteration costs one more FFT pair. If $\mathbf P_0$ were a projection $\mathbf Q$ and $\langle\mathbf L_t\rangle=\mathbf C_n$, $\mathbf M^{-1}=(\mathbf I-\mathbf Q)+\alpha\mathbf Q$ and the preconditioned operator would have the spectrum of the $\alpha=1$ Jacobian.
+
+**Why it helps CP and not Spectral LS.** For Spectral LS (one partition per element) $\mathbf P_0$ is a projection $\mathbf Q$ onto compatible zero-mean strains. A strain that starts compatible keeps its residual in the range of $\mathbf Q$, where any preconditioner of this form turns the system into $\boldsymbol\Gamma_0(\mathbf C_p)\mathbf L_t$ with $\mathbf C_p=\langle\mathbf L_t\rangle$: exactly Spectral LS's own system with $\mathbf C_p$ as its reference medium. Spectral LS's solution does not depend on its reference medium (Schneider 2021, §2), which acts as the preconditioner of its balance equation (Schneider 2021, §3) and is chosen for convergence (Moulinec–Suquet 1998, §3.1); with the midpoint $(\mathbf L_m+\mathbf L_f)/2$ (`spectral_ls_reference_stiffness`) it already sits where LS-23 would put it. CP's partition-averaged kernel is not a projection (eigenvalues in $[0,1]$), and its solution depends on $\mathbf C_0$, as for any clustered LS equation (Schneider 2019, §2), so $\mathbf C_0$ is fixed by its model and the preconditioner must be applied explicitly. Both are switchable (`cp_fourier_preconditioner`, `spectral_ls_fourier_preconditioner`); the default applies it to CP only.
+
+Measured on the default problem (64² elements, 32² partitions, 60 steps), GMRES iterations and online time:
+
+| | CP | Spectral LS (midpoint reference) |
+|---|---|---|
+| no preconditioner | 40 705, 23.3 s | 11 487, 18.1 s |
+| LS-23 | 7 146, 6.0–6.7 s | 11 484, 24.2 s |
+| LS-23, then block-Jacobi | 5 538, 5.5 s | 11 598, 26.6 s |
+| block-Jacobi alone | 9 951, 7.8 s | 11 717, 22.4 s |
+
+Each at the default tolerance against its own solution at $10^{-11}$, CP with LS-23 reaches $2.0\times10^{-8}$ (macroscopic) and $8.7\times10^{-7}$ (worst cluster), Spectral LS without it $1.2\times10^{-8}$ and $5.8\times10^{-7}$, TFA $1.1\times10^{-8}$ and $2.2\times10^{-7}$: the same accuracy. Block-Jacobi on the partitions' diagonal blocks $\mathbf I-\mathbf P_0[\mathbf 0]\mathbf D_A$ after LS-23 stopped CP at $6.1\times10^{-6}$ and $1.2\times10^{-3}$ with 214 Newton corrections against 181, so its 0.5 s is not a saving at equal accuracy; it is not used. Conjugate gradients on Brisard–Dormieux's symmetric polarization form, definite exactly when LS-22 is well posed: not tried.
+
+**Caveat, resolved.** On `check.py`'s cut laminate CP once stopped 30 times less accurately with LS-23 than without, because the earlier stopping test under-weighted part of CP's residual; LS-24 in section 7.5 fixed it.
+
+### 7.5 A stopping test that does not depend on the reference medium (added 2026-10-27, revised the same day)
+
+*The user has said this section is not yet clear to them; it is written step by step for that reason. Ask before
+building on it.*
+
+**Step 1: what Newton checks.** A load step stops when the relative residual is below `convergence_tolerance`, $\|\mathbf R\|/\|\bar{\boldsymbol\varepsilon}\|<10^{-6}$. That is a fair test across methods only if $\|\mathbf R\|$ measures the same thing for each. For TFA it does: its residual ER-4 is a plain strain error.
+
+**Step 2: the LS residual depends on $\mathbf C_0$.** With $\mathbf C_0=\alpha\,\mathbf C_m$ and $\mathbf P_0$ independent of $\alpha$ (section 7.4), LS-18 reads
+
+$$
+\mathbf R=\underbrace{(\mathbf I-\mathbf P_0)\,\mathbf e-\bar{\boldsymbol\varepsilon}}_{\text{compatibility part}}
+\;+\;\frac1\alpha\,\underbrace{\mathbf P_0\,\mathbf C_m^{-1}\boldsymbol\sigma}_{\text{equilibrium part}} .
+$$
+
+At $\alpha=0.01$ the same unbalanced stress gives a residual 100 times larger than at $\alpha=1$. So one tolerance would mean very different accuracies for different $\mathbf C_0$.
+
+**Step 3: the obvious fix, and where it falls short.** Multiplying by $\alpha$ (the earlier LS-24, $\mathbf C_m^{-1}\mathbf C_0\mathbf R$) gives $\alpha\cdot(\text{compatibility part})+(\text{equilibrium part})$. For Spectral LS the compatibility part is exactly zero ($\mathbf P_0$ is a projection and the iterates stay compatible), so this is exact. For CP it is not zero, and multiplying by $\alpha$ shrinks it 100 times: CP could stop with a compatibility error 100 times larger than the tolerance. On the cut laminate it did (CP $3.3\times10^{-5}$ of its tight solution, every other method and problem below $10^{-6}$).
+
+**Step 4: the fix.** Ask instead: *how large a strain correction would a cell made only of matrix need to cancel this residual?* That cell's Newton Jacobian is LS-20 with $\mathbf L_t=\mathbf C_m$ everywhere, a convolution (one $6\times6$ block per frequency):
+
+**(LS-24) Residual in matrix units**
+
+$$
+\widehat{\mathbf M}_m(\boldsymbol\xi)=\mathbf I-\widehat{\mathbf P}_0(\boldsymbol\xi)\,(\mathbf I-\mathbf C_0^{-1}\mathbf C_m),
+\qquad
+\tilde{\mathbf R}=\mathbf M_m^{-1}\mathbf R ,
+$$
+
+and convergence and the line search judge $\tilde{\mathbf R}$; the Newton correction still solves $\mathbf J\Delta\mathbf e=-\mathbf R$. TFA keeps its own residual.
+
+**Step 5: why it works.** Look at one Fourier mode where $\mathbf P_0$ has eigenvalue $p\in[0,1]$. There $\widehat{\mathbf M}_m=1+p\,(1/\alpha-1)$ and $\mathbf R=c+e/\alpha$ ($c$ compatibility, $e$ equilibrium part), so
+
+$$
+\tilde{\mathbf R}=\frac{c+e/\alpha}{1+p\,(1/\alpha-1)}\;\approx\;
+\begin{cases}\alpha\,c+e & p\to1\ \text{(the earlier measure)}\\ c & p\to0\ \text{(the compatibility part, no longer shrunk)}\end{cases}
+$$
+
+Neither limit depends on $\alpha$. Spectral LS lives entirely at $p=1$, so for it LS-24 equals the earlier measure (identical results); CP's modes with small $p$ are now judged in full.
+
+**Cost and effect.** One convolution per residual evaluation ($\widehat{\mathbf M}_m^{-1}$ is built once per lattice). Each method at the default tolerance against its own solution at $10^{-11}$ (macroscopic / worst cluster): cut laminate CP $1.1\times10^{-6}$ / $2.1\times10^{-6}$ (was $3.3\times10^{-5}$ / $4.4\times10^{-5}$); every other check problem and method unchanged to the bit. Default problem (64² elements, 32² partitions, 60 steps): CP $2.0\times10^{-8}$ / $7.8\times10^{-7}$ (182 Newton, 7 216 GMRES, 6.2 s), Spectral LS $1.2\times10^{-8}$ / $5.8\times10^{-7}$ (183, 11 487, 16.9 s), TFA $1.1\times10^{-8}$ / $2.2\times10^{-7}$ (112, 757, 7.5 s). All methods stop at the same accuracy. A first attempt that read the residual through the *mean* elastic stiffness instead of the matrix's loosened every method (to $10^{-5}$–$10^{-4}$ in the worst cluster): a stiff reading cell underestimates errors in the soft matrix, where they are largest.
+
 ## 8. Relationship to other frameworks
 
 - **E/P TFA:** retains actual heterogeneous elastic fluctuations but assumes reduced plastic histories. Its dense implementation has quadratic interaction storage/application. The new model replaces those elastic fluctuations by a reference response; it is not simply a faster solver for LS-2.
@@ -598,12 +682,19 @@ The distinction between $N$ and $M$ is computational, not a guarantee of retaine
 
 These were found while implementing and testing the model, and are not yet resolved in the sections above.
 
-- **Reference stiffness.** Section 7.1's midpoint reference measured worst of five candidates (55 % plastic error).
-  It is a convergence heuristic for the linear elastic scheme, not a model choice. The code offers `"homogenized"`,
-  `"voigt"` and `"matrix"`; $\mathbf C_0$ changes the LS answer (Schneider 2019 notes the same for clustered
-  Lippmann–Schwinger equations).
-- **Plastic branch of $\mathbf H_\mu$.** LS-20 needs it but this note does not state it. The code derives it and
-  checks it against a finite difference.
+- **Reference stiffness.** $\mathbf C_0$ changes CP's answer (Schneider 2019 notes the same for clustered
+  Lippmann–Schwinger equations). With one $\mathbf C_0$ for LS-7 and LS-22, it must stay below every cluster's tangent
+  in mixed partitions (section 4.4), so CP cannot run a perfectly plastic or softening phase at all, and on `check.py`'s
+  circle it costs accuracy (4.3 % against element-level TFA, against 2.4 % for the earlier equal-stress split with the
+  matrix stiffness in LS-7). Candidates not adopted: a $\mathbf C_0$ that follows the tangent (as in SCA), and the
+  Hashin–Shtrikman split of section 4.4, which keeps one $\mathbf C_0$ but not constant polarization.
+- **Plastic branch of $\mathbf H_\mu$.** LS-20 needs it but this note does not state it
+  (`notes/background_influence_functions_and_J2/` derives it; `material.get_eigenstrain_sensitivity`). Its
+  finite-difference check went with the 2026-10-26 cut-back (git tag `pre-cleanup`).
+- **Preconditioning Spectral LS.** No Fourier-diagonal preconditioner can do better than its reference medium
+  (section 7.4); a gain would need a local preconditioner that keeps iterates compatible. Block-Jacobi did not.
+- **Equal accuracy across methods** (section 7.5) was verified by hand on `check.py`'s problems and the default
+  problem, not by `check.py` itself.
 - **Convergence in $M$.** Section 5.4 leaves it open. Measured convergence is first order in partition size. Schneider
   (2019) proves convergence of clustered Lippmann–Schwinger equations as clusters are refined, for hardening
   materials only; softening is outside that theory.

@@ -28,7 +28,8 @@ class Evaluation(NamedTuple):
 
 class Solver(NamedTuple):
     # A method ready to run along the load path: solve_step(macro_strain, plastic_history) returns a StepResult whose
-    # stress and plastic state have one row per cluster of clusters (fe.Clusters).
+    # stress and plastic state have one row per cluster of clusters (fe.Clusters). TFA uses this; ls_model.LSSolver
+    # is a class with the same two attributes.
     solve_step: Callable
     clusters: tuple
 
@@ -73,23 +74,30 @@ def has_converged(residual_history, divergence_limit):
                                    f"(relative residual {relative_residual:.3e})")
     return False
 
-def solve_load_step(evaluate, get_correction, initial_strain, macro_strain, divergence_limit, average=np.mean):
+def solve_load_step(evaluate, get_correction, initial_strain, macro_strain, divergence_limit, average=np.mean,
+                    measure_residual=None):
     # Newton from initial_strain: evaluate(strain) returns an Evaluation, get_correction(evaluation) returns the Newton
     # correction there and its GMRES iteration count. Each correction is applied through take_step's line search.
-    # average is how the residual norm averages over the unknowns' rows (get_strain_norm).
+    # average is how the residual norm averages over the unknowns' rows (get_strain_norm). Convergence and the line
+    # search judge measure_residual(r) when it is given (the LS methods use it to put r in units that do not depend
+    # on their reference medium, LS-24), r itself otherwise; the Newton correction always solves for r.
+    def get_measured_residual(evaluation):
+        residual = evaluation.residual if measure_residual is None else measure_residual(evaluation.residual)
+        return get_relative_residual(residual, macro_strain, average)
+
     current = evaluate(initial_strain)
-    residual_history = [get_relative_residual(current.residual, macro_strain, average)]
+    residual_history = [get_measured_residual(current)]
     gmres_iteration_count = 0
     while not has_converged(residual_history, divergence_limit):
         correction, iteration_count = get_correction(current)
         gmres_iteration_count += iteration_count
-        current, relative_residual = take_step(evaluate, current, correction, residual_history[-1], macro_strain,
-                                               average)
+        current, relative_residual = take_step(evaluate, current, correction, residual_history[-1],
+                                               get_measured_residual)
         residual_history.append(relative_residual)
     return StepResult(current.strain, current.stress, current.plastic_state, np.array(residual_history),
                       gmres_iteration_count)
 
-def take_step(evaluate, current, correction, relative_residual, macro_strain, average):
+def take_step(evaluate, current, correction, relative_residual, get_measured_residual):
     # Backtracking line search: the full Newton step if it lowers the relative residual enough (by the fraction
     # line_search_sufficient_decrease of the step length), otherwise the step shortened by line_search_step_reduction,
     # at most line_search_max_reductions times; the shortest step is taken if none does. Where the full step
@@ -97,7 +105,7 @@ def take_step(evaluate, current, correction, relative_residual, macro_strain, av
     step_length = 1.0
     for _ in range(config.line_search_max_reductions + 1):
         trial = evaluate(current.strain + step_length * correction)
-        trial_relative_residual = get_relative_residual(trial.residual, macro_strain, average)
+        trial_relative_residual = get_measured_residual(trial)
         if trial_relative_residual < (1 - config.line_search_sufficient_decrease * step_length) * relative_residual:
             break
         step_length *= config.line_search_step_reduction

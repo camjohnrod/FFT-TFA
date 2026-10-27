@@ -22,14 +22,17 @@ import numpy as np  # noqa: E402, after the thread count is set
 
 ## ------- Geometry and Mesh ------- ##
 
-# A periodic square cell of side domain_side_length, meshed with element_number_per_side² × element_number_along_z
-# hexahedra and divided into partition_number_per_side² partitions, each a column of elements through the thickness.
-# element_number_per_side must be a multiple of partition_number_per_side. inclusion_shape is one of
-#   "circle"    a centred circular fiber of radius inclusion_radius, running through the thickness
-#   "laminate"  a centred fiber layer of thickness layer_thickness, with interfaces normal to x (check.py uses it: its
-#               solution is known exactly)
-# The geometry is resolved on the elements. A partition may hold both phases: its part in each phase is a cluster, with
-# its own material state.
+# A periodic cubic cell of side domain_side_length. inclusion_shape is one of
+#   "circle"      a centred circular fiber of radius inclusion_radius, running through the thickness
+#   "laminate"    a centred fiber layer of thickness layer_thickness, with interfaces normal to x (check.py uses it: its
+#                 solution is known exactly)
+#   "laminate_z"  the same layer with interfaces normal to z (check.py's test of the 3D kernel)
+# A shape whose geometry does not vary along z (circle, laminate) is meshed with element_number_per_side² ×
+# element_number_along_z hexahedra and divided into partition_number_per_side² partitions, each a column of elements
+# through the thickness. Any other shape is meshed with element_number_per_side³ hexahedra (element_number_along_z is
+# not used) and divided into partition_number_per_side³ partitions. element_number_per_side must be a multiple of
+# partition_number_per_side. The geometry is resolved on the elements. A partition may hold both phases: its part in
+# each phase is a cluster, with its own material state.
 domain_side_length          = 1e-3
 inclusion_shape             = "circle"
 inclusion_radius            = 0.35e-3
@@ -77,20 +80,37 @@ load_path_shape             = "monotonic"
 include_spectral_ls         = True
 include_tfa_model           = True
 
-# The reference stiffness C0 of CP and Spectral LS. It is part of their model, so it changes their answer; TFA does
-# not use it.
+# The reference stiffness C0 of CP:
+#
+#   C0 = reference_stiffness_scale × (the stiffness named by reference_stiffness)
+#
+# so "matrix" with 0.01 gives one hundredth of the matrix stiffness. reference_stiffness is one of
 #   "matrix"       the matrix stiffness
 #   "voigt"        the Voigt average <L> over the partitions
 #   "homogenized"  the homogenized stiffness of the composite, <L E> over the partitions; it needs the FE influence
 #                  function E, so it adds an FE solve even when TFA is off
+# One C0 serves the whole model (notes/2_ls_model.md, LS-7 and LS-22): the interaction between partitions (the kernel
+# P0), and how a partition holding both phases shares its strain between them, at equal polarization σ − C0 ε (the
+# polarization is constant in every partition). C0 must stay below every phase's tangent stiffness all along the load
+# path, or that sharing has no solution: a yielding phase's shear tangent drops to about G H / (3G + H), and to zero
+# without hardening. A smaller C0 shares the strain closer to equal stress. TFA does not use C0.
 reference_stiffness         = "matrix"
+reference_stiffness_scale   = 0.01
+
+# The reference stiffness of Spectral LS, its own: its solution does not depend on it (its kernel is a projection), so
+# it is only a solver setting, unlike CP's C0, which is part of CP's model. One of
+#   "midpoint"  Moulinec–Suquet's rule (1998, section 3.1): the phases' Lamé constants averaged, (L_m + L_f) / 2
+#   "matrix"    the matrix stiffness
+spectral_ls_reference_stiffness = "midpoint"
 
 ## ------- Newton–GMRES Solver ------- ##
 
 # Every method solves each load step by Newton's method, each Newton correction by GMRES, with the same settings.
 # A step has converged when its relative residual (the strain residual over the imposed strain, 3_tfa_baseline.md
 # section 12) is below convergence_tolerance; the imposed strain is never taken smaller than
-# residual_strain_scale_floor, which matters near zero imposed strain.
+# residual_strain_scale_floor, which matters near zero imposed strain. CP's and Spectral LS's residual is a strain of
+# their reference medium, which would make the test depend on C0; it is judged as the strain correction an all-matrix
+# cell would need to cancel it (notes/2_ls_model.md section 7.5), so the tolerance means the same for any C0.
 convergence_tolerance       = 1e-6
 residual_strain_scale_floor = 1e-4
 newton_max_iterations       = 50
@@ -100,6 +120,14 @@ newton_max_iterations       = 50
 newton_krylov_tolerance     = 1e-3
 newton_krylov_restart       = 50
 newton_krylov_max_restarts  = None
+# The Fourier preconditioner of CP's and Spectral LS's GMRES, the same for both: the best Fourier-diagonal
+# approximation of the method's own Newton Jacobian, i.e. the Jacobian of a homogeneous cell with the mean current
+# tangent, rebuilt at every Newton correction (notes/2_ls_model.md section 7.4). It changes how many GMRES iterations
+# a Newton correction takes, not the correction, so not the answer. It pays off for CP, whose small C0 stretches the
+# Jacobian's spectrum; for Spectral LS it changes nothing but costs one more FFT per GMRES iteration, since its
+# reference medium already plays that role.
+cp_fourier_preconditioner   = True
+spectral_ls_fourier_preconditioner = False
 # Each Newton correction goes through a backtracking line search: the full step if it lowers the relative residual by
 # at least the fraction line_search_sufficient_decrease of the step length, otherwise the step times
 # line_search_step_reduction, at most line_search_max_reductions times (the shortest step is taken if none does).
@@ -113,8 +141,8 @@ ls_divergence_limit         = 1e3
 tfa_divergence_limit        = 1.0
 
 # In a partition holding both phases, the partition strain is shared between the matrix and fiber clusters so that
-# both carry the same stress, found by Newton until the stress difference is below mixed_partition_tolerance times the
-# largest cluster stress, within mixed_partition_max_iterations.
+# both carry the same polarization σ − C0 ε, found by Newton until the polarization difference is below
+# mixed_partition_tolerance times the largest cluster stress, within mixed_partition_max_iterations.
 mixed_partition_tolerance   = 1e-12
 mixed_partition_max_iterations = 50
 
@@ -143,6 +171,9 @@ plastic_strain_max_percent  = None
 laminate_tolerance          = 1e-5
 laminate_solver_tolerance   = 1e-11
 laminate_solver_max_iterations = 50
+# In elasticity a mixed partition's stress and tangent must match their closed form (notes/2_ls_model.md section 4.4)
+# to this relative tolerance (the split itself converges to mixed_partition_tolerance).
+mixed_partition_check_tolerance = 1e-9
 
 ## ------- Folders ------- ##
 
@@ -162,12 +193,13 @@ def check_inputs():
         if not 0 < inclusion_radius < domain_side_length / 2:
             raise ValueError("The fiber's radius must be positive and below half the domain side, so neighbouring "
                              f"fibers do not touch. Got {inclusion_radius}.")
-    elif inclusion_shape == "laminate":
+    elif inclusion_shape in ("laminate", "laminate_z"):
         if not 0 < layer_thickness < domain_side_length:
             raise ValueError("The fiber layer's thickness must be positive and below the domain side, so matrix "
                              f"surrounds it. Got {layer_thickness}.")
     else:
-        raise ValueError(f"inclusion_shape must be \"circle\" or \"laminate\". Got {inclusion_shape!r}.")
+        raise ValueError("inclusion_shape must be \"circle\", \"laminate\" or \"laminate_z\". Got "
+                         f"{inclusion_shape!r}.")
 
     # The radial return divides by 3G + H, so at or below zero it has no admissible solution.
     for phase, elastic_modulus, poisson_ratio, yield_stress, hardening_modulus in (
@@ -184,6 +216,11 @@ def check_inputs():
     if reference_stiffness not in ("matrix", "voigt", "homogenized"):
         raise ValueError("reference_stiffness must be \"matrix\", \"voigt\" or \"homogenized\". "
                          f"Got {reference_stiffness!r}.")
+    if not reference_stiffness_scale > 0:
+        raise ValueError(f"reference_stiffness_scale must be positive. Got {reference_stiffness_scale}.")
+    if spectral_ls_reference_stiffness not in ("midpoint", "matrix"):
+        raise ValueError("spectral_ls_reference_stiffness must be \"midpoint\" or \"matrix\". "
+                         f"Got {spectral_ls_reference_stiffness!r}.")
     for name, minimum, maximum in (("von Mises", von_mises_min_MPa, von_mises_max_MPa),
                                    ("plastic strain", plastic_strain_min_percent, plastic_strain_max_percent)):
         if minimum is not None and maximum is not None and minimum >= maximum:

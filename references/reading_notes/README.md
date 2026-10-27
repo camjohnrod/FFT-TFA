@@ -15,6 +15,6 @@ and page numbers, verbatim quotations, and its relevance to this project. Statem
 | `06_zhang_et_al_2019.md` | Zhang, Tang, Yu, Zhu, Liu (2019), Comput. Mech. 64 | online, linked in `1_research_context.md` |
 | `07_kabel_et_al_2016.md` | Kabel, Fink, Ospald, Schneider (2016), ECCOMAS Congress | online, linked in `1_research_context.md` |
 | `08_schneider_review_2021.md` | Schneider (2021), Acta Mech. 232 (review) | `../schneider2021_Review.pdf` |
+| `09_ladecky_et_al_2023.md` | Ladecký et al. (2023), Appl. Math. Comput. 446 (FE solver with FFT preconditioner, for the gold-standard reference; read 2026-10-27 from extracted text, not page images) | `../An-optimal-preconditioned-FFT-accelerated-finite-element-solver-for-homogenization.pdf` |
 
-Other PDFs in `references/` (Fish–Cui, Fish's book, Dvorak, Ladecký et al., the plasticity book) were not read for
-this review; `notes/3_tfa_baseline.md` cites some of them for the TFA derivation.
+Other PDFs in `references/` (Fish–Cui, Fish's book, Dvorak, the plasticity book) were not read for this review; `notes/3_tfa_baseline.md` cites some of them for the TFA derivation.

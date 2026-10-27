@@ -1,7 +1,7 @@
 # TFA, the baseline: the actual E/P model of notes/3_tfa_baseline.md, whose residual is r = ε - E ε̄ - P μ(ε) (ER-4),
 # with E and P the exact FE influence functions of the composite (fe.py). Its regions, called partitions below as in
-# the notes, are CP's clusters (fe.Clusters), each with one uniform strain and material state. Each load step is solved
-# by Newton with GMRES (Strategy 2), on the matrix-free Jacobian J v = v - P (H_μ v) of ER-21.
+# the notes, are CP's clusters (fe.Clusters), each with one uniform strain and material state. Each load step is
+# solved by Newton with GMRES (Strategy 2), on the matrix-free Jacobian J v = v - P (H_μ v) of ER-21.
 
 import functools
 import numpy as np

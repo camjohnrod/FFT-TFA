@@ -3,3 +3,4 @@ __pycache__/
 code/cache/
 code/output/
 .venv/
+code/check_reference.npz

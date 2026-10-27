@@ -67,7 +67,9 @@ other.
 
 ## 2. Computing $\mathbf D$ for box partitions
 
-Let the partitions be boxes of side $h=L/n$ spanning the thickness. A field that is constant on each box has Fourier
+Let the partitions be boxes of side $h=L/n$ spanning the thickness (the code's partitions for a geometry constant
+along $x_3$; for one that varies, they are cubes of side $h$, and everything below gains a third index: aliases
+$\mathbf m\in\mathbb Z^3$ and a third sinc factor). A field that is constant on each box has Fourier
 coefficients at every in-plane wavevector, not just $n$ per direction. Brisard–Dormieux (2010, p. 666) give them: the
 coefficient at $\tfrac{2\pi}{L}(\boldsymbol\xi+n\mathbf m)$ is the lattice's discrete Fourier transform at
 $\boldsymbol\xi$ times a sinc factor from the box shape ($\operatorname{sinc}x=\sin x/x$):
@@ -109,8 +111,8 @@ Notes on each:
   improved scheme", for T retained terms, and the method extends to double sums. They also show the operator matters
   even at fine resolution: the consistent and plain operators can differ by up to 30 % "for M = N = 1024", which
   "indicates that introducing the periodized Green operator is the appropriate way of accounting for finite-resolution
-  effects". In 3D the series converge "very slowly" (2012, §4.2); our partitions span the thickness, which makes our
-  sum two-dimensional like theirs.
+  effects". In 3D the series converge "very slowly" (2012, §4.2); partitions that span the thickness make our sum
+  two-dimensional like theirs, but cubic partitions (a geometry varying along $x_3$) make it the slow 3D one.
 - **Moulinec–Suquet.** Their own view (1998, §3.3.3) is that the discrete Fourier transform is exact only for fields
   with a cut-off frequency, and "a discontinuous field has no cut-off frequency and there is no discretization able to
   capture this discontinuity". They expect convergence as resolution increases. With plasticity, resolution matters:
