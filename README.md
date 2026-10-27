@@ -52,14 +52,14 @@ The ones you will change most:
   `np.inf`.
 - **Load path:** `max_macro_strain`, `load_path_shape` (`"monotonic"` or `"cyclic"`), `strain_increment_count`.
 - **Methods:** CP always runs; `include_spectral_ls` and `include_tfa` add the others.
-- **Clusters:** `cp_clusters` and `tfa_clusters`, each `"partition phases"` (default) or `"k-means"`: k-means clusters
+- **Clusters:** `cp_clusters` and `tfa_clusters`, each `"k-means"` (default) or `"partition phases"`: k-means clusters
   of the elements' elastic strain concentration, found in each phase apart, up to `k_means_matrix_clusters` and
   `k_means_inclusion_clusters` (one is enough for an elastic inclusion). Spectral LS keeps one cluster per element.
 - **CP's reference stiffness:** C0 = `cp_reference_stiffness_scale` × `cp_reference_stiffness` (default 0.05 ×
   `"matrix"`). C0 must stay below the tangent stiffness of every cluster sharing a partition; CP stops and says so if
   it doesn't.
-- **Figures:** colour limits of the maps, and `von_mises_matrix_only` to grey out the inclusion in the von Mises maps
-  so their scale follows the matrix.
+- **Figures:** colour limits of the maps, and `von_mises_matrix_only` (default on) to grey out the inclusion in the von
+  Mises maps so their scale follows the matrix.
 - **Threads:** `thread_count` (default 1) caps every method alike.
 
 ## Output

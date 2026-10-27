@@ -94,8 +94,8 @@ include_tfa                 = True
 # leaves one empty). An elastic phase's eigenstrain is always zero, so one inclusion cluster is enough unless it
 # yields: more only show its stress in more detail. TFA's P has (6 × its clusters)² doubles: with partition phases
 # 0.3 GB at 32² partitions and 4.8 GB at 64², far less with k-means.
-cp_clusters                 = "partition phases"
-tfa_clusters                = "partition phases"
+cp_clusters                 = "k-means"
+tfa_clusters                = "k-means"
 k_means_matrix_clusters     = 16
 k_means_inclusion_clusters  = 1
 
@@ -125,8 +125,8 @@ cp_reference_stiffness_scale = 0.05
 # von_mises_matrix_only the von Mises maps of every method show the matrix alone, the inclusion greyed out, so limits
 # left at None come from the matrix, whose stresses the much stiffer inclusion's would otherwise dwarf.
 von_mises_min_MPa           = None
-von_mises_max_MPa           = 2.0
-von_mises_matrix_only       = False
+von_mises_max_MPa           = None
+von_mises_matrix_only       = True
 plastic_strain_min_percent  = None
 plastic_strain_max_percent  = None
 
@@ -192,7 +192,7 @@ newton_max_iterations       = 50
 # every newton_krylov_restart iterations, at most newton_krylov_max_restarts times (None: scipy's default, ten times
 # the number of unknowns).
 newton_krylov_tolerance     = 1e-3
-newton_krylov_restart       = 50
+newton_krylov_restart       = 100
 newton_krylov_max_restarts  = None
 # Each Newton correction goes through a backtracking line search: the full step if it lowers the relative residual by
 # at least the fraction line_search_sufficient_decrease of the step length, otherwise the step times
