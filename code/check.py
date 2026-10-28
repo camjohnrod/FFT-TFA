@@ -12,7 +12,7 @@
 #                 loaded in transverse shear. Spectral LS and TFA must reproduce the exact solution in every cluster.
 #                 CP shares a mixed partition's strain at equal polarization against C0, which is exact here only
 #                 as C0 → 0 (equal stress), so its difference is reported but not judged.
-#   circle        a circular fiber under tension and shear, the kind of problem config.py sets up by default, with a
+#   fiber         a circular fiber under tension and shear, the kind of problem config.py sets up by default, with a
 #                 band of mixed partitions around the fiber.
 #   z laminate    a laminate with interfaces normal to z, so the geometry varies along z: meshed and partitioned in 3D,
 #                 the only test of the kernel's ξ_z frequencies. Every method must reproduce its exact solution.
@@ -21,7 +21,7 @@
 #                 the laminate and the sphere with k-means clusters for CP and TFA (config.cp_clusters,
 #                 config.tfa_clusters). On the laminate every method must still reproduce the exact solution.
 # On all seven, every method must complete every load step and, once a reference is saved, reproduce it bit for bit.
-# Where CP's partitions hold several pieces (cut laminate, circle, sphere, k-means), CP's piece law must match LS-25
+# Where CP's partitions hold several pieces (cut laminate, fiber, sphere, k-means), CP's piece law must match LS-25
 # computed independently, piece by piece (notes/2_ls_model.md section 4.5): a wrong piece law or piece indexing fails
 # there.
 # So a change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
@@ -50,9 +50,9 @@ reference_path = pathlib.Path(__file__).parent / "check_reference.npz"
 # Every config.py input that shapes the problems or the solvers, pinned to a fixed value: a 27 × 27 element mesh
 # with 9 × 9 partitions, a yielding and hardening matrix, every method switched on.
 pinned_inputs = {
-    "domain_side_length": 1e-3, "inclusion_shape": "circle", "inclusion_radius": 0.35e-3,
+    "domain_side_length": 1e-3, "inclusion_shape": "fiber", "inclusion_radius": 0.35e-3,
     "layer_thickness": (3 / 9) * 1e-3, "element_number_per_side": 27, "element_number_along_z": 1,
-    "partition_number_per_side": 9,
+    "partition_number_per_side": 9, "partition_number_along_z": 1,
     "elastic_modulus_inclusion": 10e9, "elastic_modulus_matrix": 100e6, "poisson_ratio_inclusion": 0.3,
     "poisson_ratio_matrix": 0.19, "inclusion_yield_stress": np.inf, "matrix_yield_stress": 1.0e6,
     "inclusion_hardening_modulus": 0.0, "matrix_hardening_modulus": 10e6,
@@ -82,7 +82,7 @@ check_problems = {
     "cut laminate": {"inclusion_shape": "laminate", "layer_thickness": (7 / 27) * 1e-3,
                      "max_macro_strain": np.array([0.0, 0.0, 0.0, 0.03, 0.0, 0.0]), "load_path_shape": "cyclic",
                      "strain_increment_count": 4},
-    "circle": {},
+    "fiber": {},
     # The laminate turned so its interfaces are normal to z, on a 9³ mesh with 3³ partitions (the layer is the middle
     # partition layer), loaded like the laminate with every interface-normal component (ε33, γ23, γ13) taking part.
     "z laminate": {"inclusion_shape": "laminate_z", "element_number_per_side": 9, "partition_number_per_side": 3,

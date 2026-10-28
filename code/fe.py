@@ -28,9 +28,9 @@ import config
 ## ------- Shapes ------- ##
 
 # The inclusion shapes whose geometry does not vary along z. They are meshed with config.element_number_along_z
-# element layers (one is exact) and partitioned in columns through the thickness; every other shape is meshed and
-# partitioned alike along all three axes.
-shapes_constant_along_z = ("circle", "laminate")
+# element layers (one is exact) and partitioned in config.partition_number_along_z layers (one: columns through the
+# thickness); every other shape is meshed and partitioned alike along all three axes.
+shapes_constant_along_z = ("fiber", "laminate")
 
 def is_shape_constant_along_z():
     return config.inclusion_shape in shapes_constant_along_z
@@ -105,12 +105,12 @@ def get_partition_discretization():
     # CP's partitions, which are also TFA's: the mesh and lattice config.py describes.
     elements, partitions = config.element_number_per_side, config.partition_number_per_side
     if is_shape_constant_along_z():
-        return Discretization(elements, config.element_number_along_z, partitions, 1)
+        return Discretization(elements, config.element_number_along_z, partitions, config.partition_number_along_z)
     return Discretization(elements, elements, partitions, partitions)
 
 def get_spectral_discretization():
     # Spectral LS's lattice: the same mesh with one partition per element (per element column for a shape constant
-    # along z).
+    # along z, whatever CP's partition_number_along_z).
     discretization = get_partition_discretization()
     return discretization._replace(
         partition_number_per_side=discretization.element_number_per_side,

@@ -22,7 +22,7 @@
 #   k-means       its features, offline        not used                           for cp/tfa_clusters = "k-means"
 #
 #   elements    element_number_per_side (and element_number_along_z): the fine mesh, which resolves the geometry
-#   partitions  partition_number_per_side: CP's uniform lattice of blocks of elements
+#   partitions  partition_number_per_side (and partition_number_along_z): CP's uniform lattice of blocks of elements
 #   clusters    the material states: regions of one phase with one uniform plastic eigenstrain each
 # So CP's online cost is set by its partitions and clusters, not by the mesh.
 
@@ -42,7 +42,7 @@ import numpy as np  # noqa: E402, after the thread count is set
 ## ------- Problem ------- ##
 
 # A periodic cubic cell of side domain_side_length. inclusion_shape is one of
-#   "circle"      a centred circular fiber of radius inclusion_radius, running through the thickness
+#   "fiber"       a centred circular fiber of radius inclusion_radius, running through the thickness
 #   "laminate"    a centred fiber layer of thickness layer_thickness, with interfaces normal to x (check.py uses it: its
 #                 solution is known exactly)
 #   "laminate_z"  the same layer with interfaces normal to z (check.py's test of the 3D kernel)
@@ -52,13 +52,16 @@ inclusion_radius            = 0.35e-3
 layer_thickness             = 0.5e-3
 domain_side_length          = 1e-3
 
-# The grids (table above). The mesh resolves the geometry: a shape whose geometry does not vary along z (circle,
+# The grids (table above). The mesh resolves the geometry: a shape whose geometry does not vary along z (fiber,
 # laminate) gets element_number_per_side² × element_number_along_z hexahedra (one layer is exact) and
-# partition_number_per_side² partitions, columns through the thickness; any other shape element_number_per_side³
-# hexahedra and partition_number_per_side³ partitions. partition_number_per_side must divide element_number_per_side.
+# partition_number_per_side² × partition_number_along_z partitions (1: columns through the thickness); any other shape
+# element_number_per_side³ hexahedra and partition_number_per_side³ partitions, and the two along-z counts are not
+# used. partition_number_per_side must divide element_number_per_side, and partition_number_along_z
+# element_number_along_z.
 element_number_per_side     = 18
 element_number_along_z      = 6
 partition_number_per_side   = 9
+partition_number_along_z    = 1
 
 # The macroscopic strain, in engineering notation (ε11, ε22, ε33, γ12, γ23, γ13), reaches max_macro_strain in
 # strain_increment_count equal steps. load_path_shape is
@@ -120,10 +123,11 @@ cp_reference_stiffness_scale = 0.05
 ## ------- Figures ------- ##
 
 # Colour-scale limits of the von Mises stress maps (MPa) and the accumulated plastic strain maps (%), so that maps from
-# different runs can share a scale. None takes that limit from the plotted maps; for plastic strain, from the Spectral
-# LS map alone (every map when Spectral LS is off), so the other methods are read on its scale. With
-# von_mises_matrix_only the von Mises maps of every method show the matrix alone, the inclusion greyed out, so limits
-# left at None come from the matrix, whose stresses the much stiffer inclusion's would otherwise dwarf.
+# different runs can share a scale. None takes that limit from Spectral LS's map, the finest field, so the other
+# methods are read on its scale (values beyond it take the end colour, marked on the colour bar); from every map when
+# Spectral LS is off. With von_mises_matrix_only the von Mises maps of every method show the matrix alone, the
+# inclusion greyed out, so limits left at None come from the matrix, whose stresses the much stiffer inclusion's would
+# otherwise dwarf.
 von_mises_min_MPa           = None
 von_mises_max_MPa           = None
 von_mises_matrix_only       = True
@@ -230,12 +234,15 @@ output_folder = pathlib.Path(__file__).parent / "output"
 
 def check_inputs():
     # Stops on an input the code cannot run with. check.py calls it again after setting its own inputs.
-    if min(element_number_per_side, element_number_along_z, partition_number_per_side, strain_increment_count) < 1:
+    if min(element_number_per_side, element_number_along_z, partition_number_per_side, partition_number_along_z,
+           strain_increment_count) < 1:
         raise ValueError("The element, partition and strain increment counts must all be at least 1.")
     if element_number_per_side % partition_number_per_side != 0:
         raise ValueError("The number of elements per side must be a multiple of the number of partitions per side.")
+    if inclusion_shape in ("fiber", "laminate") and element_number_along_z % partition_number_along_z != 0:
+        raise ValueError("The number of elements along z must be a multiple of the number of partitions along z.")
 
-    if inclusion_shape in ("circle", "sphere"):
+    if inclusion_shape in ("fiber", "sphere"):
         if not 0 < inclusion_radius < domain_side_length / 2:
             raise ValueError("The inclusion's radius must be positive and below half the domain side, so neighbouring "
                              f"inclusions do not touch. Got {inclusion_radius}.")
@@ -244,7 +251,7 @@ def check_inputs():
             raise ValueError("The fiber layer's thickness must be positive and below the domain side, so matrix "
                              f"surrounds it. Got {layer_thickness}.")
     else:
-        raise ValueError("inclusion_shape must be \"circle\", \"laminate\", \"laminate_z\" or \"sphere\". Got "
+        raise ValueError("inclusion_shape must be \"fiber\", \"laminate\", \"laminate_z\" or \"sphere\". Got "
                          f"{inclusion_shape!r}.")
 
     # The radial return divides by 3G + H, so at or below zero it has no admissible solution.

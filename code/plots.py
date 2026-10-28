@@ -222,21 +222,22 @@ class FieldMap(NamedTuple):
     values: np.ndarray
 
 def plot_field_maps(field_maps, label, load_step, load_step_count, value_min, value_max, plot_path):
-    # One map per method, side by side on one colour scale, between the given limits or, where a limit is None, the
-    # maps' own; label names the field and its unit on the colour bar. Elements without a value (NaN) are drawn in
-    # field_map_hidden_color and left out of the limits.
+    # One map per method, side by side on one colour scale between the given limits; label names the field and its
+    # unit on the colour bar, whose ends point outwards where a map goes beyond them (those values take the end
+    # colour). Elements without a value (NaN) are drawn in field_map_hidden_color.
     with plt.rc_context(field_map_style):
         figure, axes = plt.subplots(1, len(field_maps), squeeze=False, layout='constrained',
                                     figsize=(field_map_panel_size * len(field_maps) + 1.2, field_map_panel_size))
-        all_values = [field_map.values for field_map in field_maps]
-        limits = {'vmin': min(map(np.nanmin, all_values)) if value_min is None else value_min,
-                  'vmax': max(map(np.nanmax, all_values)) if value_max is None else value_max}
+        limits = {'vmin': value_min, 'vmax': value_max}
+        below = any(np.nanmin(field_map.values) < value_min for field_map in field_maps)
+        above = any(np.nanmax(field_map.values) > value_max for field_map in field_maps)
+        extend = {(False, False): 'neither', (True, False): 'min', (False, True): 'max', (True, True): 'both'}
         colormap = plt.get_cmap(field_map_colormap).with_extremes(bad=field_map_hidden_color)
         for axis, field_map in zip(axes[0], field_maps):
             image = axis.imshow(field_map.values, origin='lower', extent=(0, 1, 0, 1), cmap=colormap, **limits)
             axis.set_title(field_map.title)
             axis.set_axis_off()
-        figure.colorbar(image, ax=axes[0], label=label, shrink=0.85)
+        figure.colorbar(image, ax=axes[0], label=label, shrink=0.85, extend=extend[below, above])
         figure.suptitle(f"Load step {load_step} of {load_step_count}", color='0.3')
         figure.savefig(plot_path)
     plt.close(figure)

@@ -20,8 +20,7 @@ import tqdm
 
 import plots
 from fe import (Clusters, get_clusters, get_E_and_P, get_inclusion_L, get_matrix_L, get_partition_discretization,
-                get_periodic_mesh, get_spectral_discretization, is_shape_constant_along_z, label_k_means,
-                label_partition_phases)
+                get_periodic_mesh, get_spectral_discretization, label_k_means, label_partition_phases)
 from ls_model import (CPSolver, SpectralLSSolver, get_cp_reference_L, get_elastic_strain_concentration,
                       get_named_stiffness, get_P0_transformed, get_spectral_reference_L)
 from material import get_flow_stress, get_unloaded_plastic_state, get_von_mises_stress
@@ -238,10 +237,10 @@ def get_element_map(clusters, cluster_values):
     # get_layer_map of one value per cluster, each element taking its cluster's value.
     return get_layer_map(cluster_values[clusters.element_cluster])
 
-def get_lattice_label(count_per_side):
-    # "N×N" for a shape constant along z (cells are columns through the thickness), "N×N×N" otherwise.
-    dimension = 2 if is_shape_constant_along_z() else 3
-    return "$\\times$".join([str(count_per_side)] * dimension)
+def get_lattice_label(lattice_shape):
+    # A lattice of shape [z, y, x] as "N×N" when its cells are columns through the thickness, "N×N×N_z" otherwise.
+    counts = [lattice_shape[2], lattice_shape[1]] + ([lattice_shape[0]] if lattice_shape[0] > 1 else [])
+    return "$\\times$".join(map(str, counts))
 
 def get_reference_label():
     # CP's C0 as config.py states it, e.g. "0.01 × matrix", or "matrix" at scale 1.
@@ -257,8 +256,9 @@ def get_cell_maps(problem, methods):
     # Each method's discretization on the element grid of the mid-thickness layer, with its settings: CP's partitions
     # and clusters, Spectral LS's voxels (one element each), TFA's clusters; k-means clusters coloured in.
     cp_clusters = problem.partitions.clusters
-    partitions, elements = config.partition_number_per_side, config.element_number_per_side
-    cp_settings = f"{get_lattice_label(partitions)} partitions"
+    elements = config.element_number_per_side
+    voxel_label = get_lattice_label(get_spectral_discretization().partition_lattice_shape)
+    cp_settings = f"{get_lattice_label(get_partition_discretization().partition_lattice_shape)} partitions"
     if config.cp_clusters == "k-means":
         cp_settings += f", C0: {get_reference_label()}\n{cp_clusters.cluster_count} k-means clusters"
     else:
@@ -271,7 +271,7 @@ def get_cell_maps(problem, methods):
              "partition": get_layer_map(cp_clusters.piece_partition[cp_clusters.element_piece])},
             get_cluster_map(cp_clusters) if config.cp_clusters == "k-means" else None),
         "Spectral LS": plots.CellMap("Spectral LS",
-                                     f"{get_lattice_label(elements)} voxels, "
+                                     f"{voxel_label} voxels, "
                                      f"C0: {config.spectral_ls_reference_stiffness}",
                                      {"voxel": np.arange(elements**2).reshape(elements, elements)})}
     if problem.tfa_clusters is not None:
@@ -282,6 +282,15 @@ def get_cell_maps(problem, methods):
             "TFA", f"{tfa_clusters.cluster_count} {tfa_cluster_label}", {"cluster": get_cluster_map(tfa_clusters)},
             get_cluster_map(tfa_clusters) if config.tfa_clusters == "k-means" else None)
     return [cell_maps[method] for method in methods]
+
+def get_color_limits(field_maps, value_min, value_max):
+    # A map figure's colour limits: the given ones, and those left at None from Spectral LS's map, the finest field, so
+    # the other methods are read against it (values beyond it are clipped); from every map if Spectral LS did not
+    # run. Elements without a value (NaN, the inclusion in a matrix-only map) are left out.
+    scale_maps = ([field_map.values for field_map in field_maps if field_map.title == "Spectral LS"]
+                  or [field_map.values for field_map in field_maps])
+    return (min(map(np.nanmin, scale_maps)) if value_min is None else value_min,
+            max(map(np.nanmax, scale_maps)) if value_max is None else value_max)
 
 def save_figures(problem, results, applied_macro_strain):
     clusters = problem.partitions.clusters
@@ -306,21 +315,16 @@ def save_figures(problem, results, applied_macro_strain):
     plots.plot_field_maps(von_mises_maps,
                           "von Mises stress in the matrix (MPa)" if config.von_mises_matrix_only
                           else "von Mises stress (MPa)",
-                          step_count, len(applied_macro_strain), config.von_mises_min_MPa, config.von_mises_max_MPa,
+                          step_count, len(applied_macro_strain),
+                          *get_color_limits(von_mises_maps, config.von_mises_min_MPa, config.von_mises_max_MPa),
                           config.output_folder / "von_mises_stress.png")
     plastic_strain_maps = [plots.FieldMap(method, get_element_map(
         result.clusters, 100 * result.accumulated_plastic_strain_per_step[step_count - 1]))
         for method, result in results.items()]
-    # Unset plastic strain limits come from Spectral LS's map, the finest field, so the other maps are read against it
-    # (values beyond it are clipped); from every map if Spectral LS did not run.
-    scale_maps = ([field_map.values for field_map in plastic_strain_maps if field_map.title == "Spectral LS"]
-                  or [field_map.values for field_map in plastic_strain_maps])
-    plastic_strain_min = config.plastic_strain_min_percent
-    plastic_strain_max = config.plastic_strain_max_percent
     plots.plot_field_maps(plastic_strain_maps, "Accumulated plastic strain (%)", step_count,
                           len(applied_macro_strain),
-                          min(map(np.min, scale_maps)) if plastic_strain_min is None else plastic_strain_min,
-                          max(map(np.max, scale_maps)) if plastic_strain_max is None else plastic_strain_max,
+                          *get_color_limits(plastic_strain_maps, config.plastic_strain_min_percent,
+                                            config.plastic_strain_max_percent),
                           config.output_folder / "plastic_strain.png")
 
 def main():

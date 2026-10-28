@@ -48,7 +48,7 @@ python code/check.py save    # the same, then save the results as the new refere
 ```
 
 There is no pytest suite and no way to run one check problem alone. `check.py` solves `"laminate"`, `"cut laminate"`,
-`"circle"`, `"z laminate"`, `"sphere"`, `"k-means laminate"` and `"k-means sphere"` with every method. On the laminates
+`"fiber"`, `"z laminate"`, `"sphere"`, `"k-means laminate"` and `"k-means sphere"` with every method. On the laminates
 every method must match the exact solution to `laminate_tolerance`, except CP on the cut laminate (`inexact_methods`:
 printed as INFO). CP's sparse LS-25 matrices (E, F, Λ, D_e) must match LS-25 computed piece by piece in `check.py`, with
 no solver code, to `piece_law_check_tolerance`; that is what catches a wrong piece law or piece indexing. The
@@ -102,7 +102,8 @@ subclass's `get_D` (CP's is LS-27), `solve_step` → section 7.3, `residual_in_m
   never by less than `residual_strain_scale_floor`.
 - **No global lattice size online:** solvers, FFTs and the load path take sizes from the arrays they're given, never
   from `config.partition_*` or `config.element_*`. That is what lets CP and Spectral LS share code.
-- **Lattices are 3D, indexed `[z, y, x]`.** A z-constant shape has one partition along z, so its LS is the 2D problem.
+- **Lattices are 3D, indexed `[z, y, x]`.** A z-constant shape has `partition_number_along_z` partitions along z
+  (1: columns, the 2D problem; more layers give the same answer to solver tolerance, a useful consistency test).
   `apply_on_lattice` transforms only axes longer than one (length-1 transforms are identities but slow).
 - **Half spectrum:** `P0_transformed` holds only `rfftn`'s half (shape `(N_z, N, N//2 + 1, 6, 6)`), transformed back
   with `irfftn(..., s=(N_z, N, N))`. Anything new reading it must do the same.
@@ -133,13 +134,18 @@ subclass's `get_D` (CP's is LS-27), `solve_step` → section 7.3, `residual_in_m
 
 ## Status
 
-The roadmap is in the README's "Status and roadmap"; keep the two in step. Things tried and rejected, not to redo
-without the user asking: block-Jacobi preconditioning on top of the Fourier one (CP stopped less accurately),
-geometric (interface-aware) split rules for mixed partitions, single-phase-only partitions, and CP's cluster
-eigenstrains as Newton unknowns with a polarization-form correction (more Newton iterations and a 20–50× less accurate
-stop; LS note section 7.6). Mixed partitions must
-stay O(M log M).
+The roadmap is in the README's "Status and roadmap"; keep the two in step. Mixed partitions must stay O(M log M).
+Tried and rejected, not to redo without the user asking: block-Jacobi preconditioning on top of the Fourier one (CP
+stopped less accurately), geometric (interface-aware) split rules for mixed partitions, single-phase-only partitions,
+and CP's cluster eigenstrains as Newton unknowns with a polarization-form correction (more Newton iterations, a 20–50×
+less accurate stop; LS note section 7.6).
 
-Known behaviour (seen with the FE kernel, since removed): element-level LS rang along high-contrast interfaces, an
-element-to-element alternation near the inclusion's corners not reduced by refinement, which a global measure
-misses; inspect fields locally.
+Known behaviour, model error rather than bugs:
+- **CP's σ33 is low along a z-invariant fiber** (about 9 % at 16² partitions, 2 % at 32²): mixed partitions share
+  strain near equal stress, but ε33 is uniform there. C0 cannot fix it (it must stay below the matrix's tangent);
+  finer partitions do. Imposing each partition's ε33 on its pieces would, at the cost of constant polarization in the
+  33 component: the user's call.
+- **k-means clusters break the cell's mirror symmetry,** so normal loading gives a small spurious macroscopic shear
+  (about 3e-4 of the normal stress).
+- **Element-level LS rang along high-contrast interfaces** (seen with the FE kernel, since removed): an alternation
+  near the inclusion's corners that refinement did not reduce and a global measure misses; inspect fields locally.

@@ -4,7 +4,8 @@ Reduced-order homogenization of elastoplastic composites: a stiff fiber in a sof
 cube. The cell is seen at three scales:
 
 - **elements:** the fine mesh of 8-node hexahedra, which resolves the geometry;
-- **partitions:** uniform blocks of k × k element columns (k × k × k blocks if the geometry varies along z);
+- **partitions:** CP's uniform blocks of elements: k × k columns through the thickness, or layers of them, if the
+  geometry does not vary along z, k × k × k blocks otherwise;
 - **clusters:** regions of one phase with one material state (one uniform plastic eigenstrain) each. By default each
   partition's part in each phase: one cluster if the partition lies in one phase, two if the fiber's edge cuts
   through it. CP and TFA can each take k-means clusters instead, which may span many partitions; a cluster's part in
@@ -30,11 +31,10 @@ python code/run.py      # solve the problem in code/config.py with every method
 python code/check.py    # check the code (about 15 seconds)
 ```
 
-The first run with TFA on a new configuration builds E and P and caches them in `code/cache/`. That takes minutes and
-memory of (6 × TFA's clusters)² doubles: 0.3 GB with 32² partitions, 4.8 GB with 64² or 16³ (far less with k-means
-clusters). Later runs reuse the cache.
-In 3D the FE factorization is the limit too: with 7 GB of memory a 24³ mesh works and 36³ runs out of memory.
-CP and Spectral LS have no such limit; switch TFA off for finer 3D meshes.
+The first run with TFA on a new configuration builds E and P and caches them in `code/cache/`; later runs reuse
+them. P takes (6 × TFA's clusters)² doubles: with partition phases 0.3 GB at 32² partitions and 4.8 GB at 64² or 16³,
+far less with k-means clusters. In 3D the FE factorization limits the mesh too (with 7 GB a 24³ mesh works, 36³ does
+not); CP and Spectral LS have no such limit, so switch TFA off for finer 3D meshes.
 
 Dependencies: `numpy`, `scipy`, `matplotlib`, `tqdm` (in the untracked `.venv/`).
 
@@ -44,10 +44,11 @@ Every setting is in `code/config.py`, commented, from the settings changed most 
 command-line options. Its header has a table of what the mesh, the partitions and the clusters mean to each method.
 The ones you will change most:
 
-- **Geometry:** `inclusion_shape` is `"circle"` (a fiber along z), `"sphere"`, `"laminate"` (interfaces normal to
-  x) or `"laminate_z"` (normal to z). `element_number_per_side` sets the mesh; `partition_number_per_side` must
-  divide it. The circle and the x laminate are constant along z, so they use `element_number_along_z` layers (one is
-  enough) and partitions that are columns; the sphere and the z laminate are meshed and partitioned in 3D.
+- **Geometry:** `inclusion_shape` is `"fiber"` (a circular fiber along z), `"sphere"`, `"laminate"` (interfaces
+  normal to x) or `"laminate_z"` (normal to z). `element_number_per_side` sets the mesh; `partition_number_per_side`
+  must divide it. The fiber and the x laminate are constant along z: they use `element_number_along_z` element layers
+  (one is enough) and `partition_number_along_z` partition layers (one gives columns, and the same answer). The sphere
+  and the z laminate are meshed and partitioned in 3D.
 - **Materials:** stiffness, yield stress and hardening per phase. A phase stays elastic if its yield stress is
   `np.inf`.
 - **Load path:** `max_macro_strain`, `load_path_shape` (`"monotonic"` or `"cyclic"`), `strain_increment_count`.
@@ -58,8 +59,8 @@ The ones you will change most:
 - **CP's reference stiffness:** C0 = `cp_reference_stiffness_scale` × `cp_reference_stiffness` (default 0.05 ×
   `"matrix"`). C0 must stay below the tangent stiffness of every cluster sharing a partition; CP stops and says so if
   it doesn't.
-- **Figures:** colour limits of the maps, and `von_mises_matrix_only` (default on) to grey out the inclusion in the von
-  Mises maps so their scale follows the matrix.
+- **Figures:** colour limits of the maps (unset limits follow Spectral LS's map when it runs), and
+  `von_mises_matrix_only` (default on) to grey out the inclusion in the von Mises maps.
 - **Threads:** `thread_count` (default 1) caps every method alike.
 
 ## Output
@@ -84,7 +85,7 @@ python code/check.py save    # run them and, if they pass, save the results as t
 ```
 
 `check.py` solves seven small problems with every method, using its own settings (it never touches your `config.py`,
-cache or outputs): a laminate, a laminate whose interfaces cut through partitions, a circle, a laminate normal to z and
+cache or outputs): a laminate, a laminate whose interfaces cut through partitions, a fiber, a laminate normal to z and
 a sphere (the last two in 3D), then the laminate and the sphere with k-means clusters. On the laminates every method
 must match the exact solution (CP on the cut laminate only up to its modelling error, printed for information). Once a
 reference is saved, every result must reproduce it bit for bit. For a change that shouldn't alter results, run `check.py
