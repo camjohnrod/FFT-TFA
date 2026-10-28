@@ -47,20 +47,31 @@ import numpy as np  # noqa: E402, after the thread count is set
 #                 solution is known exactly)
 #   "laminate_z"  the same layer with interfaces normal to z (check.py's test of the 3D kernel)
 #   "sphere"      a centred spherical inclusion of radius inclusion_radius
-inclusion_shape             = "fiber"
+#   "random fibers"  fiber_count equal circular fibers running through the thickness, together fiber_volume_fraction
+#                 of the cell, placed by random sequential addition: uniformly random centres (seeded by fiber_seed),
+#                 each kept if its fiber stays fiber_gap_elements element widths clear of every fiber kept so far,
+#                 measured across the periodic cell (a fiber crossing a side of the cell continues on the opposite
+#                 side). It jams near 55 % of the cell for discs, less with a gap: placing stops with an error after
+#                 fiber_placement_attempts random centres.
+inclusion_shape             = "random fibers"
 inclusion_radius            = 0.35e-3
 layer_thickness             = 0.5e-3
+fiber_count                 = 14
+fiber_volume_fraction       = 0.4
+fiber_gap_elements          = 2
+fiber_seed                  = 0
+fiber_placement_attempts    = 100000
 domain_side_length          = 1e-3
 
 # The grids (table above). The mesh resolves the geometry: a shape whose geometry does not vary along z (fiber,
-# laminate) gets element_number_per_side² × element_number_along_z hexahedra (one layer is exact) and
+# laminate, random fibers) gets element_number_per_side² × element_number_along_z hexahedra (one layer is exact) and
 # partition_number_per_side² × partition_number_along_z partitions (1: columns through the thickness); any other shape
 # element_number_per_side³ hexahedra and partition_number_per_side³ partitions, and the two along-z counts are not
 # used. partition_number_per_side must divide element_number_per_side, and partition_number_along_z
 # element_number_along_z.
-element_number_per_side     = 64
+element_number_per_side     = 100
 element_number_along_z      = 4
-partition_number_per_side   = 16
+partition_number_per_side   = 20
 partition_number_along_z    = 2
 
 # The macroscopic strain, in engineering notation (ε11, ε22, ε33, γ12, γ23, γ13), reaches max_macro_strain in
@@ -70,9 +81,9 @@ partition_number_along_z    = 2
 #                through zero imposed strain
 # Examples: np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0]) uniaxial, np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0]) mixed
 # tension, np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0]) mixed with shear.
-max_macro_strain            = np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])
+max_macro_strain            = np.array([0.066, 0.038, 0.038, 0.034, 0.021, 0.028])
 strain_increment_count      = 30
-load_path_shape             = "monotonic"
+load_path_shape             = "cyclic"
 
 ## ------- Methods ------- ##
 
@@ -84,7 +95,7 @@ load_path_shape             = "monotonic"
 #   include_tfa          TFA, the baseline (notes/3_tfa_baseline.md): clusters interact through the composite's exact
 #                        FE influence functions E and P, built offline on the mesh and cached in code/cache/
 include_spectral_ls         = True
-include_tfa                 = True
+include_tfa                 = False
 
 # The material states (clusters) of CP and of TFA, chosen independently (Spectral LS keeps one per element), each
 #   "partition phases"  each partition's part in each phase: one cluster for a single-phase partition, two for a mixed
@@ -99,7 +110,7 @@ include_tfa                 = True
 # 0.3 GB at 32² partitions and 4.8 GB at 64², far less with k-means.
 cp_clusters                 = "k-means"
 tfa_clusters                = "k-means"
-k_means_matrix_clusters     = 20
+k_means_matrix_clusters     = 16
 k_means_inclusion_clusters  = 1
 
 # CP's reference stiffness, part of its model:
@@ -118,7 +129,7 @@ k_means_inclusion_clusters  = 1
 # G H / (3G + H), and to zero without hardening. A smaller C0 shares the strain closer to equal stress. Spectral LS's
 # reference stiffness is only a solver setting (Solver details).
 cp_reference_stiffness      = "matrix"
-cp_reference_stiffness_scale = 0.01
+cp_reference_stiffness_scale = 0.05
 
 ## ------- Figures ------- ##
 
@@ -239,7 +250,8 @@ def check_inputs():
         raise ValueError("The element, partition and strain increment counts must all be at least 1.")
     if element_number_per_side % partition_number_per_side != 0:
         raise ValueError("The number of elements per side must be a multiple of the number of partitions per side.")
-    if inclusion_shape in ("fiber", "laminate") and element_number_along_z % partition_number_along_z != 0:
+    if (inclusion_shape in ("fiber", "laminate", "random fibers")
+            and element_number_along_z % partition_number_along_z != 0):
         raise ValueError("The number of elements along z must be a multiple of the number of partitions along z.")
 
     if inclusion_shape in ("fiber", "sphere"):
@@ -250,9 +262,20 @@ def check_inputs():
         if not 0 < layer_thickness < domain_side_length:
             raise ValueError("The fiber layer's thickness must be positive and below the domain side, so matrix "
                              f"surrounds it. Got {layer_thickness}.")
+    elif inclusion_shape == "random fibers":
+        if min(fiber_count, fiber_placement_attempts) < 1 or fiber_gap_elements < 0:
+            raise ValueError("fiber_count and fiber_placement_attempts must be at least 1, fiber_gap_elements at "
+                             "least 0.")
+        if not 0 < fiber_volume_fraction < 1:
+            raise ValueError(f"fiber_volume_fraction must lie between 0 and 1. Got {fiber_volume_fraction}.")
+        # A fiber and its own periodic image must keep the gap too.
+        fiber_diameter = 2 * domain_side_length * np.sqrt(fiber_volume_fraction / (np.pi * fiber_count))
+        if fiber_diameter + fiber_gap_elements * domain_side_length / element_number_per_side >= domain_side_length:
+            raise ValueError("A fiber's diameter plus the gap must be below the domain side, so a fiber does not touch "
+                             "its own periodic image.")
     else:
-        raise ValueError("inclusion_shape must be \"fiber\", \"laminate\", \"laminate_z\" or \"sphere\". Got "
-                         f"{inclusion_shape!r}.")
+        raise ValueError("inclusion_shape must be \"fiber\", \"laminate\", \"laminate_z\", \"sphere\" or "
+                         f"\"random fibers\". Got {inclusion_shape!r}.")
 
     # The radial return divides by 3G + H, so at or below zero it has no admissible solution.
     for phase, elastic_modulus, poisson_ratio, yield_stress, hardening_modulus in (

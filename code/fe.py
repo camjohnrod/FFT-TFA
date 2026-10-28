@@ -30,13 +30,45 @@ import config
 # The inclusion shapes whose geometry does not vary along z. They are meshed with config.element_number_along_z
 # element layers (one is exact) and partitioned in config.partition_number_along_z layers (one: columns through the
 # thickness); every other shape is meshed and partitioned alike along all three axes.
-shapes_constant_along_z = ("fiber", "laminate")
+shapes_constant_along_z = ("fiber", "laminate", "random fibers")
 
 def is_shape_constant_along_z():
     return config.inclusion_shape in shapes_constant_along_z
 
+def get_fiber_radius():
+    # Of each of config.fiber_count equal fibers filling config.fiber_volume_fraction of the cell's cross-section.
+    return config.domain_side_length * np.sqrt(config.fiber_volume_fraction / (np.pi * config.fiber_count))
+
+def get_periodic_offsets(points, centre):
+    # Each (x, y) point's offset from centre, to the nearest of the centre's periodic images.
+    offsets = points - centre
+    return offsets - config.domain_side_length * np.round(offsets / config.domain_side_length)
+
+def get_fiber_centres():
+    # The (x, y) centres of the "random fibers", one row each, by random sequential addition (config.py).
+    element_side_length = config.domain_side_length / config.element_number_per_side
+    minimum_distance = 2 * get_fiber_radius() + config.fiber_gap_elements * element_side_length
+    random_generator = np.random.default_rng(config.fiber_seed)
+    fiber_centres = np.empty((0, 2))
+    for _ in range(config.fiber_placement_attempts):
+        candidate = random_generator.uniform(0, config.domain_side_length, 2)
+        if np.all(np.sum(get_periodic_offsets(fiber_centres, candidate)**2, axis=1) >= minimum_distance**2):
+            fiber_centres = np.vstack([fiber_centres, candidate])
+            if len(fiber_centres) == config.fiber_count:
+                return fiber_centres
+    # Random sequential addition of discs jams near 0.55 of the area, here discs of the fiber plus half the gap.
+    padded_fraction = config.fiber_count * np.pi * (minimum_distance / 2)**2 / config.domain_side_length**2
+    raise ValueError(f"Random sequential addition placed only {len(fiber_centres)} of {config.fiber_count} fibers in "
+                     f"{config.fiber_placement_attempts} attempts. The fibers with half the gap around each would "
+                     f"fill {padded_fraction:.3g} of the cell, and this placement jams near 0.55: lower "
+                     "fiber_volume_fraction or fiber_gap_elements, or raise fiber_placement_attempts.")
+
 def is_inside_inclusion(centres):
     # Whether each point, one (x, y, z) row each, lies inside the inclusion.
+    if config.inclusion_shape == "random fibers":
+        radius = get_fiber_radius()
+        return np.any([np.sum(get_periodic_offsets(centres[:, :2], fiber_centre)**2, axis=1) < radius**2
+                       for fiber_centre in get_fiber_centres()], axis=0)
     offsets_from_centre = centres - config.domain_side_length / 2
     if config.inclusion_shape == "laminate":
         return np.abs(offsets_from_centre[:, 0]) < config.layer_thickness / 2
@@ -490,6 +522,10 @@ def get_E_and_P(mesh, clusters, include_P):
                   "L_inclusion": get_inclusion_L()}
     if config.inclusion_shape in ("laminate", "laminate_z"):
         parameters["layer_thickness"] = config.layer_thickness
+    elif config.inclusion_shape == "random fibers":
+        # The centres stand for the count, volume fraction, gap and seed that placed them.
+        parameters["fiber_radius"] = get_fiber_radius()
+        parameters["fiber_centres"] = get_fiber_centres()
     else:
         parameters["inclusion_radius"] = config.inclusion_radius
 

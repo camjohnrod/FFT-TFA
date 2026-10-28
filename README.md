@@ -1,15 +1,15 @@
 # FFT-TFA
 
-Reduced-order homogenization of elastoplastic composites: a stiff fiber in a softer J2-plastic matrix, in a periodic
-cube. The cell is seen at three scales:
+Reduced-order homogenization of elastoplastic composites: stiff inclusions (one fiber or many, a sphere, a layer)
+in a softer J2-plastic matrix, in a periodic cube. The cell is seen at three scales:
 
 - **elements:** the fine mesh of 8-node hexahedra, which resolves the geometry;
 - **partitions:** CP's uniform blocks of elements: k × k columns through the thickness, or layers of them, if the
   geometry does not vary along z, k × k × k blocks otherwise;
-- **clusters:** regions of one phase with one material state (one uniform plastic eigenstrain) each. By default each
-  partition's part in each phase: one cluster if the partition lies in one phase, two if the fiber's edge cuts
-  through it. CP and TFA can each take k-means clusters instead, which may span many partitions; a cluster's part in
-  one partition is a **piece**.
+- **clusters:** regions of one phase with one material state (one uniform plastic eigenstrain) each. By default
+  k-means clusters of the elements' elastic strain concentration, which may span many partitions; or each partition's
+  part in each phase (one cluster if the partition lies in one phase, two if an interface cuts through it). A
+  cluster's part in one partition is a **piece**.
 
 Every method keeps one material state per cluster. They differ only in how those states interact:
 
@@ -36,7 +36,7 @@ them. P takes (6 × TFA's clusters)² doubles: with partition phases 0.3 GB at 3
 far less with k-means clusters. In 3D the FE factorization limits the mesh too (with 7 GB a 24³ mesh works, 36³ does
 not); CP and Spectral LS have no such limit, so switch TFA off for finer 3D meshes.
 
-Dependencies: `numpy`, `scipy`, `matplotlib`, `tqdm` (in the untracked `.venv/`).
+Dependencies: Python 3.12 with `numpy`, `scipy`, `matplotlib` and `tqdm`.
 
 ## Changing the problem
 
@@ -44,11 +44,12 @@ Every setting is in `code/config.py`, commented, from the settings changed most 
 command-line options. Its header has a table of what the mesh, the partitions and the clusters mean to each method.
 The ones you will change most:
 
-- **Geometry:** `inclusion_shape` is `"fiber"` (a circular fiber along z), `"sphere"`, `"laminate"` (interfaces
-  normal to x) or `"laminate_z"` (normal to z). `element_number_per_side` sets the mesh; `partition_number_per_side`
-  must divide it. The fiber and the x laminate are constant along z: they use `element_number_along_z` element layers
-  (one is enough) and `partition_number_along_z` partition layers (one gives columns, and the same answer). The sphere
-  and the z laminate are meshed and partitioned in 3D.
+- **Geometry:** `inclusion_shape` is `"fiber"` (a circular fiber along z), `"random fibers"` (`fiber_count`
+  non-overlapping fibers along z at random periodic positions, `fiber_volume_fraction` in all), `"sphere"`,
+  `"laminate"` (interfaces normal to x) or `"laminate_z"` (normal to z). `element_number_per_side` sets the mesh;
+  `partition_number_per_side` must divide it. The fibers and the x laminate are constant along z: they use
+  `element_number_along_z` element layers (one is enough) and `partition_number_along_z` partition layers (one gives
+  columns, and the same answer). The sphere and the z laminate are meshed and partitioned in 3D.
 - **Materials:** stiffness, yield stress and hardening per phase. A phase stays elastic if its yield stress is
   `np.inf`.
 - **Load path:** `max_macro_strain`, `load_path_shape` (`"monotonic"` or `"cyclic"`), `strain_increment_count`.
@@ -112,7 +113,7 @@ save` before it and `check.py` after.
 Working: the three methods on 2D and 3D cells, partitions holding both phases, k-means clusters for CP and TFA, and
 the checks.
 
-1. **Thickness check (done).** One element layer through the thickness reproduces three to round-off.
+1. **Thickness check (done).** One element layer through the thickness gives the same answer as three, to round-off.
 2. **Moulinec–Suquet kernel (done).** TFA keeps its FE operators, so a CP-vs-TFA difference includes the
    FE-vs-Moulinec–Suquet discretization gap.
 3. **Gold-standard reference.** A full-field FE-consistent FFT solver (Ladecký et al.) with plasticity at the Gauss

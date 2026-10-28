@@ -64,7 +64,7 @@ tolerance 1e-11).
 because **no module reads `config` at import time**: no `config.x` in default arguments or module-level constants.
 A renamed config input must be renamed in `pinned_inputs` too.
 
-`python` resolves to the untracked `.venv/` (Python 3.12); the `fenics-env`/`fenicsx-env` envs are unrelated.
+`python` is the base miniforge environment's (Python 3.12); the `fenics-env`/`fenicsx-env` conda envs are unrelated.
 Entry points import `config` before numpy, since config.py sets the thread environment variables; online FFTs use
 `scipy.fft` with `workers=config.thread_count`.
 
@@ -81,7 +81,7 @@ imports no project module; only `run.py` calls it.
 |---|---|
 | `config.py` | every input, `check_inputs()`, folders |
 | `run.py` | `Lattice`, `Problem`, `get_problem()` (builds everything, each method's clusters, times each method's offline step), `get_k_means_labels`, `get_solvers`, `run_load_path`, `solve_all`, timing table, figures, `main` |
-| `fe.py` | shapes (`is_inside_inclusion`, `shapes_constant_along_z`), `Discretization`, `Mesh`, `Materials`, `Clusters` (clusters and their pieces), `label_partition_phases`, `label_k_means`, `get_clusters`, element matrices, `FEModel`, TFA's E and P (`compute_E_and_P`) and their cache (`get_E_and_P`) |
+| `fe.py` | shapes (`is_inside_inclusion`, `shapes_constant_along_z`, `get_fiber_centres`), `Discretization`, `Mesh`, `Materials`, `Clusters` (clusters and their pieces), `label_partition_phases`, `label_k_means`, `get_clusters`, element matrices, `FEModel`, TFA's E and P (`compute_E_and_P`) and their cache (`get_E_and_P`) |
 | `newton.py` | `solve_load_step` (the one Newton loop), `take_step` (line search), relative residual, `has_converged`, `solve_newton_correction` (GMRES), the `LoadPathAbandoned` errors |
 | `ls_model.py` | `apply_on_lattice` (FFT convolution), C0, P0 and its partition average (`get_P0_transformed`), LS-24, `get_fourier_preconditioner`, `LatticeSolver` (Newton–GMRES shared by CP and Spectral LS), `SpectralLSSolver`, `get_elastic_strain_concentration` (k-means features), CP's piece law (`PieceLaw`, LS-25) and `CPSolver` |
 | `tfa_model.py` | TFA residual with the elastic reset, column-restricted P products, `get_tfa_solver` |

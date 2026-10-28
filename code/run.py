@@ -73,6 +73,8 @@ def get_problem():
     start_time = time.perf_counter()
     mesh = get_periodic_mesh(get_partition_discretization())
     mesh_seconds = time.perf_counter() - start_time
+    # As the elements resolve it (their centres), which a curved shape's nominal fraction only approaches.
+    print(f"Inclusion volume fraction on the elements: {np.mean(mesh.element_material_ids):.4g}")
 
     # The clusters of each setting in use (config.cp_clusters, config.tfa_clusters), each built once, with its time.
     clusters, cluster_seconds = {}, {}

@@ -14,7 +14,7 @@ Sections 1-7 state the assumptions, derive the model, explain its approximation,
 
 - A connected periodic RVE $\Theta$, small strains, perfect bonding, no body forces, and prescribed mean strain $\bar{\boldsymbol\varepsilon}$.
 - Periodic displacement fluctuation $\mathbf u$; fix its arbitrary translation by zero mean or by pinning one node. These choices give the same strains.
-- Fixed, symmetric positive-definite elastic stiffness $\mathbf L^A$ in each partition $\Omega_A$. A partition may contain both phases; Section 4.4 gives the constitutive construction for it (added 2026-10-26).
+- Fixed, symmetric positive-definite elastic stiffness $\mathbf L^A$ in each partition $\Omega_A$. A partition may contain both phases; Section 4.4 gives the constitutive construction for it.
 - For the constitutive specialization developed here, use isotropic elasticity and associative, rate-independent $J_2$ plasticity with linear isotropic hardening. Require positive shear and bulk moduli, $H^A\geq0$, and initial yield stress $\sigma_{\mathrm y0}^A>0$. One local backward-Euler return map is evaluated at the **partition-average total strain**, with one plastic history per partition. Purely elastic phases are also allowed.
 - During load step $n+1$, the committed history $\mathbf z_n^A=(\boldsymbol\mu_n^A,p_n^A)$ stays fixed while nonlinear trial strains change. Candidate histories are committed only after convergence. The scalar $p\geq0$ is accumulated equivalent plastic strain; $\boldsymbol\mu$ is plastic strain.
 - Choose a fixed, homogeneous, symmetric positive-definite reference stiffness $\mathbf C_0$. Changing it changes the approximation defined below, not just the solver.
@@ -297,7 +297,7 @@ $$
 
 For congruent partitions $c^A=1/M$. The computed mean is automatic at a converged root if the operator satisfies this identity. It does not imply that every partition strain equals the prescribed mean.
 
-### 4.4 Partitions holding both phases (added 2026-10-26, revised 2026-10-27)
+### 4.4 Partitions holding both phases
 
 The equation above uses each partition's polarization only through its stress $\boldsymbol\sigma^A$ at the partition strain $\boldsymbol\varepsilon^A$. A partition that holds both phases needs a constitutive law for that pair. Call its part in each phase a **cluster**, with volume fractions $c_m^A+c_f^A=1$, one material state (strain, plastic strain, history) each. The law is the one the constant-polarization assumption itself implies (slides 11 and 14 of `references/10.20.2026 Progress.pptx`): the polarization is the same at every point of the partition, so both clusters carry it, against the same $\mathbf C_0$ as LS-7:
 
@@ -321,7 +321,7 @@ LS-22 is the case of section 4.5's LS-25 and LS-26 in which every cluster is one
 
 LS-22 is not exact for a laminate whose interfaces cut partitions: in transverse shear the exact state has equal stress, which LS-22 reaches only as $\mathbf C_0\to\mathbf0$ (at $0.01\times$ matrix the cut laminate of `check.py` is off by 1.4 %). Measured with the earlier equal-stress law on circular fibers against element-level TFA (one region per element): the macroscopic stress stayed within 1–5 %, about as close as one partition per element; stresses and plastic strains next to the fiber were as close with $2\times2$-element partitions and 2–5 times further off with $4\times4$. By default TFA uses the same clusters as its regions, so the two models share their material states.
 
-### 4.5 Clusters spanning partitions (added 2026-10-27)
+### 4.5 Clusters spanning partitions
 
 The material states need not follow the partitions. Let a **cluster** $g$ be any set of elements of one phase, with one material state (one uniform plastic eigenstrain $\boldsymbol\mu_g$, one history $\mathbf z_{n,g}$), and a **piece** $p=(A,g)$ the part of cluster $g$ inside partition $A$, with share $c_p$ of the partition's volume ($\sum_{p\in A}c_p=1$) and weight $w_p=c_p/v_g$ in its cluster's average ($v_g$ the cluster's volume in partition volumes, $\sum_{p\in g}w_p=1$). A partition still carries one polarization $\boldsymbol\tau^A$ (LS-7). Its "partition phases" clusters are LS-22's; `config.cp_clusters = "k-means"` takes k-means clusters of the elements' elastic strain concentration instead, found in each phase apart (Liu–Bessa–Liu 2016, section 2.2.1), which span many partitions.
 
@@ -528,7 +528,7 @@ Storage of the reference kernel is $O(M)$, and application costs $O(M\log M)$. T
 
 ### 6.5 Moulinec–Suquet kernel
 
-The alternative to LS-14 (the only kernel in the code since 2026-10-26) evaluates the continuum Green operator at the frequencies $\boldsymbol\xi$ of the $N_3\times N\times N$ lattice of elements of the cubic cell ($N_3=N$ for a geometry that varies along $x_3$; any $N_3$, often 1, for one that does not):
+The alternative to LS-14 (the only kernel in the code) evaluates the continuum Green operator at the frequencies $\boldsymbol\xi$ of the $N_3\times N\times N$ lattice of elements of the cubic cell ($N_3=N$ for a geometry that varies along $x_3$; any $N_3$, often 1, for one that does not):
 
 **(LS-21) Moulinec–Suquet kernel**
 
@@ -617,7 +617,7 @@ Use a convergence criterion such as $\|\mathbf R\|\le\epsilon_{\rm abs}+\epsilon
 
 Fixed-point and Newton methods solve the same reduced equation for fixed $\mathbf C_0$. If both converge to the same root at matched tolerances, their predictions agree; changing the solver does not repair model error. Total online cost is approximately $O(kM\log M)$, where $k$ counts residual and Krylov convolution applications over the chosen load path. Near-linearithmic **total** scaling needs iteration counts to remain controlled. GMRES basis storage is $O(rM)$ for restart length $r$, not free storage beyond the $O(M)$ kernel.
 
-### 7.4 Fourier preconditioner (added 2026-10-27)
+### 7.4 Fourier preconditioner
 
 **Why a small $\mathbf C_0$ is slow.** LS-22 needs $\mathbf C_0$ below every cluster's tangent, so the code uses $\mathbf C_0=\alpha\,\mathbf C_n$, a small fraction $\alpha$ (default 0.05) of a named stiffness $\mathbf C_n$ (the matrix). The Moulinec–Suquet kernel does not depend on the scale of $\mathbf C_0$: $\widehat{\mathbf P}_0=\widehat{\boldsymbol\Gamma}_0(\mathbf C_0)\mathbf C_0$ and $\widehat{\boldsymbol\Gamma}_0(\alpha\mathbf C)=\widehat{\boldsymbol\Gamma}_0(\mathbf C)/\alpha$. Write $\mathbf A=\mathbf C_n^{-1}\mathbf L_{t,M}$; then LS-20 is
 
@@ -654,7 +654,7 @@ Each at the default tolerance against its own solution at $10^{-11}$, CP with LS
 
 **Caveat, resolved.** On `check.py`'s cut laminate CP once stopped 30 times less accurately with LS-23 than without, because the earlier stopping test under-weighted part of CP's residual; LS-24 in section 7.5 fixed it.
 
-### 7.5 A stopping test that does not depend on the reference medium (added 2026-10-27, revised the same day)
+### 7.5 A stopping test that does not depend on the reference medium
 
 *The user has said this section is not yet clear to them; it is written step by step for that reason. Ask before
 building on it.*
@@ -695,7 +695,7 @@ Neither limit depends on $\alpha$. Spectral LS lives entirely at $p=1$, so for i
 
 **Cost and effect.** One convolution per residual evaluation ($\widehat{\mathbf M}_m^{-1}$ is built once per lattice). Each method at the default tolerance against its own solution at $10^{-11}$ (macroscopic / worst cluster): cut laminate CP $1.1\times10^{-6}$ / $2.1\times10^{-6}$ (was $3.3\times10^{-5}$ / $4.4\times10^{-5}$); every other check problem and method unchanged to the bit. Default problem (64² elements, 32² partitions, 60 steps): CP $2.0\times10^{-8}$ / $7.8\times10^{-7}$ (182 Newton, 7 216 GMRES, 6.2 s), Spectral LS $1.2\times10^{-8}$ / $5.8\times10^{-7}$ (183, 11 487, 16.9 s), TFA $1.1\times10^{-8}$ / $2.2\times10^{-7}$ (112, 757, 7.5 s). All methods stop at the same accuracy. A first attempt that read the residual through the *mean* elastic stiffness instead of the matrix's loosened every method (to $10^{-5}$–$10^{-4}$ in the worst cluster): a stiff reading cell underestimates errors in the soft matrix, where they are largest.
 
-### 7.6 Newton with cluster eigenstrains (added 2026-10-27)
+### 7.6 Newton with cluster eigenstrains
 
 With LS-25 and LS-26, Newton's unknowns stay the partition strains, and every residual evaluation solves the eigenstrains from them: Newton on LS-26 at fixed $\boldsymbol\varepsilon$, from the accepted history, with Jacobian
 
@@ -750,7 +750,7 @@ These were found while implementing and testing the model, and are not yet resol
   Hashin–Shtrikman split of section 4.4, which keeps one $\mathbf C_0$ but not constant polarization.
 - **Plastic branch of $\mathbf H_\mu$.** LS-20 needs it but this note does not state it
   (`notes/background_influence_functions_and_J2/` derives it; `material.get_eigenstrain_sensitivity`). Its
-  finite-difference check went with the 2026-10-26 cut-back (git tag `pre-cleanup`).
+  finite-difference check is no longer in the code (git tag `pre-cleanup` has it).
 - **Preconditioning Spectral LS.** No Fourier-diagonal preconditioner can do better than its reference medium
   (section 7.4); a gain would need a local preconditioner that keeps iterates compatible. Block-Jacobi did not.
 - **Equal accuracy across methods** (section 7.5) was verified by hand on `check.py`'s problems and the default

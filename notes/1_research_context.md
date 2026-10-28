@@ -1,6 +1,6 @@
 # Research context: the operator question and the literature
 
-Rewritten 2026-10-06. **Read cover to cover** (every section, figure and example): Moulinec–Suquet (1998),
+**Read cover to cover** (every section, figure and example): Moulinec–Suquet (1998),
 Brisard–Dormieux (2010, 2012), Schneider (2019), Schneider's review (2021), Liu–Bessa–Liu (2016), Zhang et al.
 (2019), Kabel et al. (2016). Everything stated about these papers is taken from them; quotations were transcribed from
 the pages, and the per-paper notes are in `references/reading_notes/`. Papers marked *(not read)* are named only so
@@ -126,8 +126,8 @@ Notes on each:
   ref. 99) as one discretization among others; our kernel is that discretization's Green operator, averaged over
   partitions (our reading). The LS note says these operators "are not asserted to equal the continuum operators at
   finite N". It was kept as an option because it is the only kernel under which LS and TFA become the same equation
-  (matched phase stiffness), since TFA's $\mathbf P$ comes from the same FE mesh; the code dropped it on 2026-10-26
-  (git tag `pre-cleanup` has it).
+  (matched phase stiffness), since TFA's $\mathbf P$ comes from the same FE mesh; the code no longer has it
+  (git tag `pre-cleanup` does).
 
 ## 3. Consistent against non-consistent
 
@@ -240,15 +240,15 @@ Titles only flag candidates; none was read.
 ## 6. Consequences for this project
 
 - With single-phase partitions the partition grid already resolves the geometry, so the fine mesh enters LS only
-  through $\mathbf P_0$. With the consistent operator, $\mathbf P_0$ contains no mesh at all and partitioned and
-  coarse LS coincide. Comparing them then measures the operator, which Brisard–Dormieux did for linear elasticity
+  through $\mathbf P_0$. With the consistent operator, $\mathbf P_0$ contains no mesh at all and CP and a
+  Moulinec–Suquet solve on the partition grid coincide. Comparing them then measures the operator, which Brisard–Dormieux did for linear elasticity
   (section 3).
 - Two cautions from the literature. Spatial clusters converged poorly in Liu–Bessa–Liu's test, and coarse
   resolution costs accuracy once plasticity starts (Moulinec–Suquet: about 15 % flow-stress error at 32 pixels per
   fibre; Kabel et al.: relative error near 20 % at half resolution). Uniform partitions will likely need many
   partitions; the FFT is what makes many affordable.
 - What follows for the project, adopted as its research question and roadmap (README, "Status and roadmap"):
-  1. **Moulinec–Suquet kernel** (roadmap step 2, implemented 2026-10-12, LS-21): MS on the element grid, averaged over
+  1. **Moulinec–Suquet kernel** (roadmap step 2, done, LS-21): MS on the element grid, averaged over
      partitions as SCA averages its fine-grid operator over clusters ("fine grid, averaged" in the table of
      section 2). The consistent kernel, its limit as the element grid is refined, is left for later.
   2. **The TFA–LS relationship** (step 4), the main thread: Schneider's §4 gives the formal link (full against
