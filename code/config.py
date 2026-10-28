@@ -47,7 +47,7 @@ import numpy as np  # noqa: E402, after the thread count is set
 #                 solution is known exactly)
 #   "laminate_z"  the same layer with interfaces normal to z (check.py's test of the 3D kernel)
 #   "sphere"      a centred spherical inclusion of radius inclusion_radius
-inclusion_shape             = "sphere"
+inclusion_shape             = "fiber"
 inclusion_radius            = 0.35e-3
 layer_thickness             = 0.5e-3
 domain_side_length          = 1e-3
@@ -58,10 +58,10 @@ domain_side_length          = 1e-3
 # element_number_per_side³ hexahedra and partition_number_per_side³ partitions, and the two along-z counts are not
 # used. partition_number_per_side must divide element_number_per_side, and partition_number_along_z
 # element_number_along_z.
-element_number_per_side     = 18
-element_number_along_z      = 6
-partition_number_per_side   = 9
-partition_number_along_z    = 1
+element_number_per_side     = 64
+element_number_along_z      = 4
+partition_number_per_side   = 16
+partition_number_along_z    = 2
 
 # The macroscopic strain, in engineering notation (ε11, ε22, ε33, γ12, γ23, γ13), reaches max_macro_strain in
 # strain_increment_count equal steps. load_path_shape is
@@ -70,8 +70,8 @@ partition_number_along_z    = 1
 #                through zero imposed strain
 # Examples: np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0]) uniaxial, np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0]) mixed
 # tension, np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0]) mixed with shear.
-max_macro_strain            = np.array([0.03, 0.0, 0.0, 0.0, 0.0, 0.0])
-strain_increment_count      = 60
+max_macro_strain            = np.array([0.03, 0.018, 0.001, 0.0, 0.0, 0.0])
+strain_increment_count      = 30
 load_path_shape             = "monotonic"
 
 ## ------- Methods ------- ##
@@ -99,7 +99,7 @@ include_tfa                 = True
 # 0.3 GB at 32² partitions and 4.8 GB at 64², far less with k-means.
 cp_clusters                 = "k-means"
 tfa_clusters                = "k-means"
-k_means_matrix_clusters     = 16
+k_means_matrix_clusters     = 20
 k_means_inclusion_clusters  = 1
 
 # CP's reference stiffness, part of its model:
@@ -118,7 +118,7 @@ k_means_inclusion_clusters  = 1
 # G H / (3G + H), and to zero without hardening. A smaller C0 shares the strain closer to equal stress. Spectral LS's
 # reference stiffness is only a solver setting (Solver details).
 cp_reference_stiffness      = "matrix"
-cp_reference_stiffness_scale = 0.05
+cp_reference_stiffness_scale = 0.01
 
 ## ------- Figures ------- ##
 
