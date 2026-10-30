@@ -4,8 +4,8 @@
 #               through the thickness otherwise);
 #   clusters    regions of one phase and one material state each, possibly spanning several partitions; a cluster's
 #               part in one partition is a piece.
-# Every method keeps one material state per cluster. The same code builds CP's partitions and Spectral LS's lattice,
-# which is the same mesh with one partition per element (per element column).
+# Every method keeps one material state per cluster. The same code builds the partitions (FFT-TFA's, TFA's, CP's) and
+# Spectral LS's lattice, which is the same mesh with one partition per element (per element column).
 #
 # From the 8-node element matrices come TFA's influence functions on the clusters (notes/3_tfa_baseline.md):
 #   E  the cluster-average strain per unit macrostrain (ER-1),
@@ -134,7 +134,7 @@ class Discretization(NamedTuple):
         return self.elements_per_partition * self.element_volume
 
 def get_partition_discretization():
-    # CP's partitions, which are also TFA's: the mesh and lattice config.py describes.
+    # The mesh and partitions config.py describes, shared by FFT-TFA, TFA and CP.
     elements, partitions = config.element_number_per_side, config.partition_number_per_side
     if is_shape_constant_along_z():
         return Discretization(elements, config.element_number_along_z, partitions, config.partition_number_along_z)
@@ -293,6 +293,33 @@ def label_k_means(mesh, element_features):
         _, labels = np.unique(labels, return_inverse=True)
         element_cluster[elements] = first_cluster + labels
         first_cluster += labels.max() + 1
+    return element_cluster
+
+def label_partition_k_means(mesh, element_features):
+    # Every element's cluster by k-means inside each partition, on label_k_means's features, in each phase apart: up
+    # to k_means_matrix_clusters_per_partition clusters in a partition's matrix part and
+    # k_means_inclusion_clusters_per_partition in its inclusion part, fewer when a part has fewer distinct features,
+    # and clusters k-means leaves empty are dropped. So every cluster lies in one partition. A cluster's key is
+    # (2 × partition + phase) × the larger count + its label in its part, so the clusters are ordered by partition,
+    # matrix first, and with one cluster per part this is label_partition_phases.
+    rng = np.random.default_rng(config.k_means_seed)
+    cluster_counts = (config.k_means_matrix_clusters_per_partition, config.k_means_inclusion_clusters_per_partition)
+    part_keys = 2 * mesh.element_partition_ids + mesh.element_material_ids
+    part_order = np.argsort(part_keys, kind="stable")
+    part_firsts = np.flatnonzero(np.diff(part_keys[part_order], prepend=-1))
+    labels = np.zeros(len(element_features), dtype=int)
+    for elements in np.split(part_order, part_firsts[1:]):
+        features = element_features[elements]
+        cluster_count = min(cluster_counts[mesh.element_material_ids[elements[0]]],
+                            len(np.unique(features, axis=0)))
+        if cluster_count == 1:
+            continue
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "One of the clusters is empty")
+            _, part_labels = scipy.cluster.vq.kmeans2(features, cluster_count, iter=config.k_means_iterations,
+                                                      minit="++", rng=rng)
+        labels[elements] = part_labels
+    _, element_cluster = np.unique(part_keys * max(cluster_counts) + labels, return_inverse=True)
     return element_cluster
 
 def get_clusters(mesh, element_cluster):
@@ -508,18 +535,9 @@ def get_cached(names, parameters, compute):
         np.savez(cache_path, **{name: arrays[name], "build_seconds": build_seconds[name]})
     return arrays, build_seconds
 
-def get_E_and_P(mesh, clusters, include_P):
-    # E, and P only when include_P (None otherwise), on the clusters, and the seconds they took to build, by name
-    # ("E", "P"), measured when they were computed, even if they now come from the cache.
-    discretization = mesh.discretization
-    parameters = {"cache_version": cache_version,
-                  "domain_side_length": config.domain_side_length,
-                  "inclusion_shape": config.inclusion_shape,
-                  "element_number_per_side": discretization.element_number_per_side,
-                  "element_number_along_z": discretization.element_number_along_z,
-                  "partition_number_per_side": discretization.partition_number_per_side,
-                  "L_matrix": get_matrix_L(),
-                  "L_inclusion": get_inclusion_L()}
+def get_geometry_parameters():
+    # Every input that sets the geometry, for a cache key: the cell, the shape and the shape's own inputs.
+    parameters = {"domain_side_length": config.domain_side_length, "inclusion_shape": config.inclusion_shape}
     if config.inclusion_shape in ("laminate", "laminate_z"):
         parameters["layer_thickness"] = config.layer_thickness
     elif config.inclusion_shape == "random fibers":
@@ -528,9 +546,22 @@ def get_E_and_P(mesh, clusters, include_P):
         parameters["fiber_centres"] = get_fiber_centres()
     else:
         parameters["inclusion_radius"] = config.inclusion_radius
+    return parameters
 
-    # The clusters themselves, so any change of clustering (k-means settings included) finds its own cache.
-    parameters["element_cluster"] = clusters.element_cluster
+def get_E_and_P(mesh, clusters, include_P):
+    # E, and P only when include_P (None otherwise), on the clusters, and the seconds they took to build, by name
+    # ("E", "P"), measured when they were computed, even if they now come from the cache.
+    discretization = mesh.discretization
+    parameters = {"cache_version": cache_version,
+                  **get_geometry_parameters(),
+                  "element_number_per_side": discretization.element_number_per_side,
+                  "element_number_along_z": discretization.element_number_along_z,
+                  "partition_number_per_side": discretization.partition_number_per_side,
+                  "L_matrix": get_matrix_L(),
+                  "L_inclusion": get_inclusion_L(),
+                  # The clusters themselves, so any change of clustering (k-means settings included) finds its own
+                  # cache.
+                  "element_cluster": clusters.element_cluster}
     E_P, build_seconds = get_cached(("E", "P") if include_P else ("E",), parameters,
                                     lambda: compute_E_and_P(mesh, clusters, include_P))
     if not include_P:

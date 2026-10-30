@@ -28,8 +28,8 @@ class Evaluation(NamedTuple):
 
 class Solver(NamedTuple):
     # A method ready to run along the load path: solve_step(macro_strain, plastic_history) returns a StepResult whose
-    # stress and plastic state have one row per cluster of clusters (fe.Clusters). TFA uses this; ls_model's solvers
-    # are classes with the same two attributes.
+    # stress and plastic state have one row per cluster of clusters (fe.Clusters). TFA uses this; the other methods'
+    # solvers (ls_model, fft_tfa_model) are classes with the same two attributes.
     solve_step: Callable
     clusters: tuple
 
@@ -111,9 +111,10 @@ def take_step(evaluate, current, correction, relative_residual, get_measured_res
         step_length *= config.line_search_step_reduction
     return trial, trial_relative_residual
 
-def solve_newton_correction(apply_jacobian, residual):
-    # Solves J δε = -r by GMRES, with J given as its product apply_jacobian on partition fields (partitions × 6).
-    # Returns δε and the number of GMRES iterations it took.
+def solve_newton_correction(apply_jacobian, residual, restart=None):
+    # Solves J δε = -r by GMRES, with J given as its product apply_jacobian on partition fields (partitions × 6),
+    # restarting every restart iterations (None: config.newton_krylov_restart). Returns δε and the number of GMRES
+    # iterations it took.
     def apply_flat_jacobian(flat_vector):
         return apply_jacobian(flat_vector.reshape(-1, 6)).reshape(-1)
 
@@ -126,7 +127,7 @@ def solve_newton_correction(apply_jacobian, residual):
         iteration_count += 1
 
     correction, info = scipy.sparse.linalg.gmres(jacobian, -residual.reshape(-1), rtol=config.newton_krylov_tolerance,
-                                                 restart=config.newton_krylov_restart,
+                                                 restart=config.newton_krylov_restart if restart is None else restart,
                                                  maxiter=config.newton_krylov_max_restarts, callback=count_iteration,
                                                  callback_type='pr_norm')
     if info != 0:

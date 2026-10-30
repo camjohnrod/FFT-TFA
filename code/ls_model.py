@@ -9,9 +9,10 @@
 #                and each cluster's eigenstrain from the return map at its average strain (LS-26, CPSolver).
 #
 # The reference medium's operators are built here too: C0, and the kernel P0 averaged over partitions (LS-21); and the
-# Fourier preconditioner of the Newton solvers (LS-23). They are translation invariant, so they are stored as one 6 × 6
-# block per lattice frequency, rfftn's non-redundant half (shape (N_z, N, N//2 + 1, 6, 6), lattices indexed [z, y, x]
-# and square in-plane), and applied by FFT (apply_on_lattice).
+# Fourier preconditioner of the Newton solvers (LS-23). These operators are translation invariant, so they are stored
+# as one 6 × 6 block per lattice frequency, rfftn's non-redundant half (shape (N_z, N, N//2 + 1, 6, 6), lattices
+# indexed [z, y, x] and square in-plane), and applied by FFT (apply_on_lattice). FFT-TFA (fft_tfa_model) uses the
+# kernel, its partition average, apply_on_lattice and the block helpers, nothing of CP's.
 
 from typing import NamedTuple
 import numpy as np
@@ -179,9 +180,11 @@ class LatticeSolver:
     # strains, each correction solving the LS-20 system J δε = −r by GMRES, convergence judged in matrix units (LS-24).
     # solve_step(macro_strain, plastic_history) solves one load step, from the previous step's converged strain
     # shifted by the macrostrain increment. A subclass supplies evaluate (the LS-18 residual) and get_D, which gives
-    # LS-20's operator D at the current state and a function for its lattice mean ⟨D⟩.
-    def __init__(self, lattice, matrix_L, use_fourier_preconditioner):
+    # LS-20's operator D at the current state and a function for its lattice mean ⟨D⟩. GMRES restarts every
+    # krylov_restart iterations (None: config.newton_krylov_restart).
+    def __init__(self, lattice, matrix_L, use_fourier_preconditioner, krylov_restart=None):
         self.clusters = lattice.clusters
+        self.krylov_restart = krylov_restart
         self.reference_L = lattice.reference_L                  # C0
         self.P0_transformed = lattice.P0_transformed
         self.use_fourier_preconditioner = use_fourier_preconditioner
@@ -199,7 +202,7 @@ class LatticeSolver:
             return vector - apply_on_lattice(self.P0_transformed, apply_D(vector))
 
         if not self.use_fourier_preconditioner:
-            return solve_newton_correction(apply_jacobian, current.residual)
+            return solve_newton_correction(apply_jacobian, current.residual, self.krylov_restart)
 
         preconditioner = get_fourier_preconditioner(self.P0_transformed, get_mean_D())
 
@@ -207,7 +210,7 @@ class LatticeSolver:
             return apply_on_lattice(preconditioner, vector)
 
         y, gmres_iteration_count = solve_newton_correction(lambda vector: apply_jacobian(apply_preconditioner(vector)),
-                                                           current.residual)
+                                                           current.residual, self.krylov_restart)
         return apply_preconditioner(y), gmres_iteration_count
 
     def solve_step(self, macro_strain, plastic_history):
@@ -225,8 +228,8 @@ class LatticeSolver:
 class SpectralLSSolver(LatticeSolver):
     # Spectral LS: LS-18 with one partition per element (per element column), each partition one cluster, so a
     # partition's stress is its cluster's at the partition strain.
-    def __init__(self, lattice, matrix_L, use_fourier_preconditioner):
-        super().__init__(lattice, matrix_L, use_fourier_preconditioner)
+    def __init__(self, lattice, matrix_L, use_fourier_preconditioner, krylov_restart=None):
+        super().__init__(lattice, matrix_L, use_fourier_preconditioner, krylov_restart)
         if self.clusters.cluster_count != self.clusters.partition_count:
             raise ValueError("Spectral LS needs exactly one cluster per partition.")
 
