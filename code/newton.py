@@ -1,7 +1,7 @@
-# What every method shares to solve a load step by Newton–GMRES: the Newton loop with its backtracking line search, the
-# relative residual it converges on, the convergence test, the GMRES solve of a Newton correction, the result of a
-# step, and the errors that end a method's load path early. A method supplies only how to evaluate its residual at a
-# strain and how to compute a Newton correction there.
+# What every method shares to solve a load step by Newton–Krylov: the Newton loop with its backtracking line search,
+# the relative residual it converges on, the convergence test, the GMRES solve of a Newton correction (Spectral LS
+# solves its own by conjugate gradients, ls_model), the result of a step, and the errors that end a method's load path
+# early. A method supplies only how to evaluate its residual at a strain and how to compute a Newton correction there.
 
 from typing import Callable, NamedTuple
 import numpy as np
@@ -16,7 +16,7 @@ class StepResult(NamedTuple):
     plastic_state: PlasticState
     # The relative residual at every residual evaluation, one per Newton iteration plus the first.
     residual_history: np.ndarray
-    gmres_iteration_count: int
+    krylov_iteration_count: int    # GMRES or CG iterations over the step's Newton corrections
 
 class Evaluation(NamedTuple):
     # A method's state at one strain: the strain itself (a method may adjust it while evaluating, as TFA's elastic reset
@@ -77,25 +77,25 @@ def has_converged(residual_history, divergence_limit):
 def solve_load_step(evaluate, get_correction, initial_strain, macro_strain, divergence_limit, average=np.mean,
                     measure_residual=None):
     # Newton from initial_strain: evaluate(strain) returns an Evaluation, get_correction(evaluation) returns the Newton
-    # correction there and its GMRES iteration count. Each correction is applied through take_step's line search.
-    # average is how the residual norm averages over the unknowns' rows (get_strain_norm). Convergence and the line
-    # search judge measure_residual(r) when it is given (the LS methods use it to put r in units that do not depend
-    # on their reference medium, LS-24), r itself otherwise; the Newton correction always solves for r.
+    # correction there and its Krylov (GMRES or CG) iteration count. Each correction is applied through take_step's
+    # line search. average is how the residual norm averages over the unknowns' rows (get_strain_norm). Convergence and
+    # the line search judge measure_residual(r) when it is given (the LS methods use it to put r in units that do not
+    # depend on their reference medium, LS-24), r itself otherwise; the Newton correction always solves for r.
     def get_measured_residual(evaluation):
         residual = evaluation.residual if measure_residual is None else measure_residual(evaluation.residual)
         return get_relative_residual(residual, macro_strain, average)
 
     current = evaluate(initial_strain)
     residual_history = [get_measured_residual(current)]
-    gmres_iteration_count = 0
+    krylov_iteration_count = 0
     while not has_converged(residual_history, divergence_limit):
         correction, iteration_count = get_correction(current)
-        gmres_iteration_count += iteration_count
+        krylov_iteration_count += iteration_count
         current, relative_residual = take_step(evaluate, current, correction, residual_history[-1],
                                                get_measured_residual)
         residual_history.append(relative_residual)
     return StepResult(current.strain, current.stress, current.plastic_state, np.array(residual_history),
-                      gmres_iteration_count)
+                      krylov_iteration_count)
 
 def take_step(evaluate, current, correction, relative_residual, get_measured_residual):
     # Backtracking line search: the full Newton step if it lowers the relative residual enough (by the fraction
@@ -111,10 +111,10 @@ def take_step(evaluate, current, correction, relative_residual, get_measured_res
         step_length *= config.line_search_step_reduction
     return trial, trial_relative_residual
 
-def solve_newton_correction(apply_jacobian, residual, restart=None):
-    # Solves J δε = -r by GMRES, with J given as its product apply_jacobian on partition fields (partitions × 6),
-    # restarting every restart iterations (None: config.newton_krylov_restart). Returns δε and the number of GMRES
-    # iterations it took.
+def solve_newton_correction(apply_jacobian, residual):
+    # Solves J δε = -r by GMRES, with J given as its product apply_jacobian on fields of rows of 6, until
+    # ‖r + J δε‖ is below krylov_tolerance ‖r‖, restarting every gmres_restart iterations. Returns δε and the number of
+    # GMRES iterations it took.
     def apply_flat_jacobian(flat_vector):
         return apply_jacobian(flat_vector.reshape(-1, 6)).reshape(-1)
 
@@ -126,11 +126,11 @@ def solve_newton_correction(apply_jacobian, residual, restart=None):
         nonlocal iteration_count
         iteration_count += 1
 
-    correction, info = scipy.sparse.linalg.gmres(jacobian, -residual.reshape(-1), rtol=config.newton_krylov_tolerance,
-                                                 restart=config.newton_krylov_restart if restart is None else restart,
-                                                 maxiter=config.newton_krylov_max_restarts, callback=count_iteration,
+    correction, info = scipy.sparse.linalg.gmres(jacobian, -residual.reshape(-1), rtol=config.krylov_tolerance,
+                                                 restart=config.gmres_restart,
+                                                 maxiter=config.gmres_max_restarts, callback=count_iteration,
                                                  callback_type='pr_norm')
     if info != 0:
         raise SolverDidNotConverge(f"GMRES did not converge inside a Newton iteration (info {info}). Loosen "
-                                   "newton_krylov_tolerance or raise newton_krylov_restart")
+                                   "krylov_tolerance or raise gmres_restart")
     return correction.reshape(-1, 6), iteration_count

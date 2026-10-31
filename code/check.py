@@ -1,13 +1,14 @@
 # Checks the code on seven small problems, each solved by every method (FFT-TFA, Spectral LS, TFA, CP). Run it after
 # any change to the code:
 #
-#   python code/check.py         run the checks (about 30 seconds)
+#   python code/check.py         run the checks (about a minute)
 #   python code/check.py save    run the checks (except the comparison with the old reference) and, if they all
 #                                pass, save the results as the reference that later runs must reproduce exactly
 #
 # The problems:
 #   laminate      a laminate loaded in tension and shear, then unloaded and loaded in reverse. Its exact solution
-#                 (below) is known, and every method must reproduce it in every cluster.
+#                 (below) is known, and every method must reproduce it in every cluster; Spectral LS on its own
+#                 coarser elements (9 per side against the mesh's 27), which resolve the layer exactly.
 #   cut laminate  a laminate whose interfaces cut through partitions, so partitions there hold both phases, loaded in
 #                 transverse shear. Spectral LS and TFA must reproduce the exact solution in every cluster. CP shares a
 #                 mixed partition's strain at equal polarization against C0, which is exact here only as C0 → 0
@@ -18,7 +19,8 @@
 #   fiber         a circular fiber under tension and shear, the kind of problem config.py sets up by default, with a
 #                 band of mixed partitions around the fiber.
 #   z laminate    a laminate with interfaces normal to z, so the geometry varies along z: meshed and partitioned in 3D,
-#                 the only test of the kernel's ξ_z frequencies. Every method must reproduce its exact solution.
+#                 the only test of the kernel's ξ_z frequencies. Every method must reproduce its exact solution,
+#                 Spectral LS on its own finer elements (18 per side against the mesh's 9).
 #   sphere        a spherical inclusion, meshed and partitioned in 3D, with mixed partitions all around it; FFT-TFA
 #                 takes partition k-means clusters.
 #   k-means laminate, k-means sphere
@@ -71,10 +73,10 @@ reference_path = pathlib.Path(__file__).parent / "check_reference.npz"
 # with 9 × 9 partitions, a yielding and hardening matrix, every method switched on (CP too).
 pinned_inputs = {
     "domain_side_length": 1e-3, "inclusion_shape": "fiber", "inclusion_radius": 0.35e-3,
-    "layer_thickness": (3 / 9) * 1e-3, "element_number_per_side": 27, "element_number_along_z": 1,
-    "partition_number_per_side": 9, "partition_number_along_z": 1,
-    "elastic_modulus_inclusion": 10e9, "elastic_modulus_matrix": 100e6, "poisson_ratio_inclusion": 0.3,
-    "poisson_ratio_matrix": 0.19, "inclusion_yield_stress": np.inf, "matrix_yield_stress": 1.0e6,
+    "layer_thickness": (3 / 9) * 1e-3, "elements_per_side": 27, "elements_along_z": 1,
+    "partitions_per_side": 9, "partitions_along_z": 1, "spectral_ls_elements_per_side": None,
+    "inclusion_elastic_modulus": 10e9, "matrix_elastic_modulus": 100e6, "inclusion_poisson_ratio": 0.3,
+    "matrix_poisson_ratio": 0.19, "inclusion_yield_stress": np.inf, "matrix_yield_stress": 1.0e6,
     "inclusion_hardening_modulus": 0.0, "matrix_hardening_modulus": 10e6,
     "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0]), "strain_increment_count": 12,
     "load_path_shape": "monotonic",
@@ -84,38 +86,40 @@ pinned_inputs = {
     "cp_fourier_preconditioner": True,
     "spectral_ls_fourier_preconditioner": False,
     "convergence_tolerance": 1e-6, "residual_strain_scale_floor": 1e-4, "newton_max_iterations": 50,
-    "newton_krylov_tolerance": 1e-3, "newton_krylov_restart": 50, "newton_krylov_max_restarts": None,
+    "krylov_tolerance": 1e-3, "gmres_restart": 50, "gmres_max_restarts": None, "spectral_ls_cg_max_iterations": None,
     "ls_divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "fe_columns_per_solve": 100,
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
     "cp_eigenstrain_tolerance": 1e-12, "cp_eigenstrain_max_iterations": 50,
     "cp_clusters": "partition phases", "tfa_clusters": "partition phases", "k_means_matrix_clusters": 8,
     "k_means_inclusion_clusters": 1, "k_means_matrix_clusters_per_partition": 2,
     "k_means_inclusion_clusters_per_partition": 1, "k_means_iterations": 50, "k_means_seed": 0,
-    "include_reference": False, "reference_element_number_per_side": 27, "reference_krylov_restart": 50}
+    "include_reference": False, "reference_elements_per_side": 27}
 
 # What each problem changes from pinned_inputs.
 check_problems = {
     # A layer 3 partitions thick, loaded so that every interface-normal component (ε11, γ12, γ13) takes part, over a
     # cyclic path: the only test of unloading, reverse yielding and zero imposed strain. 4 increments per quarter
-    # still yield at both zero crossings. The homogenized C0 is the only test of that choice.
+    # still yield at both zero crossings. The homogenized C0 is the only test of that choice. Spectral LS runs on 9
+    # elements per side, the layer 3 of them thick: the only test of Spectral LS coarser than the mesh.
     "laminate": {"inclusion_shape": "laminate", "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.01]),
-                 "load_path_shape": "cyclic", "strain_increment_count": 4, "cp_reference_stiffness": "homogenized"},
+                 "load_path_shape": "cyclic", "strain_increment_count": 4, "cp_reference_stiffness": "homogenized",
+                 "spectral_ls_elements_per_side": 9},
     # A layer 7 elements thick, so each interface cuts a partition (2/3 fiber). In transverse shear γ12 both phases
     # carry the same stress, so the equal-stress split is exact there and every method must match the exact solution.
     "cut laminate": {"inclusion_shape": "laminate", "layer_thickness": (7 / 27) * 1e-3,
                      "max_macro_strain": np.array([0.0, 0.0, 0.0, 0.03, 0.0, 0.0]), "load_path_shape": "cyclic",
                      "strain_increment_count": 4},
-    # With the reference switched on, at the working resolution and Spectral LS's restart, so it must equal Spectral
-    # LS bit for bit.
+    # With the reference switched on, at the working resolution, so it must equal Spectral LS bit for bit.
     "fiber": {"include_reference": True},
     # The laminate turned so its interfaces are normal to z, on a 9³ mesh with 3³ partitions (the layer is the middle
     # partition layer), loaded like the laminate with every interface-normal component (ε33, γ23, γ13) taking part.
-    "z laminate": {"inclusion_shape": "laminate_z", "element_number_per_side": 9, "partition_number_per_side": 3,
+    # Spectral LS runs on 18³ elements, the layer 6 of them thick: the only test of Spectral LS finer than the mesh.
+    "z laminate": {"inclusion_shape": "laminate_z", "elements_per_side": 9, "partitions_per_side": 3,
                    "max_macro_strain": np.array([0.020, 0.0, 0.015, 0.0, 0.03, 0.01]), "load_path_shape": "cyclic",
-                   "strain_increment_count": 4},
+                   "strain_increment_count": 4, "spectral_ls_elements_per_side": 18},
     # A sphere on a 12³ mesh with 4³ partitions, loaded with z components: the only test of mixed partitions in 3D,
     # and of FFT-TFA's partition k-means clusters along a load path.
-    "sphere": {"inclusion_shape": "sphere", "element_number_per_side": 12, "partition_number_per_side": 4,
+    "sphere": {"inclusion_shape": "sphere", "elements_per_side": 12, "partitions_per_side": 4,
                "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03]),
                "fft_tfa_clusters": "partition k-means"},
     # The laminate with k-means clusters for FFT-TFA, CP and TFA, up to two per phase (the inclusion's strain
@@ -130,7 +134,7 @@ check_problems = {
     # The sphere with k-means clusters for FFT-TFA, CP and TFA, so clusters span partitions, and some clusters
     # sharing a partition also fill others: the only test of LS-25's coupling across partitions, and of FFT-TFA's
     # neighbour blocks along a load path.
-    "k-means sphere": {"inclusion_shape": "sphere", "element_number_per_side": 12, "partition_number_per_side": 4,
+    "k-means sphere": {"inclusion_shape": "sphere", "elements_per_side": 12, "partitions_per_side": 4,
                        "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03]),
                        "fft_tfa_clusters": "k-means", "fft_tfa_neighbour_blocks": True, "cp_clusters": "k-means",
                        "tfa_clusters": "k-means"},
@@ -345,7 +349,7 @@ def get_result_arrays(problem_name, results):
     arrays = {}
     for method, result in results.items():
         for field in ("macroscopic_stress", "cluster_stress_per_step", "newton_iterations_per_step",
-                      "gmres_iterations_per_step", "completed_step_count"):
+                      "krylov_iterations_per_step", "completed_step_count"):
             arrays[f"{problem_name}/{method}/{field}"] = np.asarray(getattr(result, field))
     return arrays
 

@@ -9,12 +9,12 @@
 # regions interact through LS-5 averaged over them (FT-2): the partition-averaged kernel on each partition's mean
 # polarization, by FFT on the partitions (LS-17), plus a correction to the exact element-level interaction between
 # the pieces of each partition and, optionally, of its neighbouring partitions (FT-3), and the mean strain kept at the
-# imposed one (FT-4). Each load step is solved by Newton–GMRES on the region strains (FT-5, FT-6).
+# imposed one (FT-4). Each load step is solved by Newton–GMRES on the region strains (FT-5, FT-6), preconditioned by
+# block-Jacobi (FT-7).
 
 from typing import NamedTuple
 import numpy as np
 import scipy.sparse
-import scipy.sparse.linalg
 
 import config
 from ls_model import (apply_on_lattice, apply_sparse, assemble_blocks, get_moulinec_suquet_kernel, get_offset_blocks,
@@ -37,9 +37,9 @@ class Interaction(NamedTuple):
     piece_to_region: scipy.sparse.csr_matrix     # a region's strain from its pieces', weights v_p / v_r
     piece_to_partition: scipy.sparse.csr_matrix  # a partition's mean polarization from its pieces', weights c_p
     P0_transformed: np.ndarray               # the partitions' kernel for C0 (LS-21)
-    correction_blocks: scipy.sparse.csr_matrix   # FT-3's C_pt, pieces × pieces
-    own_partition_blocks: scipy.sparse.csr_matrix  # R D_own S of FT-6, regions × regions: the own partitions' exact
-                                                   # interaction, gathered to regions
+    correction_blocks: scipy.sparse.bsr_matrix   # FT-3's C_pt, pieces × pieces, stored as 6 × 6 blocks
+    own_strain_change: np.ndarray            # FT-7's G_rr, one 6 × 6 block per region
+    cluster_strain_change: np.ndarray        # FT-7's S_r = Σ_{q in r's cluster} G_rq, one 6 × 6 block per region
 
 def get_regions(clusters):
     # FT-1: a matrix cluster is one region; an inclusion cluster has one region per piece. Matrix clusters come first,
@@ -73,8 +73,7 @@ def get_correction_blocks(mesh, clusters, P0_transformed, matrix_L, reach):
     # by FFT):
     #   D_st = (1 / n_s) Σ_δ n_st(δ) D0[δ − K d],   K = the partition's size in elements along each axis,
     # while the partition FFT applies c_t D̄0[−d], D̄0 its kernel. C_st = D_st − c_t D̄0[−d] corrects one to the other.
-    # Returns C for every partition within reach (fft_tfa_neighbour_blocks), and D for the own partition (d = 0), as
-    # sparse 6 × 6 blocks, pieces × pieces.
+    # Returns C for every partition within reach (fft_tfa_neighbour_blocks), as sparse 6 × 6 blocks, pieces × pieces.
     discretization = mesh.discretization
     block_shape = np.array([discretization.elements_per_partition_along_z, discretization.elements_per_partition_side,
                             discretization.elements_per_partition_side])
@@ -109,7 +108,7 @@ def get_correction_blocks(mesh, clusters, P0_transformed, matrix_L, reach):
     partition_D0 = get_offset_blocks(P0_transformed).reshape(*partition_shape, 6, 6) @ matrix_compliance
     partition_position = np.stack(np.unravel_index(np.arange(partition_count), partition_shape), axis=-1)
 
-    correction_parts, own_partition = [], None
+    correction_parts = []
     for offset in get_neighbour_offsets(partition_shape, reach):
         source = np.ravel_multi_index(tuple(((partition_position + offset) % partition_shape).T), partition_shape)
         pair_counts = np.rint(np.fft.irfftn(transformed[:, :, None] * np.conj(transformed[source][:, None]),
@@ -125,12 +124,33 @@ def get_correction_blocks(mesh, clusters, P0_transformed, matrix_L, reach):
         rows = first_piece[receiver] + receiving_rank
         columns = first_piece[source[receiver]] + source_rank
         correction_parts.append((correction[pairs], rows, columns))
-        if not np.any(offset):
-            own_partition = (exact[pairs], rows, columns)
     piece_count = len(clusters.piece_partition)
-    correction_blocks = assemble_blocks(*[np.concatenate(parts) for parts in zip(*correction_parts)],
-                                        (piece_count, piece_count))
-    return correction_blocks, assemble_blocks(*own_partition, (piece_count, piece_count))
+    return assemble_blocks(*[np.concatenate(parts) for parts in zip(*correction_parts)], (piece_count, piece_count))
+
+def get_strain_change_within_groups(mesh, clusters, P0_transformed, matrix_L, correction_blocks, piece_group):
+    # FT-7: for every piece p, Σ_t G_pt over the pieces t of p's group, with G_pt the strain change of FT-2 with FT-4
+    # at piece p from a unit polarization of piece t:
+    #   G_pt = c_t D̄0[A_p − A_t] + C_pt − (1 / N) Σ_s c_s C_st,
+    # the partition kernel taken pair by pair (the pairs within each group), C from the correction blocks within the
+    # group; the partition FFT adds nothing to the cell mean (P̂0(0) = 0).
+    partition_shape = mesh.discretization.partition_lattice_shape
+    partition_D0 = get_offset_blocks(P0_transformed).reshape(-1, 6, 6) @ np.linalg.inv(matrix_L)
+    partition_position = np.stack(np.unravel_index(clusters.piece_partition, partition_shape), axis=-1)
+    share = clusters.piece_volume_fraction
+    piece_count = len(piece_group)
+    sums = np.zeros((piece_count, 6, 6))
+    receiver, source = get_pairs_within_groups(piece_group, np.arange(piece_count))
+    offset = np.ravel_multi_index(tuple(((partition_position[receiver] - partition_position[source])
+                                         % partition_shape).T), partition_shape)
+    np.add.at(sums, receiver, share[source][:, None, None] * partition_D0[offset])
+
+    block_rows = np.repeat(np.arange(piece_count), np.diff(correction_blocks.indptr))
+    block_columns = correction_blocks.indices
+    within = piece_group[block_rows] == piece_group[block_columns]
+    np.add.at(sums, block_rows[within], correction_blocks.data[within])
+    group_mean = np.zeros((piece_group.max() + 1, 6, 6))
+    np.add.at(group_mean, piece_group[block_columns], share[block_rows][:, None, None] * correction_blocks.data)
+    return sums - group_mean[piece_group] / clusters.partition_count
 
 def get_interaction(mesh, clusters, matrix_L, reach):
     # FFT-TFA's operators on its clusters, with the exact interaction kept between partitions within reach (0: each
@@ -145,14 +165,16 @@ def get_interaction(mesh, clusters, matrix_L, reach):
         (piece_volume, (clusters.piece_partition, np.arange(len(piece_region)))),
         shape=(clusters.partition_count, len(piece_region)))
     P0_transformed = get_P0_transformed(mesh.discretization, matrix_L)
-    correction_blocks, own_partition_blocks = get_correction_blocks(mesh, clusters, P0_transformed, matrix_L, reach)
-    region_scatter = scipy.sparse.csr_matrix((np.ones(len(piece_region)), (np.arange(len(piece_region)), piece_region)),
-                                             shape=(len(piece_region), region_count))
-    identity = scipy.sparse.identity(6, format="csr")
-    own_partition_blocks = (scipy.sparse.kron(piece_to_region, identity) @ own_partition_blocks
-                            @ scipy.sparse.kron(region_scatter, identity)).tocsr()
+    # The correction blocks are applied at every residual and Jacobian product; stored as dense 6 × 6 blocks (BSR),
+    # a product reads one column index per block instead of one per entry.
+    correction_blocks = get_correction_blocks(mesh, clusters, P0_transformed, matrix_L, reach).tobsr(blocksize=(6, 6))
+    own_strain_change, cluster_strain_change = [
+        (piece_to_region @ get_strain_change_within_groups(mesh, clusters, P0_transformed, matrix_L, correction_blocks,
+                                                           piece_group).reshape(-1, 36)).reshape(-1, 6, 6)
+        for piece_group in (piece_region, clusters.piece_cluster)]
     return Interaction(clusters, matrix_L, region_cluster, region_volume, piece_region, region_to_cluster,
-                       piece_to_region, piece_to_partition, P0_transformed, correction_blocks, own_partition_blocks)
+                       piece_to_region, piece_to_partition, P0_transformed, correction_blocks, own_strain_change,
+                       cluster_strain_change)
 
 def get_strain_change(interaction, region_polarization):
     # FT-2 with FT-4: the strain every region's polarization takes from every region, ε_r = ε̄ − (this). On the
@@ -179,6 +201,7 @@ class FFTTFASolver:
         self.clusters = interaction.clusters
         materials = self.clusters.materials
         self.region_stiffness_contrast = materials.L[interaction.region_cluster] - interaction.matrix_L
+        self.region_share = interaction.region_volume / self.clusters.volume[interaction.region_cluster]   # v_r / v_g
         self.previous_strain = np.zeros((len(interaction.region_cluster), 6))
         self.previous_macro_strain = np.zeros(6)
 
@@ -201,8 +224,8 @@ class FFTTFASolver:
     def get_newton_correction(self, current, plastic_history):
         # FT-6: J v = v + (FT-2's strain change of the polarization change T v), with
         #   T v = (L_g − C0) v_r − L_g H_g Σ (v_q / v_g) v_q   over the regions q of r's cluster g,
-        # H_g = ∂μ/∂ε at the cluster's average strain. GMRES solves it with the sparse LU of J's own-partition part,
-        # I + R D_own S T, on the right, so it still measures the residual of J δε = −r.
+        # H_g = ∂μ/∂ε at the cluster's average strain. GMRES solves it with J's diagonal blocks inverted (block-Jacobi,
+        # FT-7) on the right, so it still measures the residual of J δε = −r.
         interaction, materials = self.interaction, self.clusters.materials
         cluster_strain = interaction.region_to_cluster @ current.strain
         sensitivity = get_eigenstrain_sensitivity(cluster_strain, materials, plastic_history)
@@ -216,31 +239,18 @@ class FFTTFASolver:
         def apply_jacobian(vector):
             return vector + get_strain_change(interaction, apply_polarization_change(vector))
 
-        local_jacobian = (scipy.sparse.identity(6 * len(current.strain), format="csr")
-                          + interaction.own_partition_blocks @ self.get_polarization_change_blocks(plastic_stiffness))
-        factorization = scipy.sparse.linalg.splu(local_jacobian.tocsc())
+        # FT-7: J_rr = I + G_rr (L_g − C0) − (v_r / v_g) S_r L_g H_g.
+        diagonal_blocks = (np.eye(6) + interaction.own_strain_change @ self.region_stiffness_contrast
+                           - self.region_share[:, None, None] * interaction.cluster_strain_change
+                           @ plastic_stiffness[interaction.region_cluster])
+        inverse_blocks = np.linalg.inv(diagonal_blocks)
 
         def apply_preconditioner(vector):
-            return factorization.solve(vector.reshape(-1)).reshape(-1, 6)
+            return np.einsum('rij,rj->ri', inverse_blocks, vector)
 
         y, gmres_iteration_count = solve_newton_correction(lambda vector: apply_jacobian(apply_preconditioner(vector)),
                                                            current.residual)
         return apply_preconditioner(y), gmres_iteration_count
-
-    def get_polarization_change_blocks(self, plastic_stiffness):
-        # FT-6's T as sparse 6 × 6 blocks, regions × regions: (L_g − C0) on the diagonal, and −(v_q / v_g) L_g H_g
-        # between every pair of regions (r, q) of a cluster g whose H_g is not zero (a yielding cluster).
-        interaction = self.interaction
-        region_cluster = interaction.region_cluster
-        yielding = np.flatnonzero(np.any(plastic_stiffness[region_cluster] != 0, axis=(1, 2)))
-        receiver, source = get_pairs_within_groups(region_cluster, yielding)
-        weight = interaction.region_volume[source] / self.clusters.volume[region_cluster[source]]
-        region_count = len(region_cluster)
-        return assemble_blocks(
-            np.concatenate([self.region_stiffness_contrast,
-                            -weight[:, None, None] * plastic_stiffness[region_cluster[receiver]]]),
-            np.concatenate([np.arange(region_count), receiver]), np.concatenate([np.arange(region_count), source]),
-            (region_count, region_count))
 
     def solve_step(self, macro_strain, plastic_history):
         initial_strain = self.previous_strain + (macro_strain - self.previous_macro_strain)

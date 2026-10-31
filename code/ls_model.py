@@ -1,4 +1,4 @@
-# The partition-averaged Lippmann–Schwinger (LS) equation of notes/2_ls_model.md, solved by Newton–GMRES. Partitions
+# The partition-averaged Lippmann–Schwinger (LS) equation of notes/2_ls_model.md, solved by Newton–Krylov. Partitions
 # interact only through the homogeneous reference medium C0, so the whole nonlocal operator is one FFT convolution
 # with the kernel P0 (LS-17). Two methods solve it, sharing the lattice code:
 #   Spectral LS  on the element lattice: one partition per element, each one cluster, so a partition's stress is its
@@ -115,8 +115,8 @@ def average_over_partitions(element_P0, discretization):
     k, k_z = discretization.elements_per_partition_side, discretization.elements_per_partition_along_z
     element_count_z, element_side, _ = discretization.element_lattice_shape
     element_P0 = element_P0.reshape(*discretization.element_lattice_shape, 6, 6)
-    partition_offsets = k * np.arange(discretization.partition_number_per_side)
-    partition_offsets_z = k_z * np.arange(discretization.partition_number_along_z)
+    partition_offsets = k * np.arange(discretization.partitions_per_side)
+    partition_offsets_z = k_z * np.arange(discretization.partitions_along_z)
     partition_P0 = np.zeros((*discretization.partition_lattice_shape, 6, 6))
     for d_k in range(1 - k_z, k_z):
         for d_j in range(1 - k, k):
@@ -177,14 +177,13 @@ def get_fourier_preconditioner(P0_transformed, mean_D):
 
 class LatticeSolver:
     # What CP and Spectral LS share as load-path solvers on their lattice (run.Lattice): Newton on the partition
-    # strains, each correction solving the LS-20 system J δε = −r by GMRES, convergence judged in matrix units (LS-24).
-    # solve_step(macro_strain, plastic_history) solves one load step, from the previous step's converged strain
-    # shifted by the macrostrain increment. A subclass supplies evaluate (the LS-18 residual) and get_D, which gives
-    # LS-20's operator D at the current state and a function for its lattice mean ⟨D⟩. GMRES restarts every
-    # krylov_restart iterations (None: config.newton_krylov_restart).
-    def __init__(self, lattice, matrix_L, use_fourier_preconditioner, krylov_restart=None):
+    # strains, each correction solving the LS-20 system J δε = −r by GMRES (by CG for Spectral LS, which overrides
+    # get_newton_correction), convergence judged in matrix units (LS-24). solve_step(macro_strain, plastic_history)
+    # solves one load step, from the previous step's converged strain shifted by the macrostrain increment. A subclass
+    # supplies evaluate (the LS-18 residual) and get_D, which gives LS-20's operator D at the current state and a
+    # function for its lattice mean ⟨D⟩.
+    def __init__(self, lattice, matrix_L, use_fourier_preconditioner):
         self.clusters = lattice.clusters
-        self.krylov_restart = krylov_restart
         self.reference_L = lattice.reference_L                  # C0
         self.P0_transformed = lattice.P0_transformed
         self.use_fourier_preconditioner = use_fourier_preconditioner
@@ -202,7 +201,7 @@ class LatticeSolver:
             return vector - apply_on_lattice(self.P0_transformed, apply_D(vector))
 
         if not self.use_fourier_preconditioner:
-            return solve_newton_correction(apply_jacobian, current.residual, self.krylov_restart)
+            return solve_newton_correction(apply_jacobian, current.residual)
 
         preconditioner = get_fourier_preconditioner(self.P0_transformed, get_mean_D())
 
@@ -210,7 +209,7 @@ class LatticeSolver:
             return apply_on_lattice(preconditioner, vector)
 
         y, gmres_iteration_count = solve_newton_correction(lambda vector: apply_jacobian(apply_preconditioner(vector)),
-                                                           current.residual, self.krylov_restart)
+                                                           current.residual)
         return apply_preconditioner(y), gmres_iteration_count
 
     def solve_step(self, macro_strain, plastic_history):
@@ -228,8 +227,8 @@ class LatticeSolver:
 class SpectralLSSolver(LatticeSolver):
     # Spectral LS: LS-18 with one partition per element (per element column), each partition one cluster, so a
     # partition's stress is its cluster's at the partition strain.
-    def __init__(self, lattice, matrix_L, use_fourier_preconditioner, krylov_restart=None):
-        super().__init__(lattice, matrix_L, use_fourier_preconditioner, krylov_restart)
+    def __init__(self, lattice, matrix_L, use_fourier_preconditioner):
+        super().__init__(lattice, matrix_L, use_fourier_preconditioner)
         if self.clusters.cluster_count != self.clusters.partition_count:
             raise ValueError("Spectral LS needs exactly one cluster per partition.")
 
@@ -247,6 +246,50 @@ class SpectralLSSolver(LatticeSolver):
         tangent = get_algorithmic_stiffness(current.strain, self.clusters.materials, plastic_history)
         D_blocks = np.eye(6) - np.linalg.solve(self.reference_L, tangent)
         return (lambda vector: apply_blocks(D_blocks, vector)), (lambda: D_blocks.mean(axis=0))
+
+    def get_newton_correction(self, current, plastic_history):
+        # Solves J δε = −r (LS-20) by conjugate gradients in the C0 inner product ⟨u, v⟩ = Σ uᵀ C0 v, in which J is
+        # symmetric and positive definite on the compatible strains that r and every correction lie in (LS-28);
+        # preconditioned by LS-23 when it is switched on, self-adjoint and positive there too. It stops as GMRES does,
+        # once ‖r + J δε‖ is below krylov_tolerance ‖r‖. Returns δε and the number of CG iterations.
+        apply_D, get_mean_D = self.get_D(current, plastic_history)
+        if self.use_fourier_preconditioner:
+            preconditioner = get_fourier_preconditioner(self.P0_transformed, get_mean_D())
+
+            def apply_preconditioner(vector):
+                return apply_on_lattice(preconditioner, vector)
+        else:
+            def apply_preconditioner(vector):
+                return vector
+
+        def inner_product(u, v):
+            return np.sum((u @ self.reference_L) * v)
+
+        correction = np.zeros_like(current.residual)
+        linear_residual = -current.residual                       # −r − J δε, at δε = 0
+        tolerance = config.krylov_tolerance * np.linalg.norm(linear_residual)
+        preconditioned = apply_preconditioner(linear_residual)
+        direction = preconditioned
+        residual_product = inner_product(linear_residual, preconditioned)
+        max_iterations = (10 * linear_residual.size if config.spectral_ls_cg_max_iterations is None
+                          else config.spectral_ls_cg_max_iterations)
+        for iteration in range(1, max_iterations + 1):
+            jacobian_direction = direction - apply_on_lattice(self.P0_transformed, apply_D(direction))
+            curvature = inner_product(direction, jacobian_direction)
+            if curvature <= 0:
+                raise SolverDidNotConverge("CG met a direction of non-positive curvature: LS-28 needs a positive "
+                                           "definite tangent, so a yielding phase needs a positive hardening modulus")
+            step = residual_product / curvature
+            correction += step * direction
+            linear_residual = linear_residual - step * jacobian_direction   # not in place: direction may be it
+            if np.linalg.norm(linear_residual) <= tolerance:
+                return correction, iteration
+            preconditioned = apply_preconditioner(linear_residual)
+            next_residual_product = inner_product(linear_residual, preconditioned)
+            direction = preconditioned + (next_residual_product / residual_product) * direction
+            residual_product = next_residual_product
+        raise SolverDidNotConverge(f"CG did not converge inside a Newton iteration within {max_iterations} "
+                                   "iterations. Loosen krylov_tolerance or raise spectral_ls_cg_max_iterations")
 
 def get_elastic_strain_concentration(lattice, matrix_L):
     # The strain of every partition of the lattice per unit macrostrain in elasticity, partitions × 6 × 6 (column k for

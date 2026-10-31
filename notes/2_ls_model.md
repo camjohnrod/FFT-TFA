@@ -610,7 +610,7 @@ The elastic branch has $\mathbf H_\mu^A=\mathbf0$, including elastic unloading f
 
 1. Hold $\mathbf z_n$ fixed. Initialize $\mathbf e^{(0)}=\mathbf e_n+\mathbf1_M\otimes(\bar{\boldsymbol\varepsilon}_{n+1}-\bar{\boldsymbol\varepsilon}_n)$.
 2. Evaluate candidate stress/history and $\mathbf R$. Check a scaled strain residual and verify that all values are finite.
-3. If not converged, solve $\mathbf J\Delta\mathbf e=-\mathbf R$ by GMRES using LS-20, and update the strain guess through a backtracking line search: take $\alpha\Delta\mathbf e$ with $\alpha=1,\tfrac12,\tfrac14,\ldots$, the first that lowers the scaled residual by the fraction $10^{-4}\alpha$ (the code applies the same search to every method). Check the linear solver's status.
+3. If not converged, solve $\mathbf J\Delta\mathbf e=-\mathbf R$ by GMRES using LS-20 (Spectral LS by conjugate gradients, section 7.7), and update the strain guess through a backtracking line search: take $\alpha\Delta\mathbf e$ with $\alpha=1,\tfrac12,\tfrac14,\ldots$, the first that lowers the scaled residual by the fraction $10^{-4}\alpha$ (the code applies the same search to every method). Check the linear solver's status.
 4. Repeat from the same committed history. On convergence, commit the final candidate history and return LS-9. On failure, do not commit it.
 
 Use a convergence criterion such as $\|\mathbf R\|\le\epsilon_{\rm abs}+\epsilon_{\rm rel}\|\mathbf e\|$, where $\epsilon_{\rm abs}$ has a meaningful strain scale and $\epsilon_{\rm rel}$ is dimensionless. The absolute term avoids division by a vanishing strain norm at zero loading. Choose Krylov tolerances and restart length to control linear-solve error and storage; they are algorithm settings, not part of the reduced constitutive model.
@@ -722,6 +722,31 @@ When every cluster lies in one partition, $\mathbf D$ is one block per partition
 Measured on the default problem with LS-22's clusters (64² elements, 32² partitions, 60 steps, $\mathbf C_0=0.01\times$ matrix), against the previous code, which solved LS-22's split per mixed partition: 182 Newton corrections and 7 217 GMRES iterations (7 216 before), the same accuracy at the default tolerance against its own solution at $10^{-11}$ ($2.0\times10^{-8}$ macroscopic, $7.9\times10^{-7}$ worst cluster), the two solutions $9\times10^{-13}$ apart; online time 5–10 % longer (5.7–6.2 s against 5.4 s), the sparse products and solves. Without the preconditioner: 213 corrections, 55 449 GMRES iterations, 32.9 s, the same answer.
 
 **Tried and not adopted.** Making the eigenstrains Newton unknowns beside the partition strains, with each correction solved for the polarization $\delta\boldsymbol\tau$ (on which every piece's response is local), gave the same solutions but 295 Newton corrections against 182, stopped 20–50 times less accurately at the same tolerance ($1.3\times10^{-6}$ macroscopic, $3.5\times10^{-5}$ worst cluster), since the outer Newton then has to find which clusters flow, and needed $\mathbf C_0$ below the tangent of every yielding cluster, not only the coupled ones.
+
+### 7.7 Conjugate gradients for Spectral LS
+
+Spectral LS solves each Newton correction by conjugate gradients (CG) instead of GMRES. GMRES keeps every Krylov vector since its last restart and orthogonalizes each new one against all of them, so an iteration costs more the more iterations a correction needs; CG keeps only the latest search direction, at a fixed cost per iteration, but needs a system that is symmetric and positive definite in some inner product. Spectral LS's is, in the inner product of its reference medium. This is the strain-based CG of Zeman et al., symmetric on compatible fields, as presented in Schneider's review (2021, §3; Zeman et al. not read).
+
+**The inner product.** For two strain fields on the lattice, $\langle\mathbf u,\mathbf v\rangle_0=\sum_A\mathbf u_A^{\mathsf T}\mathbf C_0\mathbf v_A$: the work of the stress $\mathbf C_0\mathbf u$ on $\mathbf v$ (engineering notation keeps it the true work).
+
+**$\mathbf P_0$ is a projection, orthogonal in it.** For Spectral LS, $\widehat{\mathbf P}_0=\widehat{\boldsymbol\Gamma}_0\mathbf C_0$ with $\widehat{\boldsymbol\Gamma}_0=\mathbf B(\mathbf B^{\mathsf T}\mathbf C_0\mathbf B)^{-1}\mathbf B^{\mathsf T}$ (LS-21), the identity at the Nyquist frequencies and zero at $\boldsymbol\xi=\mathbf0$. At every frequency $\widehat{\mathbf P}_0^2=\widehat{\mathbf P}_0$, and $\mathbf C_0\widehat{\mathbf P}_0=\mathbf C_0\widehat{\boldsymbol\Gamma}_0\mathbf C_0$ is symmetric, so $\langle\mathbf P_0\mathbf u,\mathbf v\rangle_0=\langle\mathbf u,\mathbf P_0\mathbf v\rangle_0$: $\mathbf P_0=\mathbf Q$ is the $\langle\cdot,\cdot\rangle_0$-orthogonal projection onto its range, the compatible zero-mean strains (with the Nyquist modes).
+
+**The residual and every correction stay in that range.** A step starts from a compatible strain plus the uniform increment, so $\mathbf e-\mathbf b$ lies in the range of $\mathbf Q$ and $\mathbf Q\mathbf b=\mathbf0$; LS-18 then gives $\mathbf R=\mathbf Q\,\mathbf C_{0,M}^{-1}\mathbf s$, in the range too, and CG's iterates, combinations of $\mathbf R$ and $\mathbf J$ applied to earlier ones, stay there.
+
+**On that range $\mathbf J$ is symmetric and positive definite.** For $\mathbf v=\mathbf Q\mathbf v$, LS-20 gives $\mathbf J\mathbf v=\mathbf v-\mathbf Q(\mathbf v-\mathbf C_{0,M}^{-1}\mathbf L_{t,M}\mathbf v)=\mathbf Q\,\mathbf C_{0,M}^{-1}\mathbf L_{t,M}\mathbf v$, and with $\mathbf C_0\mathbf Q=\mathbf Q^{\mathsf T}\mathbf C_0$:
+
+**(LS-28) Spectral LS's Newton operator in the reference medium's inner product**
+
+$$
+\boxed{
+\langle\mathbf J\mathbf u,\mathbf v\rangle_0=\mathbf u^{\mathsf T}\mathbf L_{t,M}\,\mathbf v
+\qquad\text{for } \mathbf u=\mathbf Q\mathbf u,\ \mathbf v=\mathbf Q\mathbf v .
+}
+$$
+
+J2's algorithmic tangent with linear isotropic hardening is symmetric, and positive definite when every yielding phase hardens ($H>0$), so CG applies with every inner product taken as $\langle\cdot,\cdot\rangle_0$. With $H\le0$ it is not; the code then stops at the first direction of non-positive curvature. The answer does not depend on the Krylov method: CG stops, as GMRES does, once $\|\mathbf R+\mathbf J\Delta\mathbf e\|$ is below `krylov_tolerance` times $\|\mathbf R\|$. LS-23 (`spectral_ls_fourier_preconditioner`) is $\mathbf Q\,\mathbf C_0^{-1}\langle\mathbf L_t\rangle$ on the same range, self-adjoint and positive definite there, so it serves as CG's preconditioner; as section 7.4 explains, it does not reduce Spectral LS's iterations.
+
+CG needs about as many iterations as GMRES (both are governed by the spread of $\mathbf C_0^{-1}\mathbf L_t$ over the cell) without the growing orthogonalization. FFT-TFA keeps GMRES: its truncated interaction, weighted by region volume, is not symmetric and its symmetric part not semidefinite (the spurious modes of section 10.5's patch-test failure; measured on the check fiber, symmetric only at full reach); and even at full reach $\mathbf J=\mathbf I+\mathbf G\mathbf T$ is self-adjoint only in inner products built from $\mathbf T$ or $\mathbf G^{-1}$, where $\mathbf T$ is zero in elastic matrix regions and negative in yielding ones (with $\mathbf C_0=\mathbf L_m$) and $\mathbf G$ is singular on uniform fields. Its block-Jacobi preconditioner (FT-7) also holds it to 10–20 GMRES iterations per correction, well inside one restart, so GMRES's orthogonalization costs it little.
 
 ## 8. Relationship to other frameworks
 
@@ -889,12 +914,42 @@ $$
 $$
 
 with $\mathbf H_{\mu,g}$ at the cluster's average strain (checked against finite differences of FT-5 to $10^{-10}$,
-with yielding inclusion clusters spanning partitions and neighbour blocks). GMRES solves each correction with the
-sparse LU of $\mathbf I+\mathbf R\,\mathbf D_{\rm own}\mathbf S\,\mathbf T$ on the right ($\mathbf D_{\rm own}$ the
-exact interaction inside each partition, $\mathbf S$ the scatter from regions to pieces), so it still measures the
-residual of $\mathbf J\Delta\boldsymbol\varepsilon=-\mathbf r$ and the preconditioner changes only the iteration
-count. $\mathbf R\mathbf D_{\rm own}\mathbf S$ is built once; $\mathbf T$ is block diagonal but for yielding clusters
-with several regions.
+with yielding inclusion clusters spanning partitions and neighbour blocks). GMRES solves each correction with
+$\mathbf J$'s $6\times6$ diagonal blocks inverted (block-Jacobi, FT-7) on the right, so it still measures the residual
+of $\mathbf J\Delta\boldsymbol\varepsilon=-\mathbf r$ and the preconditioner changes only the iteration count.
+
+**(FT-7) Block-Jacobi preconditioner**
+
+Write FT-6 as $\mathbf J=\mathbf I+\mathbf G\mathbf T$, with $\mathbf G$ the strain change $\mathbf R\boldsymbol\Pi\mathbf m$
+of FT-2 with FT-4 (region polarization to region strain) and $\mathbf T$ the polarization change, whose block from
+region $r$ to region $q$ of the same cluster $g$ is
+$\mathbf T_{qr}=(\mathbf L_g-\mathbf C_0)\,\delta_{qr}-(v_r/v_g)\,\mathbf L_g\mathbf H_{\mu,g}$. Then
+$(\mathbf J)_{rr}=\mathbf I+\sum_{q\in g}\mathbf G_{rq}\mathbf T_{qr}$, that is
+
+$$
+\mathbf J_{rr}=\mathbf I+\mathbf G_{rr}(\mathbf L_g-\mathbf C_0)-\frac{v_r}{v_g}\,\mathbf S_r\,\mathbf L_g\mathbf H_{\mu,g},
+\qquad
+\mathbf S_r=\sum_{q\in g}\mathbf G_{rq}.
+$$
+
+$\mathbf G_{rr}$ and $\mathbf S_r$ depend on the geometry only and are built once. On the pieces,
+
+$$
+\mathbf G_{pt}=c_t\,\bar{\mathbf D}_0[A_p-A_t]+\mathbf C_{pt}-\frac1N\sum_s c_s\,\mathbf C_{st},
+\qquad
+\mathbf G_{rq}=\sum_{p\in r}\frac{v_p}{v_r}\sum_{t\in q}\mathbf G_{pt},
+$$
+
+the partition FFT's part adding nothing to FT-4's cell mean ($\hat{\mathbf P}_0(\mathbf 0)=\mathbf 0$). The sums run
+over the pairs of pieces within one region ($\mathbf G_{rr}$) or one cluster ($\mathbf S_r$): a few per partition for
+partition clusters, the square of a cluster's piece count for cell-wide k-means. Online, each Newton correction
+inverts one $6\times6$ block per region. The assembled blocks equal the probed Jacobian's to $4\times10^{-16}$ (12³
+sphere, every cluster setting, reach 0 and 1, at a yielding state). Against the sparse LU of the own-partition part
+$\mathbf I+\mathbf R\,\mathbf D_{\rm own}\mathbf S\,\mathbf T$ ($\mathbf D_{\rm own}$ the exact interaction inside
+each partition) it needed the same GMRES and Newton iterations (within 3 %) at lower cost: on a 48³ sphere (8³ to
+16³ partitions, partition phases and partition k-means with four matrix clusters per partition, 20 cyclic steps, one
+thread) 1.4–2.0 times faster online without neighbour blocks and 1.2 times with them, whose 27 corrections then
+dominate each product; on the 2D random-fiber cell 1.35 times (2026-10-30).
 
 The prototype (`~/fft-tfa-prototypes/linear_modes/fast_kmeans_cp.py`) solved the same equations for the matrix
 eigenstrains and the inclusion polarizations; without FT-4 the two give the same cluster stresses to $10^{-12}$, with
@@ -907,7 +962,28 @@ operator by which the clusters interact, which is where SCA and TFA differ (Schn
 two schemes are identical up to one Eshelby–Green-type operator, clustered for SCA). Here that operator is SCA's
 cluster-averaged LS operator [SCA, Eqs. (16)–(18)] at a fixed reference medium, the matrix, so the matrix's
 polarization is exact and its inclusion part is uniform per piece, and it is applied by a partition FFT with near
-corrections instead of a stored dense matrix. Zhang et al. (2019, Comput. Mech. 64, §2.3) approximate cluster
+corrections instead of a stored dense matrix.
+
+Precisely, the LS equation $\boldsymbol\varepsilon=\bar{\boldsymbol\varepsilon}-\boldsymbol\Gamma_0*\boldsymbol\tau$,
+with $\boldsymbol\tau=(\mathbf L-\mathbf C_0)\boldsymbol\varepsilon-\mathbf L\boldsymbol\mu$, is solved at three
+resolutions. TFA resolves the strain at the fine scale (FE), so $\boldsymbol\tau$ varies inside every cluster. SCA and
+FFT-TFA take the strain, hence $\boldsymbol\tau$, uniform on each cluster or region and keep only each region's average
+response, $\boldsymbol\Gamma_0$ averaged over the regions (Schneider's clustered operator). Spectral LS is the case where
+every voxel is its own cluster. Averaging costs nothing where $\boldsymbol\tau$ is uniform anyway: with
+$\mathbf C_0=\mathbf L_m$ a matrix cluster's $\boldsymbol\tau$ is $-\mathbf L_m\boldsymbol\mu_g$, independent of the
+strain, so FFT-TFA and TFA agree exactly in the matrix; an inclusion's $\boldsymbol\tau$ follows its strain, which
+varies, so there the averaging is an approximation. With any other $\mathbf C_0$ the term $(\mathbf L-\mathbf C_0)\boldsymbol\varepsilon$
+is present in every cluster, which is why SCA's answer depends on $\mathbf C_0$ and FFT-TFA's choice confines the
+averaging error to the inclusion. At full reach FFT-TFA's interaction is the exact region-averaged operator (section
+10.6), so FFT-TFA is SCA's equation with $\mathbf C_0=\mathbf L_m$; with partition clusters each inclusion cluster is
+one piece and the two coincide, while with inclusion clusters spanning partitions FFT-TFA resolves the inclusion's
+strain per piece, slightly finer than SCA. FFT-TFA's difference from TFA on the same clusters therefore splits into
+three parts, each measurable: the inclusion's τ uniform per piece (FFT-TFA at full reach against TFA), the truncation
+(FFT-TFA against itself at full reach), and the Moulinec–Suquet kernel against TFA's FE operators. On a laminate the
+inclusion's exact strain is uniform per piece, so the first part vanishes; this is why FFT-TFA at full reach must match
+the laminates' exact solutions (section 10.6).
+
+Zhang et al. (2019, Comput. Mech. 64, §2.3) approximate cluster
 interactions on a uniform coarse grid as well, by volume-fraction-weighted cell–cell integrals with the cross terms
 inside a cell set to zero; they assemble a dense cluster matrix from them, with neither FFT nor corrections.
 
@@ -943,7 +1019,13 @@ Measured on `check.py`'s problems (27² elements, 9² partitions; 12³ elements,
   layers, 1.2 % with 4. With neighbour blocks, which reach the other layers, the two agree to $2\times10^{-6}$.
   Use columns.
 - **σ33 along z-invariant fibers** is low as for CP, less so (about 10 % on a 48² random-fiber cell with 4 × 4-element
-  partitions, partition k-means and neighbours): one polarization per inclusion piece.
+  partitions, partition k-means and neighbours): one polarization per inclusion piece. Split by the decomposition of
+  section 10.4 on the 30-fiber cell (128² elements, 8² partitions, 8 matrix and 1 fiber cluster per partition,
+  $\varepsilon_{33}$ + $\gamma_{13}$ to peak, against 512² Spectral LS): σ33 is −8.75 % at reach 0, −5.47 % at reach 1,
+  −5.97 % at full reach (SCA's equation, $\mathbf C_0=\mathbf L_m$), −0.10 % for TFA, and −0.32 % for Spectral LS on the
+  same 128² elements. So the truncation beyond the neighbours does not cause it, the kernel accounts for at most
+  0.3 points, and the inclusion's polarization uniform per piece accounts for the rest. In σ13 the same averaging
+  offsets TFA's stiff material-state error (TFA +16.2 %, FFT-TFA at full reach +7.1 %), an error cancellation.
 
 ### 10.6 Checks
 

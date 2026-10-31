@@ -27,8 +27,8 @@ import config
 
 ## ------- Shapes ------- ##
 
-# The inclusion shapes whose geometry does not vary along z. They are meshed with config.element_number_along_z
-# element layers (one is exact) and partitioned in config.partition_number_along_z layers (one: columns through the
+# The inclusion shapes whose geometry does not vary along z. They are meshed with config.elements_along_z
+# element layers (one is exact) and partitioned in config.partitions_along_z layers (one: columns through the
 # thickness); every other shape is meshed and partitioned alike along all three axes.
 shapes_constant_along_z = ("fiber", "laminate", "random fibers")
 
@@ -46,7 +46,7 @@ def get_periodic_offsets(points, centre):
 
 def get_fiber_centres():
     # The (x, y) centres of the "random fibers", one row each, by random sequential addition (config.py).
-    element_side_length = config.domain_side_length / config.element_number_per_side
+    element_side_length = config.domain_side_length / config.elements_per_side
     minimum_distance = 2 * get_fiber_radius() + config.fiber_gap_elements * element_side_length
     random_generator = np.random.default_rng(config.fiber_seed)
     fiber_centres = np.empty((0, 2))
@@ -81,21 +81,21 @@ def is_inside_inclusion(centres):
 ## ------- Discretization ------- ##
 
 class Discretization(NamedTuple):
-    # A mesh of element_number_per_side² × element_number_along_z hexahedra over the periodic cubic cell, and its
-    # lattice of partition_number_per_side² × partition_number_along_z partitions. Lattices are indexed [z, y, x], as
+    # A mesh of elements_per_side² × elements_along_z hexahedra over the periodic cubic cell, and its
+    # lattice of partitions_per_side² × partitions_along_z partitions. Lattices are indexed [z, y, x], as
     # get_grid_id orders them (x fastest).
-    element_number_per_side: int
-    element_number_along_z: int
-    partition_number_per_side: int
-    partition_number_along_z: int
+    elements_per_side: int
+    elements_along_z: int
+    partitions_per_side: int
+    partitions_along_z: int
 
     @property
     def elements_per_partition_side(self):
-        return self.element_number_per_side // self.partition_number_per_side
+        return self.elements_per_side // self.partitions_per_side
 
     @property
     def elements_per_partition_along_z(self):
-        return self.element_number_along_z // self.partition_number_along_z
+        return self.elements_along_z // self.partitions_along_z
 
     @property
     def elements_per_partition(self):
@@ -103,15 +103,15 @@ class Discretization(NamedTuple):
 
     @property
     def element_lattice_shape(self):
-        return (self.element_number_along_z, self.element_number_per_side, self.element_number_per_side)
+        return (self.elements_along_z, self.elements_per_side, self.elements_per_side)
 
     @property
     def partition_lattice_shape(self):
-        return (self.partition_number_along_z, self.partition_number_per_side, self.partition_number_per_side)
+        return (self.partitions_along_z, self.partitions_per_side, self.partitions_per_side)
 
     @property
     def element_count(self):
-        return self.element_number_per_side**2 * self.element_number_along_z
+        return self.elements_per_side**2 * self.elements_along_z
 
     @property
     def dof_count(self):
@@ -119,11 +119,11 @@ class Discretization(NamedTuple):
 
     @property
     def element_side_length(self):
-        return config.domain_side_length / self.element_number_per_side
+        return config.domain_side_length / self.elements_per_side
 
     @property
     def element_length_along_z(self):
-        return config.domain_side_length / self.element_number_along_z
+        return config.domain_side_length / self.elements_along_z
 
     @property
     def element_volume(self):
@@ -135,18 +135,23 @@ class Discretization(NamedTuple):
 
 def get_partition_discretization():
     # The mesh and partitions config.py describes, shared by FFT-TFA, TFA and CP.
-    elements, partitions = config.element_number_per_side, config.partition_number_per_side
+    elements, partitions = config.elements_per_side, config.partitions_per_side
     if is_shape_constant_along_z():
-        return Discretization(elements, config.element_number_along_z, partitions, config.partition_number_along_z)
+        return Discretization(elements, config.elements_along_z, partitions, config.partitions_along_z)
     return Discretization(elements, elements, partitions, partitions)
 
-def get_spectral_discretization():
-    # Spectral LS's lattice: the same mesh with one partition per element (per element column for a shape constant
-    # along z, whatever CP's partition_number_along_z).
-    discretization = get_partition_discretization()
-    return discretization._replace(
-        partition_number_per_side=discretization.element_number_per_side,
-        partition_number_along_z=1 if is_shape_constant_along_z() else discretization.element_number_along_z)
+def get_spectral_discretization(elements_per_side):
+    # A lattice of one partition per element, elements_per_side per side: one per element column, through the mesh's
+    # element layers, for a shape constant along z (whatever CP's partitions_along_z); cubes otherwise. On the mesh's
+    # count of elements per side, its elements are the mesh's.
+    if is_shape_constant_along_z():
+        return Discretization(elements_per_side, config.elements_along_z, elements_per_side, 1)
+    return Discretization(elements_per_side, elements_per_side, elements_per_side, elements_per_side)
+
+def get_spectral_ls_discretization():
+    # Spectral LS's lattice: on its own elements (config.spectral_ls_elements_per_side), or the mesh's when None.
+    elements = config.spectral_ls_elements_per_side
+    return get_spectral_discretization(config.elements_per_side if elements is None else elements)
 
 ## ------- Periodic Mesh ------- ##
 
@@ -161,41 +166,41 @@ def get_grid_id(i, j, k, count_per_side):
 
 def get_element_material_ids(discretization):
     # The geometry, resolved on the elements: 1 for an element whose centre lies inside the inclusion, else 0.
-    centres_xy = (np.arange(discretization.element_number_per_side) + 0.5) * discretization.element_side_length
-    centres_z = (np.arange(discretization.element_number_along_z) + 0.5) * discretization.element_length_along_z
+    centres_xy = (np.arange(discretization.elements_per_side) + 0.5) * discretization.element_side_length
+    centres_z = (np.arange(discretization.elements_along_z) + 0.5) * discretization.element_length_along_z
     z, y, x = np.meshgrid(centres_z, centres_xy, centres_xy, indexing="ij")
     material_ids = is_inside_inclusion(np.column_stack([x.ravel(), y.ravel(), z.ravel()])).astype(int)
     # A shape partitioned in columns must indeed be the same in every layer.
-    layers = material_ids.reshape(discretization.element_number_along_z, -1)
+    layers = material_ids.reshape(discretization.elements_along_z, -1)
     if is_shape_constant_along_z() and not np.all(layers == layers[0]):
         raise ValueError(f"{config.inclusion_shape!r} is in fe.shapes_constant_along_z, but its geometry varies "
                          "along z.")
     return material_ids
 
 def get_periodic_mesh(discretization):
-    element_number_per_side = discretization.element_number_per_side
+    elements_per_side = discretization.elements_per_side
     element_nodes = np.zeros((discretization.element_count, 8), dtype=int)
     element_partition_ids = np.zeros(discretization.element_count, dtype=int)
 
-    for k in range(discretization.element_number_along_z):
-        for j in range(element_number_per_side):
-            for i in range(element_number_per_side):
-                element_id = get_grid_id(i, j, k, element_number_per_side)
+    for k in range(discretization.elements_along_z):
+        for j in range(elements_per_side):
+            for i in range(elements_per_side):
+                element_id = get_grid_id(i, j, k, elements_per_side)
 
                 for offset_k in range(2):
                     for offset_j in range(2):
                         for offset_i in range(2):
                             corner = get_grid_id(offset_i, offset_j, offset_k, 2)
                             element_nodes[element_id, corner] = get_grid_id(
-                                (i + offset_i) % element_number_per_side,
-                                (j + offset_j) % element_number_per_side,
-                                (k + offset_k) % discretization.element_number_along_z,
-                                element_number_per_side)
+                                (i + offset_i) % elements_per_side,
+                                (j + offset_j) % elements_per_side,
+                                (k + offset_k) % discretization.elements_along_z,
+                                elements_per_side)
 
                 element_partition_ids[element_id] = get_grid_id(i // discretization.elements_per_partition_side,
                                                                 j // discretization.elements_per_partition_side,
                                                                 k // discretization.elements_per_partition_along_z,
-                                                                discretization.partition_number_per_side)
+                                                                discretization.partitions_per_side)
 
     return Mesh(discretization, element_nodes, element_partition_ids, get_element_material_ids(discretization))
 
@@ -219,10 +224,10 @@ def get_L(elastic_modulus, poisson_ratio):
     return L
 
 def get_matrix_L():
-    return get_L(config.elastic_modulus_matrix, config.poisson_ratio_matrix)
+    return get_L(config.matrix_elastic_modulus, config.matrix_poisson_ratio)
 
 def get_inclusion_L():
-    return get_L(config.elastic_modulus_inclusion, config.poisson_ratio_inclusion)
+    return get_L(config.inclusion_elastic_modulus, config.inclusion_poisson_ratio)
 
 def get_value_per_material(matrix_value, inclusion_value, material_ids):
     return np.array([matrix_value, inclusion_value])[material_ids]
@@ -273,9 +278,28 @@ def label_partition_phases(mesh):
     _, element_cluster = np.unique(2 * mesh.element_partition_ids + mesh.element_material_ids, return_inverse=True)
     return element_cluster
 
+def smooth_within_phases(mesh, element_features):
+    # The features filtered by [1, 2, 1] / 4 along each axis of the element lattice longer than one (periodic), over
+    # same-phase neighbours only, the weights renormalized where a neighbour lies in the other phase. Spectral
+    # discretizations ring at interfaces (Schneider 2021, section 2.5), an alternation from element to element that in
+    # the stiff phase, whose strain is small, outweighs the real variation; the filter's response cos²(ω/2) removes
+    # that highest frequency and keeps linear trends. Written as each value plus its neighbours' differences from it,
+    # so a uniform phase stays exactly uniform.
+    shape = mesh.discretization.element_lattice_shape
+    field = element_features.reshape(*shape, -1)
+    phase = mesh.element_material_ids.reshape(shape)
+    for axis in [axis for axis in range(3) if shape[axis] > 1]:
+        change, weight = np.zeros_like(field), np.full(shape, 2.0)
+        for offset in (-1, 1):
+            same = np.roll(phase, offset, axis) == phase
+            change += np.where(same[..., None], np.roll(field, offset, axis) - field, 0)
+            weight += same
+        field = field + change / weight[..., None]
+    return field.reshape(element_features.shape)
+
 def label_k_means(mesh, element_features):
     # Every element's cluster by k-means on its features (one row per element; the elastic strain concentration,
-    # Liu–Bessa–Liu 2016, section 2.2.1), in each phase apart, so every cluster lies in one phase: up to
+    # Liu–Bessa–Liu 2016, section 2.2.1, smoothed by smooth_within_phases), in each phase apart, so every cluster lies in one phase: up to
     # k_means_matrix_clusters in the matrix, then up to k_means_inclusion_clusters in the inclusion. A phase gets no
     # more clusters than it has distinct features, and clusters k-means leaves empty are dropped.
     rng = np.random.default_rng(config.k_means_seed)
@@ -554,9 +578,9 @@ def get_E_and_P(mesh, clusters, include_P):
     discretization = mesh.discretization
     parameters = {"cache_version": cache_version,
                   **get_geometry_parameters(),
-                  "element_number_per_side": discretization.element_number_per_side,
-                  "element_number_along_z": discretization.element_number_along_z,
-                  "partition_number_per_side": discretization.partition_number_per_side,
+                  "elements_per_side": discretization.elements_per_side,
+                  "elements_along_z": discretization.elements_along_z,
+                  "partitions_per_side": discretization.partitions_per_side,
                   "L_matrix": get_matrix_L(),
                   "L_inclusion": get_inclusion_L(),
                   # The clusters themselves, so any change of clustering (k-means settings included) finds its own

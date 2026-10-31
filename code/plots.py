@@ -171,23 +171,26 @@ cluster_color_lightening = 0.25
 inclusion_cluster_greys = (0.62, 0.48, 0.76)
 
 class CellMap(NamedTuple):
-    # One method's discretization on the element grid, with a title and a line of its settings. boundaries maps each
-    # kind of line it draws ("voxel", "cluster", "partition", boundary_styles) to an element_number_per_side² map
-    # of ids, the line running along every element edge whose two sides have different ids. fill_cluster_ids colours
-    # each element by its cluster (k-means clusters), or is None to show only the phases.
+    # One method's discretization on its element grid, with a title and a line of its settings. boundaries maps each
+    # kind of line it draws ("voxel", "cluster", "partition", boundary_styles) to a map of ids on that grid, the line
+    # running along every element edge whose two sides have different ids. fill_cluster_ids colours each element by its
+    # cluster (k-means clusters), or is None to show only the phases. element_material_ids are the phases on the
+    # method's own elements (Spectral LS's), or None for the mesh's.
     title: str
     settings: str
     boundaries: dict
     fill_cluster_ids: np.ndarray = None
+    element_material_ids: np.ndarray = None
 
 # The kinds of line, drawn in this order, each named in the legend by what it bounds: hairline grey for Spectral LS's
-# voxels, so its fine grid shows without competing; thin black for the clusters (one material state each); thin dark
-# blue for the partitions of FFT-TFA and CP, the cells of their FFT, told from the clusters by colour alone, drawn on
-# top where the two coincide. Every panel is framed alike.
+# voxels, so its fine grid shows without competing, lighter than the clusters' lines so the two read apart; thin dark
+# grey for the clusters (one material state each), visible on the light phases and the cluster colours without
+# drawing the eye; thick black for the partitions of FFT-TFA and CP, the cells of their FFT, drawn on top where the
+# two coincide. Every panel is framed alike.
 boundary_styles = {
-    "voxel":     {'label': "voxel", 'color': '0.45', 'linewidth': 0.3},
-    "cluster":   {'label': "cluster: uniform eigenstrain", 'color': '0.1', 'linewidth': 0.6},
-    "partition": {'label': "partition: FFT cell", 'color': '#1f4e9c', 'linewidth': 0.9},
+    "voxel":     {'label': "voxel", 'color': '0.62', 'linewidth': 0.3},
+    "cluster":   {'label': "cluster: uniform eigenstrain", 'color': '0.2', 'linewidth': 0.5},
+    "partition": {'label': "partition: FFT cell", 'color': 'black', 'linewidth': 1.2},
 }
 frame_style = {'color': '0.1', 'linewidth': 0.8}
 
@@ -232,11 +235,13 @@ def plot_cross_section(element_material_ids, cell_maps, plot_path):
         figure, axes = plt.subplots(1, len(cell_maps), squeeze=False, layout='constrained',
                                     figsize=(cross_section_panel_size * len(cell_maps), figure_height))
         for axis, cell_map in zip(axes[0], cell_maps):
+            material_ids = (element_material_ids if cell_map.element_material_ids is None
+                            else cell_map.element_material_ids)
             if cell_map.fill_cluster_ids is None:
-                axis.imshow(element_material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.62']), vmin=0,
+                axis.imshow(material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.62']), vmin=0,
                             vmax=1, origin='lower', extent=(0, 1, 0, 1))
             else:
-                axis.imshow(get_cluster_image(cell_map.fill_cluster_ids, element_material_ids), origin='lower',
+                axis.imshow(get_cluster_image(cell_map.fill_cluster_ids, material_ids), origin='lower',
                             extent=(0, 1, 0, 1))
             for kind in boundary_styles:
                 if kind in cell_map.boundaries:
@@ -263,7 +268,7 @@ plastic_strain_colormap = 'magma'
 field_map_hidden_color = '0.8'    # elements a map leaves out (NaN), such as the inclusion in a matrix-only map
 
 class FieldMap(NamedTuple):
-    # One method's map on the element grid (element_number_per_side², each element showing its cluster's value).
+    # One method's map on its element grid (each element showing its cluster's value); maps may differ in resolution.
     title: str
     values: np.ndarray
 
