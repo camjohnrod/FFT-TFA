@@ -22,8 +22,8 @@ import numpy as np
 import tqdm
 
 import plots
-from fe import (Clusters, Discretization, Mesh, get_cached, get_clusters, get_E_and_P, get_geometry_parameters,
-                get_inclusion_L, get_matrix_L, get_partition_discretization, get_periodic_mesh,
+from fe import (Clusters, Discretization, Mesh, get_cached, get_clusters, get_E_and_P, get_fiber_radius,
+                get_geometry_parameters, get_inclusion_L, get_matrix_L, get_partition_discretization, get_periodic_mesh,
                 get_spectral_discretization, get_spectral_ls_discretization, is_shape_constant_along_z, label_k_means,
                 label_partition_k_means, label_partition_phases, smooth_within_phases)
 from fft_tfa_model import FFTTFASolver, Interaction, get_interaction
@@ -90,6 +90,10 @@ def get_problem():
     start_time = time.perf_counter()
     mesh = get_periodic_mesh(get_partition_discretization())
     mesh_seconds = time.perf_counter() - start_time
+    if config.inclusion_shape == "random fibers":
+        fiber_radius = get_fiber_radius()
+        print(f"Random fibers: radius {fiber_radius:.4g}, "
+              f"{2 * fiber_radius * config.elements_per_side / config.domain_side_length:.3g} elements per diameter")
     # As the elements resolve it (their centres), which a curved shape's nominal fraction only approaches.
     print(f"Inclusion volume fraction on the elements: {np.mean(mesh.element_material_ids):.4g}")
 
@@ -455,6 +459,14 @@ def get_reference_map(reference, voxel_values):
     # since the reference's elements subdivide theirs.
     return voxel_values.reshape(reference.lattice_shape)[reference.lattice_shape[0] // 2]
 
+def get_matrix_only(field_maps, inclusion_maps):
+    # The maps with their inclusion elements hidden (NaN) when config.field_maps_matrix_only is on, each by its own
+    # inclusion map (keyed by title).
+    if not config.field_maps_matrix_only:
+        return field_maps
+    return [plots.FieldMap(field_map.title, np.where(inclusion_maps[field_map.title], np.nan, field_map.values))
+            for field_map in field_maps]
+
 def save_figures(problem, results, applied_macro_strain, macro_stress_errors=None, loaded_components=None):
     clusters, reference = problem.fft_tfa.clusters, problem.reference
     plots.plot_cross_section(get_element_map(clusters, clusters.materials.material_ids, problem.mesh.discretization),
@@ -470,30 +482,26 @@ def save_figures(problem, results, applied_macro_strain, macro_stress_errors=Non
         plots.plot_macro_stress_errors(macro_stress_errors, loaded_components, len(applied_macro_strain),
                                        config.output_folder / "macro_stress_error.png")
 
-    # The maps compare the same load: the last step every method completed. With von_mises_matrix_only the inclusion's
-    # elements have no von Mises value (NaN), so the maps grey them out and take their limits from the matrix. The
-    # reference keeps only its last step's fields, so it shows when every method reached that step. Each method's map
-    # lies on its own elements (Spectral LS's may differ from the mesh's).
+    # The maps compare the same load: the last step every method completed. With field_maps_matrix_only the inclusion's
+    # elements have no value (NaN), so the maps grey them out and take their limits from the matrix. The reference
+    # keeps only its last step's fields, so it shows when every method reached that step. Each method's map lies on
+    # its own elements (Spectral LS's may differ from the mesh's).
     step_count = min(result.completed_step_count for result in results.values())
     show_reference = reference is not None and step_count == len(applied_macro_strain)
     discretizations = {method: get_method_discretization(problem, method) for method in results}
     inclusion_elements = get_element_map(clusters, clusters.materials.material_ids, problem.mesh.discretization) == 1
-    von_mises_maps = []
+    inclusion_maps = {method: get_element_map(result.clusters, result.clusters.materials.material_ids,
+                                              discretizations[method]) == 1 for method, result in results.items()}
+    von_mises_maps = [plots.FieldMap(method, get_element_map(
+        result.clusters, get_von_mises_stress(result.cluster_stress_per_step[step_count - 1]) / 1e6,
+        discretizations[method])) for method, result in results.items()]
     if show_reference:
-        values = get_reference_map(reference, get_von_mises_stress(reference.stress) / 1e6)
-        if config.von_mises_matrix_only:
-            values = np.where(get_reference_map(reference, reference.material_ids) == 1, np.nan, values)
-        von_mises_maps.append(plots.FieldMap("Reference", values))
-    for method, result in results.items():
-        values = get_element_map(result.clusters,
-                                 get_von_mises_stress(result.cluster_stress_per_step[step_count - 1]) / 1e6,
-                                 discretizations[method])
-        if config.von_mises_matrix_only:
-            values = np.where(get_element_map(result.clusters, result.clusters.materials.material_ids,
-                                              discretizations[method]) == 1, np.nan, values)
-        von_mises_maps.append(plots.FieldMap(method, values))
+        inclusion_maps["Reference"] = get_reference_map(reference, reference.material_ids) == 1
+        von_mises_maps.insert(0, plots.FieldMap(
+            "Reference", get_reference_map(reference, get_von_mises_stress(reference.stress) / 1e6)))
+    von_mises_maps = get_matrix_only(von_mises_maps, inclusion_maps)
     plots.plot_field_maps(von_mises_maps,
-                          "von Mises stress in the matrix (MPa)" if config.von_mises_matrix_only
+                          "von Mises stress in the matrix (MPa)" if config.field_maps_matrix_only
                           else "von Mises stress (MPa)", plots.von_mises_colormap,
                           step_count, len(applied_macro_strain),
                           *get_color_limits(von_mises_maps, *config.von_mises_range_MPa),
@@ -507,9 +515,11 @@ def save_figures(problem, results, applied_macro_strain, macro_stress_errors=Non
     # The profile follows the middle row of the mesh's elements, which the reference's subdivide; a map on other
     # elements (Spectral LS's) shows its row at that height.
     profile_height = (config.elements_per_side // 2 + 0.5) / config.elements_per_side
-    plots.plot_field_maps(plastic_strain_maps, "Accumulated plastic strain (%)", plots.plastic_strain_colormap,
+    # The contour greys the inclusion as the stress contour does; the profile keeps every value.
+    plastic_strain_contours = get_matrix_only(plastic_strain_maps, inclusion_maps)
+    plots.plot_field_maps(plastic_strain_contours, "Accumulated plastic strain (%)", plots.plastic_strain_colormap,
                           step_count, len(applied_macro_strain),
-                          *get_color_limits(plastic_strain_maps, *config.plastic_strain_range_percent),
+                          *get_color_limits(plastic_strain_contours, *config.plastic_strain_range_percent),
                           config.output_folder / "plastic_strain.png")
     inclusion_map = (get_reference_map(reference, reference.material_ids) == 1 if show_reference
                      else inclusion_elements)

@@ -45,12 +45,14 @@ inclusion_radius            = 0.35e-3
 # their solution is known exactly.
 layer_thickness             = 0.5e-3
 # "random fibers": fiber_count equal fibers through the thickness, together fiber_volume_fraction of the cell, at
-# random centres (fiber_seed), each kept if it stays fiber_gap_elements element widths clear of the others across the
-# periodic cell. Placing jams near 55 % of the cell, less with a gap.
-fiber_count                 = 50
-fiber_volume_fraction       = 0.35
-fiber_gap_elements          = 2
-fiber_seed                  = 0
+# random centres (fiber_seed), each kept if it stays fiber_gap (a fraction of the domain side, so the placing does not
+# depend on any mesh) clear of the others across the periodic cell. That placing jams near 55 % of the cell (fibers
+# with half the gap around each); past it, the remaining fibers go at random and all are pushed apart until none
+# overlap (fe.get_fiber_centres), which reaches about 80 %.
+fiber_count                 = 100
+fiber_volume_fraction       = 0.50
+fiber_gap                   = 1 / 128
+fiber_seed                  = 1
 
 # The grids (table above). A shape constant along z (fiber, laminate, random fibers) gets elements_per_side² ×
 # elements_along_z elements (one layer is exact) and partitions_per_side² × partitions_along_z partitions (1: columns);
@@ -60,17 +62,17 @@ fiber_seed                  = 0
 # features stay on the mesh).
 elements_per_side           = 128
 elements_along_z            = 1
-partitions_per_side         = 4
+partitions_per_side         = 8
 partitions_along_z          = 1
-spectral_ls_elements_per_side = 64
+spectral_ls_elements_per_side = 128
 
 # The macroscopic strain (ε11, ε22, ε33, γ12, γ23, γ13) reaches max_macro_strain in strain_increment_count equal steps.
 # load_path_shape is
 #   "monotonic"  0 -> max
 #   "cyclic"     0 -> +max -> -max -> 0, 4 × strain_increment_count steps: unloading and reverse yielding
-max_macro_strain            = np.array([0.05, 0.0, 0.0, 0.0, 0.0, 0.0])
-strain_increment_count      = 60
-load_path_shape             = "monotonic"
+max_macro_strain            = np.array([0.025, 0.025, 0.0, 0.0, 0.0, 0.0])
+strain_increment_count      = 50
+load_path_shape             = "cyclic"
 
 ## ------- Methods ------- ##
 
@@ -104,9 +106,9 @@ reference_elements_per_side = 512
 fft_tfa_clusters            = "partition k-means"
 tfa_clusters                = "partition k-means"
 cp_clusters                 = "k-means"
-k_means_matrix_clusters     = 20
+k_means_matrix_clusters     = 16
 k_means_inclusion_clusters  = 1
-k_means_matrix_clusters_per_partition = 20
+k_means_matrix_clusters_per_partition = 8
 k_means_inclusion_clusters_per_partition = 1
 
 # FFT-TFA keeps the exact interaction among each partition's clusters, and with fft_tfa_neighbour_blocks also with
@@ -127,15 +129,15 @@ cp_reference_stiffness_scale = 0.05
 
 # Colour-scale ranges (min, max) of the von Mises stress maps (MPa) and the accumulated plastic strain maps (%), to
 # share a scale across runs. An end left at None comes from the finest field (the reference, else Spectral LS, else
-# every map); values beyond an end take its colour. von_mises_matrix_only greys out the inclusion, whose far larger
-# stresses would otherwise set the scale.
+# every map); values beyond an end take its colour. field_maps_matrix_only greys out the inclusion in both maps
+# (its far larger stresses would otherwise set the stress scale).
 von_mises_range_MPa         = (None, None)
-von_mises_matrix_only       = True
+field_maps_matrix_only      = True
 plastic_strain_range_percent = (None, None)
 
 # With the reference on, the macroscopic stress errors (macro_stress_error.png, errors.txt) cover each stress component
 # whose reference value reaches loaded_stress_fraction of the largest one somewhere along the path.
-loaded_stress_fraction      = 0.25
+loaded_stress_fraction      = 0.05
 
 ## ------- Materials ------- ##
 
@@ -185,8 +187,12 @@ cp_eigenstrain_max_iterations = 50
 k_means_iterations          = 50
 k_means_seed                = 0
 
-# Random fibers: placing stops with an error after this many random centres.
+# Random fibers: random sequential addition gives up after fiber_placement_attempts random centres; pushing apart
+# then moves overlapping pairs to (1 + fiber_push_margin) times their minimum distance, and stops with an error after
+# fiber_push_passes passes.
 fiber_placement_attempts    = 100000
+fiber_push_margin           = 1e-3
+fiber_push_passes           = 10000
 
 # Every method solves each load step by Newton, each Newton correction by a Krylov method, with these settings: GMRES,
 # or conjugate gradients for Spectral LS, whose Newton system is symmetric (notes/2_ls_model.md section 7.7). A step has
@@ -200,7 +206,7 @@ newton_max_iterations       = 50
 # Both Krylov methods stop below krylov_tolerance times the Newton residual. GMRES restarts every gmres_restart
 # iterations, at most gmres_max_restarts times (None: scipy's default); CG takes at most spectral_ls_cg_max_iterations
 # (None: ten times the unknowns, as scipy's).
-krylov_tolerance            = 1e-3
+krylov_tolerance            = 1e-6
 gmres_restart               = 50
 gmres_max_restarts          = None
 spectral_ls_cg_max_iterations = None
@@ -264,14 +270,17 @@ def check_inputs():
             raise ValueError("The fiber layer's thickness must be positive and below the domain side, so matrix "
                              f"surrounds it. Got {layer_thickness}.")
     elif inclusion_shape == "random fibers":
-        if min(fiber_count, fiber_placement_attempts) < 1 or fiber_gap_elements < 0:
-            raise ValueError("fiber_count and fiber_placement_attempts must be at least 1, fiber_gap_elements at "
-                             "least 0.")
+        if min(fiber_count, fiber_placement_attempts, fiber_push_passes) < 1 or fiber_gap < 0:
+            raise ValueError("fiber_count, fiber_placement_attempts and fiber_push_passes must be at least 1, "
+                             "fiber_gap at least 0.")
+        # At zero, pushed pairs only approach their minimum distance.
+        if not fiber_push_margin > 0:
+            raise ValueError(f"fiber_push_margin must be positive. Got {fiber_push_margin}.")
         if not 0 < fiber_volume_fraction < 1:
             raise ValueError(f"fiber_volume_fraction must lie between 0 and 1. Got {fiber_volume_fraction}.")
         # A fiber and its own periodic image must keep the gap too.
         fiber_diameter = 2 * domain_side_length * np.sqrt(fiber_volume_fraction / (np.pi * fiber_count))
-        if fiber_diameter + fiber_gap_elements * domain_side_length / elements_per_side >= domain_side_length:
+        if fiber_diameter + fiber_gap * domain_side_length >= domain_side_length:
             raise ValueError("A fiber's diameter plus the gap must be below the domain side, so a fiber does not touch "
                              "its own periodic image.")
     else:

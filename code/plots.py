@@ -261,10 +261,9 @@ def plot_cross_section(element_material_ids, cell_maps, plot_path):
 
 field_map_style = {**figure_style, 'font.size': 13, 'axes.titlesize': 15, 'figure.titlesize': 14}
 field_map_panel_size = 4.2
-# A colormap per field, so a stress map is never read as a strain map: jet for the von Mises stress, magma for the
-# accumulated plastic strain (dark where the matrix stays elastic, bright in the plastic bands).
+# The same colormap for both fields, so the two figures read alike; each colour bar's label names its field.
 von_mises_colormap = 'jet'
-plastic_strain_colormap = 'magma'
+plastic_strain_colormap = 'jet'
 field_map_hidden_color = '0.8'    # elements a map leaves out (NaN), such as the inclusion in a matrix-only map
 
 class FieldMap(NamedTuple):

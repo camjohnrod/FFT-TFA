@@ -26,9 +26,9 @@ and papers, never the history of a decision.
   elsewhere. config.py runs from the settings changed most to those changed least (problem, methods, figures,
   materials, solver details, checks), after a table of what each grid means to each method. A setting of one method
   carries its prefix (`fft_tfa_`, `spectral_ls_`, `tfa_`, `cp_`, `k_means_`), and the same setting for several
-  methods sits as a group. Exceptions: plot appearance in `plots.py`, check problems in `check.py`. config.py is often left at a local
-  study configuration; "default" means `git show HEAD:code/config.py`. The user edits it while you work: change it by
-  targeted edits, never by rewriting it from an earlier read.
+  methods sits as a group. Exceptions: plot appearance in `plots.py`, check problems in `check.py`. config.py is
+  often left at a local study configuration; "default" means `git show HEAD:code/config.py`. The user edits it
+  while you work: change it by targeted edits, never by rewriting it from an earlier read.
 - **FFT-TFA is separate from CP** (`fft_tfa_model.py`), so CP can be deleted without touching it: FFT-TFA uses only
   `ls_model`'s shared kernel code (`apply_on_lattice`, the Moulinec–Suquet kernel, `get_P0_transformed`, the block
   helpers), never CP's. Its reference medium is always the matrix (no setting), its regions are the matrix clusters
@@ -187,12 +187,16 @@ subclass's `get_D` (CP's is LS-27; Spectral LS's correction is solved by CG in C
 ## Status
 
 The roadmap is in the README's "Status and roadmap"; keep the two in step. Mixed partitions must stay O(M log M).
+Memory matters as much as time: FFT-TFA must keep needing less than SCA, TFA and Spectral LS, which holds only for
+clusters local to partitions (README, "Memory"); weigh new features by how their memory scales, in 3D too.
 Tried and rejected, not to redo without the user asking: block-Jacobi preconditioning on top of the Fourier one (CP
 stopped less accurately), geometric (interface-aware) split rules for mixed partitions, single-phase-only partitions,
 and CP's cluster eigenstrains as Newton unknowns with a polarization-form correction (more Newton iterations, a 20–50×
-less accurate stop; LS note section 7.6). Declined: polarization shapes from the elastic strain concentration plus
-one polarization per piece (needs offline fine-mesh solves, and a near/far split of the interaction to be fast); the
-user wants a richer polarization that needs neither (README, "Open").
+less accurate stop; LS note section 7.6). For FFT-TFA (README, open points): one fiber part per fiber in each
+partition (stiffer and less accurate), face neighbours only (well short of all neighbours locally, no help in 3D), and
+the consistent variant again, against full reach (no better). Declined: polarization shapes from the elastic strain
+concentration plus one polarization per piece (needs offline fine-mesh solves, and a near/far split of the
+interaction to be fast); the user wants a richer polarization that needs neither (README, "Open").
 
 Known behaviour, model error rather than bugs (FFT-TFA's in the LS note, section 10.5):
 - **FFT-TFA's truncated interaction fails the patch test** where a partition holds several pieces (a uniform

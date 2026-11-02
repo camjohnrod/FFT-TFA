@@ -45,9 +45,9 @@ def get_periodic_offsets(points, centre):
     return offsets - config.domain_side_length * np.round(offsets / config.domain_side_length)
 
 def get_fiber_centres():
-    # The (x, y) centres of the "random fibers", one row each, by random sequential addition (config.py).
-    element_side_length = config.domain_side_length / config.elements_per_side
-    minimum_distance = 2 * get_fiber_radius() + config.fiber_gap_elements * element_side_length
+    # The (x, y) centres of the "random fibers", one row each (config.py): by random sequential addition, and if that
+    # jams, the rest at random and every overlap pushed apart.
+    minimum_distance = 2 * get_fiber_radius() + config.fiber_gap * config.domain_side_length
     random_generator = np.random.default_rng(config.fiber_seed)
     fiber_centres = np.empty((0, 2))
     for _ in range(config.fiber_placement_attempts):
@@ -56,12 +56,25 @@ def get_fiber_centres():
             fiber_centres = np.vstack([fiber_centres, candidate])
             if len(fiber_centres) == config.fiber_count:
                 return fiber_centres
-    # Random sequential addition of discs jams near 0.55 of the area, here discs of the fiber plus half the gap.
+    fiber_centres = np.vstack([fiber_centres, random_generator.uniform(0, config.domain_side_length,
+                                                                       (config.fiber_count - len(fiber_centres), 2))])
+    # Each pass moves both fibers of every pair closer than minimum_distance apart by half the shortfall from
+    # (1 + fiber_push_margin) × minimum_distance, all pairs at once: pushing to minimum_distance itself would only
+    # approach it.
+    for _ in range(config.fiber_push_passes):
+        offsets = get_periodic_offsets(fiber_centres[None, :, :], fiber_centres[:, None, :])
+        distances = np.sqrt(np.sum(offsets**2, axis=2))
+        np.fill_diagonal(distances, np.inf)
+        if np.all(distances >= minimum_distance):
+            return fiber_centres
+        shortfalls = np.maximum((1 + config.fiber_push_margin) * minimum_distance - distances, 0)
+        fiber_centres = ((fiber_centres - np.sum((shortfalls / (2 * distances))[:, :, None] * offsets, axis=1))
+                         % config.domain_side_length)
     padded_fraction = config.fiber_count * np.pi * (minimum_distance / 2)**2 / config.domain_side_length**2
-    raise ValueError(f"Random sequential addition placed only {len(fiber_centres)} of {config.fiber_count} fibers in "
-                     f"{config.fiber_placement_attempts} attempts. The fibers with half the gap around each would "
-                     f"fill {padded_fraction:.3g} of the cell, and this placement jams near 0.55: lower "
-                     "fiber_volume_fraction or fiber_gap_elements, or raise fiber_placement_attempts.")
+    raise ValueError(f"Pushing the fibers apart left some overlapping after {config.fiber_push_passes} passes. The "
+                     f"fibers with half the gap around each would fill {padded_fraction:.3g} of the cell (at most "
+                     "0.907, hexagonal packing): lower fiber_volume_fraction or fiber_gap, or raise "
+                     "fiber_push_passes.")
 
 def is_inside_inclusion(centres):
     # Whether each point, one (x, y, z) row each, lies inside the inclusion.
@@ -299,9 +312,10 @@ def smooth_within_phases(mesh, element_features):
 
 def label_k_means(mesh, element_features):
     # Every element's cluster by k-means on its features (one row per element; the elastic strain concentration,
-    # Liu–Bessa–Liu 2016, section 2.2.1, smoothed by smooth_within_phases), in each phase apart, so every cluster lies in one phase: up to
-    # k_means_matrix_clusters in the matrix, then up to k_means_inclusion_clusters in the inclusion. A phase gets no
-    # more clusters than it has distinct features, and clusters k-means leaves empty are dropped.
+    # Liu–Bessa–Liu 2016, section 2.2.1, smoothed by smooth_within_phases), in each phase apart, so every cluster lies
+    # in one phase: up to k_means_matrix_clusters in the matrix, then up to k_means_inclusion_clusters in the
+    # inclusion. A phase gets no more clusters than it has distinct features, and clusters k-means leaves empty are
+    # dropped.
     rng = np.random.default_rng(config.k_means_seed)
     element_cluster = np.zeros(len(element_features), dtype=int)
     first_cluster = 0

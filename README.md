@@ -82,7 +82,7 @@ The ones you will change most:
   it doesn't. FFT-TFA's reference medium is always the matrix.
 - **Figures:** colour ranges of the maps (unset ends follow the reference's map, or Spectral LS's when no map is
   finer), and
-  `von_mises_matrix_only` (default on) to grey out the inclusion in the von Mises maps.
+  `field_maps_matrix_only` (default on) to grey out the inclusion in the von Mises and plastic strain maps.
 - **Threads:** `thread_count` (default 1) caps every method alike.
 
 ## Output
@@ -161,7 +161,10 @@ cell-wide k-means clusters for every method but Spectral LS, and the checks.
 5. **Cost at equal accuracy.** Time and memory against resolution for each method, at the same error, in 2D and 3D.
    An FFT on n lattice points costs about n log n, with n the elements for Spectral LS and the partitions for FFT-TFA,
    so Spectral LS on a mesh as coarse as FFT-TFA's partitions costs about as much per iteration: the two differ in
-   accuracy, FFT-TFA seeing the fine geometry through each partition's pieces and its corrections.
+   accuracy, FFT-TFA seeing the fine geometry through each partition's pieces and its corrections. Memory counts as
+   much as time: FFT-TFA's case rests on needing less than SCA and TFA, whose interaction is dense in the clusters,
+   and than Spectral LS, which stores every element (see Memory below). Spectral LS here keeps several 6 × 6 arrays
+   per element (its kernel, the LS-24 operator, stiffness, tangent); a fair comparison counts a leaner one.
 6. **Remove CP** once FFT-TFA has replaced it: `include_cp`, its settings, its part of `ls_model.py` and its checks.
 
 Open for FFT-TFA (`notes/2_ls_model.md`, section 10.5):
@@ -170,11 +173,34 @@ Open for FFT-TFA (`notes/2_ls_model.md`, section 10.5):
   (the patch test), and neighbour blocks can make that worse; a consistent variant that corrects only each
   partition's deviation from its mean passes it, but is less accurate with neighbour blocks on the 126-fiber cell
   and the sphere (as accurate without). Coherent structures
-  that cut partitions (a laminate along its layers) keep a far-field error the corrections do not reach.
+  that cut partitions (a laminate along its layers) keep a far-field error the corrections do not reach. Against
+  FFT-TFA at full reach (the truncation alone), neighbour blocks help the matrix clusters in 2D and 3D, and face
+  neighbours alone fall well short of all neighbours; in 3D the inclusion's error can grow with more neighbours (the
+  sphere under shear). Measured the same way, the consistent variant does not fix it: worse in 2D, about three times
+  worse in the 3D inclusion under uniaxial load, better only in some 3D shear cases, and not exact even at full reach
+  (3D inclusion 14–23 %): it trades the patch-test leftover for an error of the same size. Untested idea: keep the
+  current corrections and add one term per piece that cancels exactly the leftover a uniform polarization leaves (a
+  6 × 6 block per piece, known offline).
 - **Inclusion polarization:** one polarization per inclusion piece; σ33 along z-invariant fibers runs low as for CP,
-  less so.
+  less so. Splitting a partition's fiber part by fiber makes FFT-TFA stiffer and less accurate, on partition phases
+  and partition k-means alike, at full reach too: with the matrix as C0, a coarser fiber polarization errs soft
+  (Brisard–Dormieux 2010's Hashin–Shtrikman bound), offsetting the stiff error of one eigenstrain per matrix cluster,
+  which dominates. To do: refine the matrix clusters until refining the fiber helps, so that accuracy does not rest
+  on the two cancelling.
 - **Material states:** how FFT-TFA's and TFA's accuracy and cost change with the number of clusters; with clusters
   of a few elements in one partition the clustered model can have several solutions (TFA too).
+- **Memory:** online, FFT-TFA stores the partition kernel and one 6 × 6 correction block per pair of pieces in the
+  same or (with neighbour blocks) neighbouring partitions, so its memory grows with the partitions times the square
+  of the pieces per partition (27 times more with neighbour blocks in 3D), not with the elements. That holds only for
+  clusters that stay local: a cell-wide cluster has a piece in most partitions, so each partition holds pieces of
+  nearly every cluster, and SCA on those few clusters (a dense interaction, their count squared) needs far less.
+  Offline, two steps need more than they should. `get_correction_blocks` cross-correlates the pieces of every
+  partition at once, which in 3D with partition k-means takes more than a Spectral LS solve of the whole load path.
+  To do before any 3D study: build them a chunk of partitions at a time (a chunk size or memory budget in
+  `config.py`). The block-Jacobi blocks (`get_strain_change_within_groups`) list every
+  pair of pieces within a cluster, quadratic in the partitions for a cell-wide cluster, where one FFT per cluster on
+  the partition lattice gives the same sums. Every k-means setting also needs six elastic Spectral LS solves on the
+  elements, the floor of its offline memory.
 - **k-means laminate check:** a laminate's matrix strain concentration is uniform, so k-means can divide the matrix
   only on solver noise. Since Spectral LS solves by conjugate gradients the noise is at round-off and the matrix gets
   one cluster, so the check no longer tests matrix clusters that divide partitions; it needs a split that does not
