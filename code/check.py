@@ -1,4 +1,4 @@
-# Checks the code on seven small problems, each solved by every method (FFT-TFA, Spectral LS, TFA, CP). Run it after
+# Checks the code on seven small problems, each solved by every method (FFT-TFA, Spectral LS, TFA). Run it after
 # any change to the code:
 #
 #   python code/check.py         run the checks (about a minute)
@@ -10,12 +10,10 @@
 #                 (below) is known, and every method must reproduce it in every cluster; Spectral LS on its own
 #                 coarser elements (9 per side against the mesh's 27), which resolve the layer exactly.
 #   cut laminate  a laminate whose interfaces cut through partitions, so partitions there hold both phases, loaded in
-#                 transverse shear. Spectral LS and TFA must reproduce the exact solution in every cluster. CP shares a
-#                 mixed partition's strain at equal polarization against C0, which is exact here only as C0 → 0
-#                 (equal stress); FFT-TFA represents the exact polarization, but its interaction is exact only
-#                 within reach of each partition, and the cut partitions line up along the layer, so their far-field
-#                 error adds up instead of decaying (notes/2_ls_model.md section 10.5). Both differences are reported
-#                 but not judged.
+#                 transverse shear. Spectral LS and TFA must reproduce the exact solution in every cluster. FFT-TFA
+#                 represents the exact polarization, but its interaction is exact only within reach of each partition,
+#                 and the cut partitions line up along the layer, so their far-field error adds up instead of decaying
+#                 (notes/2_ls_model.md section 10.5). Its difference is reported but not judged.
 #   fiber         a circular fiber under tension and shear, the kind of problem config.py sets up by default, with a
 #                 band of mixed partitions around the fiber.
 #   z laminate    a laminate with interfaces normal to z, so the geometry varies along z: meshed and partitioned in 3D,
@@ -35,8 +33,7 @@
 # On all seven, every method must complete every load step and, once a reference is saved, reproduce it bit for bit.
 # On every problem, FFT-TFA's interaction with every partition within reach (FT-2, FT-3) must equal the element-level
 # LS operator averaged over its regions and clusters, computed here from the elements: a wrong offset, pair count,
-# correction block or average fails there. Where CP's partitions hold several pieces (cut laminate, fiber, sphere,
-# k-means), CP's piece law must match LS-25 computed independently, piece by piece (notes/2_ls_model.md section 4.5).
+# correction block or average fails there.
 # On the fiber and the k-means sphere, every method must stop at the same accuracy: its stresses at
 # convergence_tolerance within stopping_accuracy_tolerance of its own solution at stopping_check_tolerance. (Not on
 # problems with clusters of a few elements in one partition, such as the sphere's partition k-means: there a cluster
@@ -70,7 +67,7 @@ from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_u
 reference_path = pathlib.Path(__file__).parent / "check_reference.npz"
 
 # Every config.py input that shapes the problems or the solvers, pinned to a fixed value: a 27 × 27 element mesh
-# with 9 × 9 partitions, a yielding and hardening matrix, every method switched on (CP too).
+# with 9 × 9 partitions, a yielding and hardening matrix, every method switched on.
 pinned_inputs = {
     "domain_side_length": 1e-3, "inclusion_shape": "fiber", "inclusion_radius": 0.35e-3,
     "layer_thickness": (3 / 9) * 1e-3, "elements_per_side": 27, "elements_along_z": 1,
@@ -80,17 +77,13 @@ pinned_inputs = {
     "inclusion_hardening_modulus": 0.0, "matrix_hardening_modulus": 10e6,
     "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0]), "strain_increment_count": 12,
     "load_path_shape": "monotonic",
-    "include_spectral_ls": True, "include_tfa": True, "include_cp": True, "fft_tfa_clusters": "partition phases",
-    "fft_tfa_neighbour_blocks": False, "cp_reference_stiffness": "matrix",
-    "cp_reference_stiffness_scale": 0.01, "spectral_ls_reference_stiffness": "midpoint",
-    "cp_fourier_preconditioner": True,
-    "spectral_ls_fourier_preconditioner": False,
+    "include_spectral_ls": True, "include_tfa": True, "fft_tfa_clusters": "partition phases",
+    "fft_tfa_neighbour_blocks": False, "spectral_ls_reference_stiffness": "midpoint",
     "convergence_tolerance": 1e-6, "residual_strain_scale_floor": 1e-4, "newton_max_iterations": 50,
     "krylov_tolerance": 1e-3, "gmres_restart": 50, "gmres_max_restarts": None, "spectral_ls_cg_max_iterations": None,
     "ls_divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "fe_columns_per_solve": 100,
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
-    "cp_eigenstrain_tolerance": 1e-12, "cp_eigenstrain_max_iterations": 50,
-    "cp_clusters": "partition phases", "tfa_clusters": "partition phases", "k_means_matrix_clusters": 8,
+    "tfa_clusters": "partition phases", "k_means_matrix_clusters": 8,
     "k_means_inclusion_clusters": 1, "k_means_matrix_clusters_per_partition": 2,
     "k_means_inclusion_clusters_per_partition": 1, "k_means_iterations": 50, "k_means_seed": 0,
     "include_reference": False, "reference_elements_per_side": 27}
@@ -99,11 +92,10 @@ pinned_inputs = {
 check_problems = {
     # A layer 3 partitions thick, loaded so that every interface-normal component (ε11, γ12, γ13) takes part, over a
     # cyclic path: the only test of unloading, reverse yielding and zero imposed strain. 4 increments per quarter
-    # still yield at both zero crossings. The homogenized C0 is the only test of that choice. Spectral LS runs on 9
-    # elements per side, the layer 3 of them thick: the only test of Spectral LS coarser than the mesh.
+    # still yield at both zero crossings. Spectral LS runs on 9 elements per side, the layer 3 of them thick: the only
+    # test of Spectral LS coarser than the mesh.
     "laminate": {"inclusion_shape": "laminate", "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.01]),
-                 "load_path_shape": "cyclic", "strain_increment_count": 4, "cp_reference_stiffness": "homogenized",
-                 "spectral_ls_elements_per_side": 9},
+                 "load_path_shape": "cyclic", "strain_increment_count": 4, "spectral_ls_elements_per_side": 9},
     # A layer 7 elements thick, so each interface cuts a partition (2/3 fiber). In transverse shear γ12 both phases
     # carry the same stress, so the equal-stress split is exact there and every method must match the exact solution.
     "cut laminate": {"inclusion_shape": "laminate", "layer_thickness": (7 / 27) * 1e-3,
@@ -122,26 +114,23 @@ check_problems = {
     "sphere": {"inclusion_shape": "sphere", "elements_per_side": 12, "partitions_per_side": 4,
                "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03]),
                "fft_tfa_clusters": "partition k-means"},
-    # The laminate with k-means clusters for FFT-TFA, CP and TFA, up to two per phase (the inclusion's strain
+    # The laminate with k-means clusters for FFT-TFA and TFA, up to two per phase (the inclusion's strain
     # concentration is uniform, so it gets one). Each phase's exact state is uniform, so every method must still
     # reproduce it, however k-means divides a phase (FFT-TFA only at full reach); the matrix clusters cut through
     # partitions, so FFT-TFA's matrix regions span partitions.
     "k-means laminate": {"inclusion_shape": "laminate",
                          "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.01]),
                          "load_path_shape": "cyclic", "strain_increment_count": 4, "fft_tfa_clusters": "k-means",
-                         "cp_clusters": "k-means", "tfa_clusters": "k-means", "k_means_matrix_clusters": 2,
-                         "k_means_inclusion_clusters": 2},
-    # The sphere with k-means clusters for FFT-TFA, CP and TFA, so clusters span partitions, and some clusters
-    # sharing a partition also fill others: the only test of LS-25's coupling across partitions, and of FFT-TFA's
+                         "tfa_clusters": "k-means", "k_means_matrix_clusters": 2, "k_means_inclusion_clusters": 2},
+    # The sphere with k-means clusters for FFT-TFA and TFA, so clusters span partitions: the only test of FFT-TFA's
     # neighbour blocks along a load path.
     "k-means sphere": {"inclusion_shape": "sphere", "elements_per_side": 12, "partitions_per_side": 4,
                        "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03]),
-                       "fft_tfa_clusters": "k-means", "fft_tfa_neighbour_blocks": True, "cp_clusters": "k-means",
-                       "tfa_clusters": "k-means"},
+                       "fft_tfa_clusters": "k-means", "fft_tfa_neighbour_blocks": True, "tfa_clusters": "k-means"},
 }
 
 # The methods whose model is not exact on a problem: compared with the exact solution, but not judged by it.
-inexact_methods = {"cut laminate": ("FFT-TFA", "CP"), "k-means laminate": ("FFT-TFA",)}
+inexact_methods = {"cut laminate": ("FFT-TFA",), "k-means laminate": ("FFT-TFA",)}
 
 # The problems on which every method's stopping accuracy is checked.
 stopping_check_problems = ("fiber", "k-means sphere")
@@ -225,41 +214,6 @@ def get_laminate_error(result, exact_phase_stress):
         errors.append(get_relative_difference(result.cluster_stress_per_step[:, phase_clusters],
                                               exact_cluster_stress[:, phase_clusters]))
     return max(errors)
-
-## ------- Partition Law ------- ##
-
-def get_partition_law_error(clusters, reference_L):
-    # CP's piece law (LS-25) against its defining equations, at random partition strains and cluster eigenstrains,
-    # computed here piece by piece, with no code of ls_model's: every piece p of cluster g in partition A carries the
-    # partition's polarization, σ_p − C0 ε_p = τ_A with σ_p = L_g (ε_p − μ_g), so ε_p = (L_g − C0)⁻¹ (τ_A + L_g μ_g),
-    # and the pieces' strains average to the partition strain, which gives τ_A. The solver's sparse matrices must then
-    # give each cluster's average strain (E ε + F μ) and each partition's equivalent eigenstrain −C0⁻¹ τ_A
-    # (D_e (ε − Λ μ)). The largest relative difference; None when no partition holds several pieces.
-    if np.all(np.bincount(clusters.piece_partition) == 1):
-        return None
-    rng = np.random.default_rng(0)
-    strain = 1e-3 * rng.standard_normal((clusters.partition_count, 6))
-    eigenstrain = 1e-3 * rng.standard_normal((clusters.cluster_count, 6))
-
-    share = clusters.piece_volume_fraction[:, None]
-    piece_L = clusters.materials.L[clusters.piece_cluster]
-    piece_compliance = np.linalg.inv(piece_L - reference_L)
-    piece_eigenstrain = np.einsum('pij,pj->pi', piece_compliance @ piece_L, eigenstrain[clusters.piece_cluster])
-    partition_compliance = np.zeros((clusters.partition_count, 6, 6))
-    np.add.at(partition_compliance, clusters.piece_partition, share[:, :, None] * piece_compliance)
-    eigenstrain_part = np.zeros_like(strain)
-    np.add.at(eigenstrain_part, clusters.piece_partition, share * piece_eigenstrain)
-    polarization = np.linalg.solve(partition_compliance, (strain - eigenstrain_part)[..., None])[..., 0]
-    piece_strain = (np.einsum('pij,pj->pi', piece_compliance, polarization[clusters.piece_partition])
-                    + piece_eigenstrain)
-    cluster_strain = np.zeros_like(eigenstrain)
-    np.add.at(cluster_strain, clusters.piece_cluster, share * piece_strain)
-    cluster_strain /= clusters.volume[:, None]
-
-    law = ls_model.get_piece_law(clusters, reference_L)
-    return max(get_relative_difference(ls_model.get_cluster_strain(strain, eigenstrain, law), cluster_strain),
-               get_relative_difference(ls_model.get_equivalent_eigenstrain(strain, eigenstrain, law),
-                                       -np.linalg.solve(reference_L, polarization.T).T))
 
 ## ------- FFT-TFA's Interaction ------- ##
 
@@ -407,12 +361,6 @@ def main():
                                          f"{problem_name}: {method} stops within {error:.1e} of its solution at "
                                          f"tolerance {config.stopping_check_tolerance:.0e} (tolerance "
                                          f"{config.stopping_accuracy_tolerance:.0e})")
-            law_error = get_partition_law_error(problem.cp_lattice.clusters, problem.cp_lattice.reference_L)
-            if law_error is not None:
-                all_passed &= report(law_error <= config.piece_law_check_tolerance,
-                                     f"{problem_name}: CP's piece law matches LS-25 (largest relative difference "
-                                     f"{law_error:.1e}, tolerance "
-                                     f"{config.piece_law_check_tolerance:.0e})")
             arrays = get_result_arrays(problem_name, results)
             result_arrays.update(arrays)
             if reference is not None and mode == "check":

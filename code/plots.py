@@ -19,14 +19,12 @@ figure_style = {'font.family': 'serif', 'font.serif': ['cmr10'], 'mathtext.fonts
 # One look per line, in legend order: told apart by colour (Okabe–Ito, whose pairs stay distinct under simulated
 # colour blindness) and by dash pattern. The reference, when it runs, is solid black, drawn first so every method shows
 # on top of it. FFT-TFA, the method being tested, is dash-dotted, Spectral LS dotted. TFA, the baseline, is a thinner
-# dash drawn on top, so it stays visible where the curves agree. CP, the earlier method, keeps its colour,
-# dash-dot-dotted.
+# dash drawn on top, so it stays visible where the curves agree.
 method_styles = {
     "Reference":   {'color': 'black', 'linestyle': '-', 'zorder': 0},
     "FFT-TFA":     {'color': '#009E73', 'linestyle': (0, (6, 2, 1.5, 2)), 'zorder': 2},
     "Spectral LS": {'color': '#0072B2', 'linestyle': (0, (1, 1.6)), 'dash_capstyle': 'round', 'zorder': 3},
     "TFA":         {'color': '#CC79A7', 'linestyle': (0, (5, 3)), 'linewidth': 1.4, 'zorder': 4},
-    "CP":          {'color': '#D55E00', 'linestyle': (0, (6, 2, 1.5, 2, 1.5, 2)), 'zorder': 1},
 }
 
 load_path_style = {**figure_style, 'font.size': 12, 'axes.labelsize': 13, 'xtick.labelsize': 11,
@@ -185,8 +183,8 @@ class CellMap(NamedTuple):
 # The kinds of line, drawn in this order, each named in the legend by what it bounds: hairline grey for Spectral LS's
 # voxels, so its fine grid shows without competing, lighter than the clusters' lines so the two read apart; thin dark
 # grey for the clusters (one material state each), visible on the light phases and the cluster colours without
-# drawing the eye; thick black for the partitions of FFT-TFA and CP, the cells of their FFT, drawn on top where the
-# two coincide. Every panel is framed alike.
+# drawing the eye; thick black for FFT-TFA's partitions, the cells of its FFT, drawn on top where the two
+# coincide. Every panel is framed alike.
 boundary_styles = {
     "voxel":     {'label': "voxel", 'color': '0.62', 'linewidth': 0.3},
     "cluster":   {'label': "cluster: uniform eigenstrain", 'color': '0.2', 'linewidth': 0.5},

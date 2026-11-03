@@ -27,8 +27,7 @@ from fe import (Clusters, Discretization, Mesh, get_cached, get_clusters, get_E_
                 get_spectral_discretization, get_spectral_ls_discretization, is_shape_constant_along_z, label_k_means,
                 label_partition_k_means, label_partition_phases, smooth_within_phases)
 from fft_tfa_model import FFTTFASolver, Interaction, get_interaction
-from ls_model import (CPSolver, SpectralLSSolver, get_cp_reference_L, get_elastic_strain_concentration,
-                      get_named_stiffness, get_P0_transformed, get_spectral_reference_L)
+from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_P0_transformed, get_spectral_reference_L
 from material import get_flow_stress, get_unloaded_plastic_state, get_von_mises_stress
 from newton import LoadPathAbandoned, MaterialFullySoftened
 from tfa_model import get_tfa_solver
@@ -38,8 +37,7 @@ from tfa_model import get_tfa_solver
 # Everything a run needs, built from config.py, and what each method's offline step costs:
 #   FFT-TFA      its clusters (config.fft_tfa_clusters) and its interaction on the partitions (fft_tfa_model);
 #   Spectral LS  its element lattice (its own or the mesh's) and clusters, its own reference stiffness and kernel P0;
-#   TFA          its clusters (config.tfa_clusters, its regions) and the FE influence functions E and P on them;
-#   CP           the partitions and its clusters (config.cp_clusters), C0, the partition-averaged kernel P0.
+#   TFA          its clusters (config.tfa_clusters, its regions) and the FE influence functions E and P on them.
 # k-means clusters are found on each element's elastic strain concentration, from Spectral LS's lattice. The reference
 # (config.include_reference) comes from its cache, or is solved once (Reference, below).
 
@@ -55,9 +53,8 @@ class Problem(NamedTuple):
     fft_tfa: Interaction         # FFT-TFA's clusters and interaction
     spectral_lattice: Lattice    # Spectral LS's lattice, None when it is switched off
     tfa_clusters: Clusters       # TFA's regions, None when it is switched off
-    E: np.ndarray                # TFA's influence functions, None when no method needs them
+    E: np.ndarray                # TFA's influence functions, None when it is switched off
     P: np.ndarray
-    cp_lattice: Lattice          # CP's lattice, None when it is switched off
     reference: "Reference"       # the reference's results, None when it is switched off
     matrix_L: np.ndarray         # FFT-TFA's reference medium, the unit of the LS methods' convergence test (LS-24)
     offline_seconds: dict        # by method: everything it needs built, as if it ran alone
@@ -101,8 +98,6 @@ def get_problem():
     settings = {"FFT-TFA": config.fft_tfa_clusters}
     if config.include_tfa:
         settings["TFA"] = config.tfa_clusters
-    if config.include_cp:
-        settings["CP"] = config.cp_clusters
     clusters, cluster_seconds = {}, {}
     for setting in dict.fromkeys(settings.values()):
         start_time = time.perf_counter()
@@ -129,30 +124,14 @@ def get_problem():
                   f"{np.mean(spectral_mesh.element_material_ids):.4g}")
         offline_seconds["Spectral LS"] = time.perf_counter() - start_time
 
-    # E is needed by TFA and by CP's homogenized reference stiffness, P by TFA only; both on TFA's clusters when TFA
-    # runs.
-    tfa_clusters = clusters[config.tfa_clusters] if config.include_tfa else None
-    E, P, build_seconds = None, None, {}
-    cp_needs_E = config.include_cp and config.cp_reference_stiffness == "homogenized"
-    E_clusters = tfa_clusters if config.include_tfa else clusters.get(config.cp_clusters)
-    if config.include_tfa or cp_needs_E:
-        E, P, build_seconds = get_E_and_P(mesh, E_clusters, include_P=config.include_tfa)
+    tfa_clusters, E, P = None, None, None
     if config.include_tfa:
+        tfa_clusters = clusters[config.tfa_clusters]
+        E, P, build_seconds = get_E_and_P(mesh, tfa_clusters)
         offline_seconds["TFA"] += build_seconds["E"] + build_seconds["P"]
 
-    cp_lattice = None
-    if config.include_cp:
-        start_time = time.perf_counter()
-        cp_clusters = clusters[config.cp_clusters]
-        named_clusters = E_clusters if config.cp_reference_stiffness == "homogenized" else cp_clusters
-        reference_L = get_cp_reference_L(get_named_stiffness(named_clusters, E, matrix_L))
-        print(f"CP's C0: C0_1111 = {reference_L[0, 0] / 1e6:.4g} MPa")
-        cp_lattice = Lattice(cp_clusters, reference_L, get_P0_transformed(mesh.discretization, reference_L))
-        offline_seconds["CP"] += time.perf_counter() - start_time + (build_seconds["E"] if cp_needs_E else 0)
-
     reference = get_reference(matrix_L, inclusion_L) if config.include_reference else None
-    return Problem(mesh, fft_tfa, spectral_lattice, tfa_clusters, E, P, cp_lattice, reference, matrix_L,
-                   offline_seconds)
+    return Problem(mesh, fft_tfa, spectral_lattice, tfa_clusters, E, P, reference, matrix_L, offline_seconds)
 
 ## ------- Load Path ------- ##
 
@@ -171,12 +150,9 @@ def get_solvers(problem):
     # Every method config.py switches on, in the order of the table and the figures.
     solvers = {"FFT-TFA": FFTTFASolver(problem.fft_tfa)}
     if config.include_spectral_ls:
-        solvers["Spectral LS"] = SpectralLSSolver(problem.spectral_lattice, problem.matrix_L,
-                                                  config.spectral_ls_fourier_preconditioner)
+        solvers["Spectral LS"] = SpectralLSSolver(problem.spectral_lattice, problem.matrix_L)
     if config.include_tfa:
         solvers["TFA"] = get_tfa_solver(problem.E, problem.P, problem.tfa_clusters)
-    if config.include_cp:
-        solvers["CP"] = CPSolver(problem.cp_lattice, problem.matrix_L, config.cp_fourier_preconditioner)
     return solvers
 
 class LoadPathResult(NamedTuple):
@@ -294,8 +270,7 @@ def get_reference(matrix_L, inclusion_L):
                   "krylov_tolerance": config.krylov_tolerance,
                   "line_search": [config.line_search_sufficient_decrease, config.line_search_step_reduction,
                                   config.line_search_max_reductions],
-                  "spectral_ls_reference_stiffness": config.spectral_ls_reference_stiffness,
-                  "spectral_ls_fourier_preconditioner": config.spectral_ls_fourier_preconditioner}
+                  "spectral_ls_reference_stiffness": config.spectral_ls_reference_stiffness}
     names = ("reference_material_ids", "reference_macroscopic_stress", "reference_stress",
              "reference_plastic_strain")
 
@@ -304,7 +279,7 @@ def get_reference(matrix_L, inclusion_L):
         print(f"Solving the reference: Spectral LS on {voxel_label} voxels, {len(applied_macro_strain)} load steps")
         start_time = time.perf_counter()
         _, lattice = get_spectral_lattice(matrix_L, inclusion_L, discretization)
-        solver = SpectralLSSolver(lattice, matrix_L, config.spectral_ls_fourier_preconditioner)
+        solver = SpectralLSSolver(lattice, matrix_L)
         result = run_load_path("Reference", solver, applied_macro_strain, keep_every_step=False)
         if result.completed_step_count < len(applied_macro_strain):
             raise RuntimeError(f"The reference stopped at load step {result.completed_step_count + 1}: "
@@ -388,12 +363,6 @@ def get_lattice_label(lattice_shape, times="$\\times$"):
     counts = [lattice_shape[2], lattice_shape[1]] + ([lattice_shape[0]] if lattice_shape[0] > 1 else [])
     return times.join(map(str, counts))
 
-def get_reference_label():
-    # CP's C0 as config.py states it, e.g. "0.01 × matrix", or "matrix" at scale 1.
-    if config.cp_reference_stiffness_scale == 1:
-        return config.cp_reference_stiffness
-    return f"{config.cp_reference_stiffness_scale:g} × {config.cp_reference_stiffness}"
-
 def get_cluster_map(clusters, discretization):
     # Every element's cluster on the mid-thickness layer.
     return get_element_map(clusters, np.arange(clusters.cluster_count), discretization)
@@ -404,23 +373,22 @@ def get_clusters_label(clusters, setting):
         return f"{clusters.cluster_count} clusters: partitions' phases"
     return f"{clusters.cluster_count} {setting} clusters"
 
-def get_partition_cell_map(method, clusters, setting, settings, discretization):
-    # A method on the partitions (FFT-TFA, CP): its partitions and clusters, k-means clusters coloured in.
+def get_fft_tfa_cell_map(clusters, setting, discretization):
+    # FFT-TFA's partitions and clusters, k-means clusters coloured in.
     partition_label = get_lattice_label(discretization.partition_lattice_shape)
     cluster_map = get_cluster_map(clusters, discretization)
-    return plots.CellMap(method, f"{partition_label} partitions{settings}\n{get_clusters_label(clusters, setting)}",
+    settings = ", neighbour blocks" if config.fft_tfa_neighbour_blocks else ""
+    return plots.CellMap("FFT-TFA", f"{partition_label} partitions{settings}\n{get_clusters_label(clusters, setting)}",
                          {"cluster": cluster_map,
                           "partition": get_layer_map(clusters.piece_partition[clusters.element_piece], discretization)},
                          None if setting == "partition phases" else cluster_map)
 
 def get_cell_maps(problem, methods):
-    # Each method's discretization on the element grid of the mid-thickness layer, with its settings: FFT-TFA's and
-    # CP's partitions and clusters, Spectral LS's voxels (one element each, on its own elements with the phases they
+    # Each method's discretization on the element grid of the mid-thickness layer, with its settings: FFT-TFA's
+    # partitions and clusters, Spectral LS's voxels (one element each, on its own elements with the phases they
     # see), TFA's clusters; k-means clusters coloured in.
     discretization = problem.mesh.discretization
-    cell_maps = {"FFT-TFA": get_partition_cell_map("FFT-TFA", problem.fft_tfa.clusters, config.fft_tfa_clusters,
-                                                   ", neighbour blocks" if config.fft_tfa_neighbour_blocks else "",
-                                                   discretization)}
+    cell_maps = {"FFT-TFA": get_fft_tfa_cell_map(problem.fft_tfa.clusters, config.fft_tfa_clusters, discretization)}
     if problem.spectral_lattice is not None:
         spectral_clusters = problem.spectral_lattice.clusters
         spectral_discretization = get_spectral_ls_discretization()
@@ -436,9 +404,6 @@ def get_cell_maps(problem, methods):
         cell_maps["TFA"] = plots.CellMap(
             "TFA", get_clusters_label(tfa_clusters, config.tfa_clusters), {"cluster": cluster_map},
             None if config.tfa_clusters == "partition phases" else cluster_map)
-    if problem.cp_lattice is not None:
-        cell_maps["CP"] = get_partition_cell_map("CP", problem.cp_lattice.clusters, config.cp_clusters,
-                                                 f", C0: {get_reference_label()}", discretization)
     return [cell_maps[method] for method in methods]
 
 def get_color_limits(field_maps, value_min, value_max):

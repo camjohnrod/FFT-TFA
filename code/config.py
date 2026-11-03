@@ -5,7 +5,7 @@
 #   python code/check.py    check the code on small problems with known answers (about a minute)
 #
 # Sections run from the settings changed most to those changed least: Problem, Methods, Figures, Materials, Solver
-# details, Checks. A setting of one method carries its prefix (fft_tfa_, spectral_ls_, tfa_, cp_, k_means_); the same
+# details, Checks. A setting of one method carries its prefix (fft_tfa_, spectral_ls_, tfa_, k_means_); the same
 # setting for several methods sits as a group. The three grids mean different things to each method:
 #
 #                 elements                      partitions                         clusters
@@ -14,7 +14,6 @@
 #   Spectral LS   its lattice, unless it has    not used                           one per element
 #                 its own: sets all cost
 #   TFA           its FE mesh: offline cost     only if tfa_clusters uses them     tfa_clusters
-#   CP            its kernel, offline only      its lattice: sets its online cost  cp_clusters
 #   k-means       its features, offline         only for "partition k-means"       the k_means_ counts
 #   reference     its own finer mesh (reference_elements_per_side), solved once and cached
 #
@@ -82,10 +81,8 @@ load_path_shape             = "cyclic"
 #   include_spectral_ls  the LS equation on the elements (Moulinec–Suquet), the finest lattice the mesh allows
 #   include_tfa          the baseline (notes/3_tfa_baseline.md): clusters interact through the FE influence functions
 #                        E and P, built offline and cached in code/cache/
-#   include_cp           the earlier method: the partition-averaged LS equation, one polarization per partition
 include_spectral_ls         = True
 include_tfa                 = False
-include_cp                  = False
 
 # A reference, not a method: Spectral LS on a finer mesh of reference_elements_per_side per side (a multiple of
 # elements_per_side), on the same problem. Solved once and cached (macroscopic stress at every step, fields at the
@@ -94,7 +91,7 @@ include_cp                  = False
 include_reference           = True
 reference_elements_per_side = 512
 
-# The clusters (material states) of FFT-TFA, TFA and CP, chosen independently (Spectral LS keeps one per element):
+# The clusters (material states) of FFT-TFA and TFA, chosen independently (Spectral LS keeps one per element):
 #   "partition phases"   each partition's part in each phase
 #   "partition k-means"  k-means inside each partition's part in each phase: up to
 #                        k_means_matrix_clusters_per_partition in the matrix part and
@@ -105,7 +102,6 @@ reference_elements_per_side = 512
 # inclusion needs one cluster (more only resolve its stress). TFA's P takes (6 × its clusters)² doubles.
 fft_tfa_clusters            = "partition k-means"
 tfa_clusters                = "partition k-means"
-cp_clusters                 = "k-means"
 k_means_matrix_clusters     = 16
 k_means_inclusion_clusters  = 1
 k_means_matrix_clusters_per_partition = 8
@@ -114,16 +110,6 @@ k_means_inclusion_clusters_per_partition = 1
 # FFT-TFA keeps the exact interaction among each partition's clusters, and with fft_tfa_neighbour_blocks also with
 # those of the neighbouring partitions (8 for columns, 26 in 3D), at about 9 or 27 times the cost of those corrections.
 fft_tfa_neighbour_blocks    = True
-
-# CP's reference stiffness C0 is cp_reference_stiffness_scale times
-#   "matrix"       the matrix stiffness
-#   "voigt"        <L> over the clusters
-#   "homogenized"  <L E> over the clusters, which needs TFA's E: an FE solve even with TFA off
-# C0 is part of CP's model (LS-7, LS-25): it sets the interaction between partitions and how a partition's strain is
-# shared among its clusters (closer to equal stress for a smaller C0). It must stay below the tangent of every cluster
-# sharing a partition, or LS-26 has no solution; a yielding phase's shear tangent drops to G H / (3G + H).
-cp_reference_stiffness      = "matrix"
-cp_reference_stiffness_scale = 0.05
 
 ## ------- Figures ------- ##
 
@@ -167,20 +153,9 @@ inclusion_hardening_modulus = 0.0
 # on it): "midpoint", the phases' Lamé constants averaged (Moulinec–Suquet 1998, section 3.1), or "matrix".
 spectral_ls_reference_stiffness = "midpoint"
 
-# The Fourier preconditioner of each Newton correction's Krylov solver (notes/2_ls_model.md section 7.4) changes the
-# iteration count, not the answer. It pays off for CP, whose small C0 stretches the spectrum; for Spectral LS it only
-# costs one more FFT per iteration.
-spectral_ls_fourier_preconditioner = False
-cp_fourier_preconditioner   = True
-
 # TFA's E and P are solved this many load columns at a time (memory against speed). Their FE factorization limits 3D
 # meshes: 24³ works with 7 GB of memory, 36³ does not.
 fe_columns_per_solve        = 100
-
-# CP solves the coupled eigenstrains of clusters sharing a partition (LS-26) by Newton at every residual evaluation,
-# until ‖L (μ − μ(ε))‖ is below cp_eigenstrain_tolerance times the largest cluster stress.
-cp_eigenstrain_tolerance    = 1e-12
-cp_eigenstrain_max_iterations = 50
 
 # k-means: Lloyd iterations from a seeded k-means++ start, on features from six elastic Spectral LS solves, smoothed
 # within each phase (fe.smooth_within_phases).
@@ -197,9 +172,9 @@ fiber_push_passes           = 10000
 # Every method solves each load step by Newton, each Newton correction by a Krylov method, with these settings: GMRES,
 # or conjugate gradients for Spectral LS, whose Newton system is symmetric (notes/2_ls_model.md section 7.7). A step has
 # converged when its relative residual (the strain residual over the imposed strain, never over less than
-# residual_strain_scale_floor) is below convergence_tolerance. The residual of CP and Spectral LS is a strain of their
-# reference medium, so it is judged as the correction an all-matrix cell would need (notes/2_ls_model.md section 7.5),
-# and the tolerance means the same for any reference stiffness. FFT-TFA's reference medium is the matrix already.
+# residual_strain_scale_floor) is below convergence_tolerance. The residual of Spectral LS is a strain of its reference
+# medium, so it is judged as the correction an all-matrix cell would need (notes/2_ls_model.md section 7.5), and the
+# tolerance means the same for any reference stiffness. FFT-TFA's reference medium is the matrix already.
 convergence_tolerance       = 1e-6
 residual_strain_scale_floor = 1e-4
 newton_max_iterations       = 50
@@ -216,7 +191,7 @@ line_search_sufficient_decrease = 1e-4
 line_search_step_reduction  = 0.5
 line_search_max_reductions  = 10
 # A method abandons the load path when its relative residual exceeds its limit times the larger of 1 and the step's
-# first relative residual: ls_divergence_limit for FFT-TFA, Spectral LS and CP, tfa_divergence_limit for TFA.
+# first relative residual: ls_divergence_limit for FFT-TFA and Spectral LS, tfa_divergence_limit for TFA.
 ls_divergence_limit         = 1e3
 tfa_divergence_limit        = 1.0
 
@@ -228,8 +203,6 @@ tfa_divergence_limit        = 1.0
 laminate_tolerance          = 1e-5
 laminate_solver_tolerance   = 1e-11
 laminate_solver_max_iterations = 50
-# CP's piece law must match LS-25 computed independently (notes/2_ls_model.md section 4.5), to this relative tolerance.
-piece_law_check_tolerance   = 1e-9
 # FFT-TFA's interaction at full reach must match the element-level LS operator, to this relative tolerance
 # (notes/2_ls_model.md section 10.6; measured below 1e-14).
 interaction_check_tolerance = 1e-12
@@ -299,13 +272,7 @@ def check_inputs():
 
     if load_path_shape not in ("monotonic", "cyclic"):
         raise ValueError(f"load_path_shape must be \"monotonic\" or \"cyclic\". Got {load_path_shape!r}.")
-    if cp_reference_stiffness not in ("matrix", "voigt", "homogenized"):
-        raise ValueError("cp_reference_stiffness must be \"matrix\", \"voigt\" or \"homogenized\". "
-                         f"Got {cp_reference_stiffness!r}.")
-    if not cp_reference_stiffness_scale > 0:
-        raise ValueError(f"cp_reference_stiffness_scale must be positive. Got {cp_reference_stiffness_scale}.")
-    for method, setting in (("fft_tfa_clusters", fft_tfa_clusters), ("tfa_clusters", tfa_clusters),
-                            ("cp_clusters", cp_clusters)):
+    for method, setting in (("fft_tfa_clusters", fft_tfa_clusters), ("tfa_clusters", tfa_clusters)):
         if setting not in ("partition phases", "partition k-means", "k-means"):
             raise ValueError(f"{method} must be \"partition phases\", \"partition k-means\" or \"k-means\". "
                              f"Got {setting!r}.")

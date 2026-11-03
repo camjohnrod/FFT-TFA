@@ -4,7 +4,7 @@
 #               through the thickness otherwise);
 #   clusters    regions of one phase and one material state each, possibly spanning several partitions; a cluster's
 #               part in one partition is a piece.
-# Every method keeps one material state per cluster. The same code builds the partitions (FFT-TFA's, TFA's, CP's) and
+# Every method keeps one material state per cluster. The same code builds the partitions (FFT-TFA's, TFA's) and
 # Spectral LS's lattice, which is the same mesh with one partition per element (per element column).
 #
 # From the 8-node element matrices come TFA's influence functions on the clusters (notes/3_tfa_baseline.md):
@@ -147,7 +147,7 @@ class Discretization(NamedTuple):
         return self.elements_per_partition * self.element_volume
 
 def get_partition_discretization():
-    # The mesh and partitions config.py describes, shared by FFT-TFA, TFA and CP.
+    # The mesh and partitions config.py describes, shared by FFT-TFA and TFA.
     elements, partitions = config.elements_per_side, config.partitions_per_side
     if is_shape_constant_along_z():
         return Discretization(elements, config.elements_along_z, partitions, config.partitions_along_z)
@@ -155,7 +155,7 @@ def get_partition_discretization():
 
 def get_spectral_discretization(elements_per_side):
     # A lattice of one partition per element, elements_per_side per side: one per element column, through the mesh's
-    # element layers, for a shape constant along z (whatever CP's partitions_along_z); cubes otherwise. On the mesh's
+    # element layers, for a shape constant along z (whatever partitions_along_z); cubes otherwise. On the mesh's
     # count of elements per side, its elements are the mesh's.
     if is_shape_constant_along_z():
         return Discretization(elements_per_side, config.elements_along_z, elements_per_side, 1)
@@ -517,17 +517,16 @@ def get_influence_function_solver(model, clusters):
 
     return solve
 
-def compute_E_and_P(mesh, clusters, include_P):
-    # E, and P when include_P (None otherwise), from one factorization of K, each with the seconds it took: E's include
-    # assembling and factorizing K, P's only its own solves. E's six load columns are solved on their own, so E is the
-    # same to the last bit whether or not P is built.
+def compute_E_and_P(mesh, clusters):
+    # E and P from one factorization of K, each with the seconds it took: E's include assembling and factorizing K, P's
+    # only its own solves.
     start_time = time.perf_counter()
     model = FEModel(mesh)
     solve = get_influence_function_solver(model, clusters)
     # ER-1: E is the applied macrostrain plus the fluctuation it causes; P is A_ε K⁻¹ F_μ (ER-24).
     E = np.tile(np.eye(6), (clusters.cluster_count, 1)) + solve(model.get_F_macrostrain())
     E_seconds = time.perf_counter() - start_time
-    P = solve(model.get_F_eigenstrain(clusters)) if include_P else None
+    P = solve(model.get_F_eigenstrain(clusters))
     P_seconds = time.perf_counter() - start_time - E_seconds
     return {"E": E, "P": P}, {"E": E_seconds, "P": P_seconds}
 
@@ -557,7 +556,7 @@ def is_cached(cache_path):
 def get_cached(names, parameters, compute):
     # The named arrays and the seconds each took to build, as two dicts by name, each from its own cache file for these
     # parameters when they all exist, otherwise computed together by compute(), which returns both dicts, and each
-    # saved to its own file. One file per array lets a run load only the arrays it needs (E without P when TFA is off).
+    # saved to its own file.
     cache_paths = {name: get_cache_path(name, parameters) for name in names}
     if all(is_cached(cache_path) for cache_path in cache_paths.values()):
         arrays, build_seconds = {}, {}
@@ -586,9 +585,9 @@ def get_geometry_parameters():
         parameters["inclusion_radius"] = config.inclusion_radius
     return parameters
 
-def get_E_and_P(mesh, clusters, include_P):
-    # E, and P only when include_P (None otherwise), on the clusters, and the seconds they took to build, by name
-    # ("E", "P"), measured when they were computed, even if they now come from the cache.
+def get_E_and_P(mesh, clusters):
+    # E and P on the clusters, and the seconds they took to build, by name ("E", "P"), measured when they were computed,
+    # even if they now come from the cache.
     discretization = mesh.discretization
     parameters = {"cache_version": cache_version,
                   **get_geometry_parameters(),
@@ -600,10 +599,7 @@ def get_E_and_P(mesh, clusters, include_P):
                   # The clusters themselves, so any change of clustering (k-means settings included) finds its own
                   # cache.
                   "element_cluster": clusters.element_cluster}
-    E_P, build_seconds = get_cached(("E", "P") if include_P else ("E",), parameters,
-                                    lambda: compute_E_and_P(mesh, clusters, include_P))
-    if not include_P:
-        return E_P["E"], None, build_seconds
+    E_P, build_seconds = get_cached(("E", "P"), parameters, lambda: compute_E_and_P(mesh, clusters))
     # Column-major, so the columns of a run of consecutive clusters are contiguous and P products can read just the
     # yielding clusters' columns without copying them (tfa_model.apply_P_to_partitions).
     return E_P["E"], np.asfortranarray(E_P["P"]), build_seconds
