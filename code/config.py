@@ -17,8 +17,8 @@
 #   k-means       its features, offline         only for "partition k-means"       the k_means_ counts
 #   reference     its own finer mesh (reference_elements_per_side), solved once and cached
 #
-#   elements    elements_per_side (and elements_along_z): the fine mesh, which resolves the geometry
-#   partitions  partitions_per_side (and partitions_along_z): a uniform lattice of blocks of elements
+#   elements    elements_per_side: the fine mesh, which resolves the geometry
+#   partitions  partitions_per_side: a uniform lattice of blocks of elements
 #   clusters    the material states: regions of one phase with one uniform plastic eigenstrain each
 
 import os
@@ -53,16 +53,13 @@ fiber_volume_fraction       = 0.50
 fiber_gap                   = 1 / 128
 fiber_seed                  = 1
 
-# The grids (table above). A shape constant along z (fiber, laminate, random fibers) gets elements_per_side² ×
-# elements_along_z elements (one layer is exact) and partitions_per_side² × partitions_along_z partitions (1: columns);
-# any other shape gets cubes and ignores the along-z counts. Partition counts must divide element counts. Partition
-# layers change only FFT-TFA without neighbour blocks (by a few %): keep columns for it. Spectral LS runs on
+# The grids (table above). A shape constant along z (fiber, laminate, random fibers) gets elements_per_side² elements in
+# one layer, which is exact, and partitions_per_side² partitions, columns through the thickness; any other shape gets
+# cubes, the same counts along x, y and z. Partition counts must divide element counts. Spectral LS runs on
 # spectral_ls_elements_per_side elements per side instead of the mesh's, coarser or finer, unless None (the k-means
 # features stay on the mesh).
 elements_per_side           = 128
-elements_along_z            = 1
 partitions_per_side         = 8
-partitions_along_z          = 1
 spectral_ls_elements_per_side = 128
 
 # The macroscopic strain (ε11, ε22, ε33, γ12, γ23, γ13) reaches max_macro_strain in strain_increment_count equal steps.
@@ -221,7 +218,7 @@ output_folder = pathlib.Path(__file__).parent / "output"
 
 def check_inputs():
     # Stops on an input the code cannot run with. check.py calls it again after setting its own inputs.
-    if min(elements_per_side, elements_along_z, partitions_per_side, partitions_along_z, strain_increment_count) < 1:
+    if min(elements_per_side, partitions_per_side, strain_increment_count) < 1:
         raise ValueError("The element, partition and strain increment counts must all be at least 1.")
     if elements_per_side % partitions_per_side != 0:
         raise ValueError("The number of elements per side must be a multiple of the number of partitions per side.")
@@ -231,8 +228,6 @@ def check_inputs():
         raise ValueError("reference_elements_per_side must be a multiple of elements_per_side.")
     if spectral_ls_cg_max_iterations is not None and spectral_ls_cg_max_iterations < 1:
         raise ValueError("spectral_ls_cg_max_iterations must be None or at least 1.")
-    if inclusion_shape in ("fiber", "laminate", "random fibers") and elements_along_z % partitions_along_z != 0:
-        raise ValueError("The number of elements along z must be a multiple of the number of partitions along z.")
 
     if inclusion_shape in ("fiber", "sphere"):
         if not 0 < inclusion_radius < domain_side_length / 2:

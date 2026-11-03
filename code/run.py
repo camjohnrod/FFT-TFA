@@ -22,9 +22,9 @@ import numpy as np
 import tqdm
 
 import plots
-from fe import (Clusters, Discretization, Mesh, get_cached, get_clusters, get_E_and_P, get_fiber_radius,
+from fe import (Clusters, Mesh, get_cached, get_clusters, get_E_and_P, get_fiber_radius,
                 get_geometry_parameters, get_inclusion_L, get_matrix_L, get_partition_discretization, get_periodic_mesh,
-                get_spectral_discretization, get_spectral_ls_discretization, is_shape_constant_along_z, label_k_means,
+                get_spectral_discretization, get_spectral_ls_discretization, label_k_means,
                 label_partition_k_means, label_partition_phases, smooth_within_phases)
 from fft_tfa_model import FFTTFASolver, Interaction, get_interaction
 from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_P0_transformed, get_spectral_reference_L
@@ -245,16 +245,9 @@ class Reference(NamedTuple):
     accumulated_plastic_strain: np.ndarray
     build_seconds: float
 
-def get_reference_discretization():
-    # The reference's elements, one partition (voxel) each: one element layer for a shape constant along z, which is
-    # exact there (fe.shapes_constant_along_z), cubes otherwise.
-    elements = config.reference_elements_per_side
-    layers = 1 if is_shape_constant_along_z() else elements
-    return Discretization(elements, layers, elements, layers)
-
 def get_reference(matrix_L, inclusion_L):
     # The reference from the cache when it matches, otherwise solved now and cached, with the seconds it took to build.
-    discretization = get_reference_discretization()
+    discretization = get_spectral_discretization(config.reference_elements_per_side)
     applied_macro_strain = get_applied_macro_strain()
     parameters = {"cache_version": reference_cache_version, "discretization": "Moulinec-Suquet",
                   **get_geometry_parameters(),
@@ -343,8 +336,7 @@ def get_error_table(macro_stress_errors, components, reference, step_count):
                       *format_table(rows)])
 
 def get_layer_map(element_values, discretization):
-    # The values of the discretization's element layer at mid-thickness on its element grid [j, i]. For a shape
-    # constant along z every layer is the same.
+    # The values of the discretization's element layer at mid-thickness on its element grid [j, i].
     side = discretization.elements_per_side
     middle_layer = discretization.elements_along_z // 2
     return element_values[middle_layer * side**2:(middle_layer + 1) * side**2].reshape(side, side)

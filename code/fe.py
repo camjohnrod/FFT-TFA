@@ -27,9 +27,9 @@ import config
 
 ## ------- Shapes ------- ##
 
-# The inclusion shapes whose geometry does not vary along z. They are meshed with config.elements_along_z
-# element layers (one is exact) and partitioned in config.partitions_along_z layers (one: columns through the
-# thickness); every other shape is meshed and partitioned alike along all three axes.
+# The inclusion shapes whose geometry does not vary along z. They have one element layer, which is exact, and so one
+# partition layer (columns through the thickness); every other shape is meshed and partitioned alike along all three
+# axes.
 shapes_constant_along_z = ("fiber", "laminate", "random fibers")
 
 def is_shape_constant_along_z():
@@ -146,20 +146,18 @@ class Discretization(NamedTuple):
     def partition_volume(self):
         return self.elements_per_partition * self.element_volume
 
+def get_discretization(elements_per_side, partitions_per_side):
+    if is_shape_constant_along_z():
+        return Discretization(elements_per_side, 1, partitions_per_side, 1)
+    return Discretization(elements_per_side, elements_per_side, partitions_per_side, partitions_per_side)
+
 def get_partition_discretization():
     # The mesh and partitions config.py describes, shared by FFT-TFA and TFA.
-    elements, partitions = config.elements_per_side, config.partitions_per_side
-    if is_shape_constant_along_z():
-        return Discretization(elements, config.elements_along_z, partitions, config.partitions_along_z)
-    return Discretization(elements, elements, partitions, partitions)
+    return get_discretization(config.elements_per_side, config.partitions_per_side)
 
 def get_spectral_discretization(elements_per_side):
-    # A lattice of one partition per element, elements_per_side per side: one per element column, through the mesh's
-    # element layers, for a shape constant along z (whatever partitions_along_z); cubes otherwise. On the mesh's
-    # count of elements per side, its elements are the mesh's.
-    if is_shape_constant_along_z():
-        return Discretization(elements_per_side, config.elements_along_z, elements_per_side, 1)
-    return Discretization(elements_per_side, elements_per_side, elements_per_side, elements_per_side)
+    # A lattice of one partition per element, elements_per_side per side.
+    return get_discretization(elements_per_side, elements_per_side)
 
 def get_spectral_ls_discretization():
     # Spectral LS's lattice: on its own elements (config.spectral_ls_elements_per_side), or the mesh's when None.
@@ -182,13 +180,7 @@ def get_element_material_ids(discretization):
     centres_xy = (np.arange(discretization.elements_per_side) + 0.5) * discretization.element_side_length
     centres_z = (np.arange(discretization.elements_along_z) + 0.5) * discretization.element_length_along_z
     z, y, x = np.meshgrid(centres_z, centres_xy, centres_xy, indexing="ij")
-    material_ids = is_inside_inclusion(np.column_stack([x.ravel(), y.ravel(), z.ravel()])).astype(int)
-    # A shape partitioned in columns must indeed be the same in every layer.
-    layers = material_ids.reshape(discretization.elements_along_z, -1)
-    if is_shape_constant_along_z() and not np.all(layers == layers[0]):
-        raise ValueError(f"{config.inclusion_shape!r} is in fe.shapes_constant_along_z, but its geometry varies "
-                         "along z.")
-    return material_ids
+    return is_inside_inclusion(np.column_stack([x.ravel(), y.ravel(), z.ravel()])).astype(int)
 
 def get_periodic_mesh(discretization):
     elements_per_side = discretization.elements_per_side

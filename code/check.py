@@ -70,8 +70,8 @@ reference_path = pathlib.Path(__file__).parent / "check_reference.npz"
 # with 9 × 9 partitions, a yielding and hardening matrix, every method switched on.
 pinned_inputs = {
     "domain_side_length": 1e-3, "inclusion_shape": "fiber", "inclusion_radius": 0.35e-3,
-    "layer_thickness": (3 / 9) * 1e-3, "elements_per_side": 27, "elements_along_z": 1,
-    "partitions_per_side": 9, "partitions_along_z": 1, "spectral_ls_elements_per_side": None,
+    "layer_thickness": (3 / 9) * 1e-3, "elements_per_side": 27, "partitions_per_side": 9,
+    "spectral_ls_elements_per_side": None,
     "inclusion_elastic_modulus": 10e9, "matrix_elastic_modulus": 100e6, "inclusion_poisson_ratio": 0.3,
     "matrix_poisson_ratio": 0.19, "inclusion_yield_stress": np.inf, "matrix_yield_stress": 1.0e6,
     "inclusion_hardening_modulus": 0.0, "matrix_hardening_modulus": 10e6,
