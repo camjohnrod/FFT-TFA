@@ -24,8 +24,8 @@ import tqdm
 import plots
 from cell import (Clusters, Mesh, get_cached, get_clusters, get_fiber_radius,
                 get_geometry_parameters, get_inclusion_L, get_matrix_L, get_partition_discretization, get_periodic_mesh,
-                get_spectral_discretization, get_spectral_ls_discretization, label_k_means,
-                label_partition_k_means, label_partition_phases, smooth_within_phases)
+                get_spectral_discretization, get_spectral_ls_discretization, label_partition_k_means,
+                label_partition_phases)
 from fft_tfa_model import FFTTFASolver, Interaction, get_interaction
 from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_P0_transformed, get_spectral_C0
 from material import get_unloaded_plastic_state, get_von_mises_stress
@@ -35,9 +35,9 @@ from tfa_model import TFASolver, get_E_and_P
 ## ------- Problem ------- ##
 
 # Everything a run needs, built from config.py, and what each method's offline step costs:
-#   FFT-TFA      its clusters (config.fft_tfa_clusters) and its interaction on the partitions (fft_tfa_model);
+#   FFT-TFA      the clusters and its interaction on the partitions (fft_tfa_model);
 #   Spectral LS  its element lattice (its own or the mesh's) and clusters, its own reference stiffness and kernel P0;
-#   TFA          its clusters (config.tfa_clusters, its regions) and the FE influence functions E and P on them.
+#   TFA          the clusters and the FE influence functions E and P on them.
 # k-means clusters are found on each element's elastic strain concentration, from Spectral LS's lattice. The reference
 # (config.include_reference) comes from its cache, or is solved once (Reference, below).
 
@@ -68,17 +68,15 @@ def get_spectral_lattice(matrix_L, inclusion_L, discretization):
                                   spectral_C0,
                                   get_P0_transformed(spectral_mesh.discretization, spectral_C0))
 
-def get_cluster_labels(setting, mesh, matrix_L, inclusion_L):
-    # Every element's cluster for a clusters setting (config.fft_tfa_clusters and the others). The k-means settings
-    # cluster each element's elastic strain concentration (36 numbers), from Spectral LS on the same elements, whatever
-    # Spectral LS's own, smoothed within each phase (cell.smooth_within_phases).
-    if setting == "partition phases":
+def get_cluster_labels(mesh, matrix_L, inclusion_L):
+    # Every element's cluster: k-means on each element's elastic strain concentration (36 numbers), from Spectral LS on
+    # the same elements, whatever Spectral LS's own. One cluster per part needs no features.
+    if config.k_means_matrix_clusters_per_partition == config.k_means_inclusion_clusters_per_partition == 1:
         return label_partition_phases(mesh)
     spectral_mesh, spectral_lattice = get_spectral_lattice(
         matrix_L, inclusion_L, get_spectral_discretization(mesh.discretization.elements_per_side))
     concentration = get_elastic_strain_concentration(spectral_lattice, matrix_L)
-    features = smooth_within_phases(mesh, concentration.reshape(-1, 36)[spectral_mesh.element_partition_ids])
-    return label_k_means(mesh, features) if setting == "k-means" else label_partition_k_means(mesh, features)
+    return label_partition_k_means(mesh, concentration.reshape(-1, 36)[spectral_mesh.element_partition_ids])
 
 def get_problem():
     # E and P come from the cache when it matches; their offline time is the time they took to compute.
@@ -94,24 +92,16 @@ def get_problem():
     # As the elements resolve it (their centres), which a curved shape's nominal fraction only approaches.
     print(f"Inclusion volume fraction on the elements: {np.mean(mesh.element_material_ids):.4g}")
 
-    # The clusters of each setting in use, each built once, with its time.
-    settings = {"FFT-TFA": config.fft_tfa_clusters}
-    if config.include_tfa:
-        settings["TFA"] = config.tfa_clusters
-    clusters, cluster_seconds = {}, {}
-    for setting in dict.fromkeys(settings.values()):
-        start_time = time.perf_counter()
-        clusters[setting] = get_clusters(mesh, get_cluster_labels(setting, mesh, matrix_L, inclusion_L))
-        cluster_seconds[setting] = time.perf_counter() - start_time
-        if setting != "partition phases":
-            matrix_cluster_count = np.count_nonzero(clusters[setting].materials.material_ids == 0)
-            print(f"{setting}: {matrix_cluster_count} matrix and "
-                  f"{clusters[setting].cluster_count - matrix_cluster_count} inclusion clusters")
-    offline_seconds = {method: mesh_seconds + cluster_seconds[setting] for method, setting in settings.items()}
+    start_time = time.perf_counter()
+    clusters = get_clusters(mesh, get_cluster_labels(mesh, matrix_L, inclusion_L))
+    cluster_seconds = time.perf_counter() - start_time
+    matrix_cluster_count = np.count_nonzero(clusters.materials.material_ids == 0)
+    print(f"Clusters: {matrix_cluster_count} matrix and {clusters.cluster_count - matrix_cluster_count} inclusion")
+    offline_seconds = {"FFT-TFA": mesh_seconds + cluster_seconds}
 
     start_time = time.perf_counter()
     reach = 1 if config.fft_tfa_neighbour_blocks else 0
-    fft_tfa = get_interaction(mesh, clusters[config.fft_tfa_clusters], matrix_L, reach)
+    fft_tfa = get_interaction(mesh, clusters, matrix_L, reach)
     offline_seconds["FFT-TFA"] += time.perf_counter() - start_time
 
     spectral_lattice = None
@@ -126,9 +116,9 @@ def get_problem():
 
     tfa_clusters, E, P = None, None, None
     if config.include_tfa:
-        tfa_clusters = clusters[config.tfa_clusters]
+        tfa_clusters = clusters
         E, P, build_seconds = get_E_and_P(mesh, tfa_clusters)
-        offline_seconds["TFA"] += build_seconds["E"] + build_seconds["P"]
+        offline_seconds["TFA"] = mesh_seconds + cluster_seconds + build_seconds["E"] + build_seconds["P"]
 
     reference = get_reference(matrix_L, inclusion_L) if config.include_reference else None
     return Problem(mesh, fft_tfa, spectral_lattice, tfa_clusters, E, P, reference, matrix_L, offline_seconds)
@@ -352,28 +342,30 @@ def get_cluster_map(clusters, discretization):
     # Every element's cluster on the mid-thickness layer.
     return get_element_map(clusters, np.arange(clusters.cluster_count), discretization)
 
-def get_clusters_label(clusters, setting):
-    # A clusters setting as the cross-section states it, e.g. "40 k-means clusters".
-    if setting == "partition phases":
-        return f"{clusters.cluster_count} clusters: partitions' phases"
-    return f"{clusters.cluster_count} {setting} clusters"
+def is_k_means():
+    return not config.k_means_matrix_clusters_per_partition == config.k_means_inclusion_clusters_per_partition == 1
 
-def get_fft_tfa_cell_map(clusters, setting, discretization):
+def get_clusters_label(clusters):
+    # The clusters as the cross-section states them, e.g. "40 k-means clusters".
+    return f"{clusters.cluster_count} {'k-means' if is_k_means() else 'partition phase'} clusters"
+
+def get_fft_tfa_cell_map(clusters, discretization):
     # FFT-TFA's partitions and clusters, k-means clusters coloured in.
     partition_label = get_lattice_label(discretization.partition_lattice_shape)
     cluster_map = get_cluster_map(clusters, discretization)
     settings = ", neighbour blocks" if config.fft_tfa_neighbour_blocks else ""
-    return plots.CellMap("FFT-TFA", f"{partition_label} partitions{settings}\n{get_clusters_label(clusters, setting)}",
+    return plots.CellMap("FFT-TFA", f"{partition_label} partitions{settings}\n{get_clusters_label(clusters)}",
                          {"cluster": cluster_map,
-                          "partition": get_layer_map(clusters.piece_partition[clusters.element_piece], discretization)},
-                         None if setting == "partition phases" else cluster_map)
+                          "partition": get_layer_map(clusters.cluster_partition[clusters.element_cluster],
+                                                     discretization)},
+                         cluster_map if is_k_means() else None)
 
 def get_cell_maps(problem, methods):
     # Each method's discretization on the element grid of the mid-thickness layer, with its settings: FFT-TFA's
     # partitions and clusters, Spectral LS's voxels (one element each, on its own elements with the phases they
     # see), TFA's clusters; k-means clusters coloured in.
     discretization = problem.mesh.discretization
-    cell_maps = {"FFT-TFA": get_fft_tfa_cell_map(problem.fft_tfa.clusters, config.fft_tfa_clusters, discretization)}
+    cell_maps = {"FFT-TFA": get_fft_tfa_cell_map(problem.fft_tfa.clusters, discretization)}
     if problem.spectral_lattice is not None:
         spectral_clusters = problem.spectral_lattice.clusters
         spectral_discretization = get_spectral_ls_discretization()
@@ -386,9 +378,8 @@ def get_cell_maps(problem, methods):
     if problem.tfa_clusters is not None:
         tfa_clusters = problem.tfa_clusters
         cluster_map = get_cluster_map(tfa_clusters, discretization)
-        cell_maps["TFA"] = plots.CellMap(
-            "TFA", get_clusters_label(tfa_clusters, config.tfa_clusters), {"cluster": cluster_map},
-            None if config.tfa_clusters == "partition phases" else cluster_map)
+        cell_maps["TFA"] = plots.CellMap("TFA", get_clusters_label(tfa_clusters), {"cluster": cluster_map},
+                                         cluster_map if is_k_means() else None)
     return [cell_maps[method] for method in methods]
 
 def get_color_limits(field_maps, value_min, value_max):

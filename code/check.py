@@ -1,4 +1,4 @@
-# Checks the code on seven small problems, each solved by every method (FFT-TFA, Spectral LS, TFA). Run it after
+# Checks the code on small problems, each solved by every method (FFT-TFA, Spectral LS, TFA). Run it after
 # any change to the code:
 #
 #   python code/check.py         run the checks (about a minute)
@@ -19,25 +19,22 @@
 #   z laminate    a laminate with interfaces normal to z, so the geometry varies along z: meshed and partitioned in 3D,
 #                 the only test of the kernel's ξ_z frequencies. Every method must reproduce its exact solution,
 #                 Spectral LS on its own finer elements (18 per side against the mesh's 9).
-#   sphere        a spherical inclusion, meshed and partitioned in 3D, with mixed partitions all around it; FFT-TFA
-#                 takes partition k-means clusters.
-#   k-means laminate, k-means sphere
-#                 the laminate and the sphere with k-means clusters for every method but Spectral LS, FFT-TFA with
-#                 neighbour blocks on the sphere. On the laminate every method must still reproduce the exact
-#                 solution, except FFT-TFA: its matrix clusters there share partitions, and its correction inside a
-#                 partition then gives a uniform polarization a spurious strain (section 10.5), so its difference is
-#                 reported but not judged.
-# On every laminate, FFT-TFA is also solved with every partition within reach, where its interaction is exact
-# (FT-3), so it must reproduce the exact solution: that separates its truncation, a model error, from a wrong law,
-# region or Newton solve.
-# On all seven, every method must complete every load step and, once results are saved, reproduce them bit for bit.
+#   sphere        a spherical inclusion, meshed and partitioned in 3D, with mixed partitions all around it.
+#   k-means sphere
+#                 the sphere with k-means clusters, FFT-TFA with neighbour blocks.
+#   random fibers several fibers at random positions, with k-means clusters.
+# On every laminate, FFT-TFA is also solved with every partition within reach, where its interaction is exact (FT-3), so
+# it must reproduce the exact solution: that separates its truncation, a model error, from a wrong law or Newton solve.
+# On the laminate, FFT-TFA at full reach and TFA must also reproduce it with each partition's matrix part cut into two
+# clusters, since each phase's exact state is uniform: that tests clusters dividing a partition's phase.
+# On all of them, every method must complete every load step and, once results are saved, reproduce them bit for bit.
 # On every problem, FFT-TFA's interaction with every partition within reach (FT-2, FT-3) must equal the element-level
-# LS operator averaged over its regions and clusters, computed here from the elements: a wrong offset, pair count,
-# correction block or average fails there.
-# On the fiber and the k-means sphere, every method must stop at the same accuracy: its stresses at
-# convergence_tolerance within stopping_accuracy_tolerance of its own solution at stopping_check_tolerance. (Not on
-# problems with clusters of a few elements in one partition, such as the sphere's partition k-means: there a cluster
-# on the verge of yielding can converge elastic at one tolerance and plastic at the other, for TFA too.)
+# LS operator averaged over its clusters, computed here from the elements: a wrong offset, pair count, correction block
+# or average fails there.
+# On the fiber and the sphere, every method must stop at the same accuracy: its stresses at convergence_tolerance within
+# stopping_accuracy_tolerance of its own solution at stopping_check_tolerance. (Not with k-means clusters of a few
+# elements: there a cluster on the verge of yielding can converge elastic at one tolerance and plastic at the other, for
+# TFA too.)
 # On the fiber, the reference (config.include_reference) is solved at the working resolution: it must equal Spectral
 # LS bit for bit, and load back from its cache unchanged.
 # So a change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
@@ -61,6 +58,7 @@ import cell
 import fft_tfa_model
 import ls_model
 import run
+import tfa_model
 from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_unloaded_plastic_state
 
 # Next to the code, not in the cache folder, so clearing the cache to rebuild E and P keeps it.
@@ -77,15 +75,13 @@ pinned_inputs = {
     "inclusion_hardening_modulus": 0.0, "matrix_hardening_modulus": 10e6,
     "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0]), "strain_increment_count": 12,
     "load_path_shape": "monotonic",
-    "include_spectral_ls": True, "include_tfa": True, "fft_tfa_clusters": "partition phases",
-    "fft_tfa_neighbour_blocks": False, "spectral_ls_reference_stiffness": "midpoint",
+    "include_spectral_ls": True, "include_tfa": True, "fft_tfa_neighbour_blocks": False, "spectral_ls_reference_stiffness": "midpoint",
     "convergence_tolerance": 1e-6, "residual_strain_scale_floor": 1e-4, "newton_max_iterations": 50,
     "krylov_tolerance": 1e-3, "gmres_restart": 50, "gmres_max_restarts": None, "spectral_ls_cg_max_iterations": None,
     "ls_divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "fe_columns_per_solve": 100,
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
-    "tfa_clusters": "partition phases", "k_means_matrix_clusters": 8,
-    "k_means_inclusion_clusters": 1, "k_means_matrix_clusters_per_partition": 2,
-    "k_means_inclusion_clusters_per_partition": 1, "k_means_iterations": 50, "k_means_seed": 0,
+    "k_means_matrix_clusters_per_partition": 1, "k_means_inclusion_clusters_per_partition": 1,
+    "k_means_iterations": 50, "k_means_seed": 0,
     "include_reference": False, "reference_elements_per_side": 27}
 
 # What each problem changes from pinned_inputs.
@@ -109,31 +105,25 @@ check_problems = {
     "z laminate": {"inclusion_shape": "laminate_z", "elements_per_side": 9, "partitions_per_side": 3,
                    "max_macro_strain": np.array([0.020, 0.0, 0.015, 0.0, 0.03, 0.01]), "load_path_shape": "cyclic",
                    "strain_increment_count": 4, "spectral_ls_elements_per_side": 18},
-    # A sphere on a 12³ mesh with 4³ partitions, loaded with z components: the only test of mixed partitions in 3D,
-    # and of FFT-TFA's partition k-means clusters along a load path.
+    # A sphere on a 12³ mesh with 4³ partitions, loaded with z components: the only test of mixed partitions in 3D.
     "sphere": {"inclusion_shape": "sphere", "elements_per_side": 12, "partitions_per_side": 4,
-               "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03]),
-               "fft_tfa_clusters": "partition k-means"},
-    # The laminate with k-means clusters for FFT-TFA and TFA, up to two per phase (the inclusion's strain
-    # concentration is uniform, so it gets one). Each phase's exact state is uniform, so every method must still
-    # reproduce it, however k-means divides a phase (FFT-TFA only at full reach); the matrix clusters cut through
-    # partitions, so FFT-TFA's matrix regions span partitions.
-    "k-means laminate": {"inclusion_shape": "laminate",
-                         "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.01]),
-                         "load_path_shape": "cyclic", "strain_increment_count": 4, "fft_tfa_clusters": "k-means",
-                         "tfa_clusters": "k-means", "k_means_matrix_clusters": 2, "k_means_inclusion_clusters": 2},
-    # The sphere with k-means clusters for FFT-TFA and TFA, so clusters span partitions: the only test of FFT-TFA's
-    # neighbour blocks along a load path.
+               "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03])},
+    # The sphere with k-means clusters, so a partition's matrix part holds several: the only test of k-means in 3D and of
+    # FFT-TFA's neighbour blocks along a load path.
     "k-means sphere": {"inclusion_shape": "sphere", "elements_per_side": 12, "partitions_per_side": 4,
                        "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03]),
-                       "fft_tfa_clusters": "k-means", "fft_tfa_neighbour_blocks": True, "tfa_clusters": "k-means"},
+                       "k_means_matrix_clusters_per_partition": 2, "fft_tfa_neighbour_blocks": True},
+    # The shape config.py sets up by default: fibers at random positions, with k-means clusters.
+    "random fibers": {"inclusion_shape": "random fibers", "fiber_count": 6, "fiber_volume_fraction": 0.3,
+                      "fiber_gap": 1 / 27, "fiber_seed": 1, "k_means_matrix_clusters_per_partition": 2,
+                      "fiber_placement_attempts": 100000, "fiber_push_margin": 1e-3, "fiber_push_passes": 10000},
 }
 
 # The methods whose model is not exact on a problem: compared with the exact solution, but not judged by it.
-inexact_methods = {"cut laminate": ("FFT-TFA",), "k-means laminate": ("FFT-TFA",)}
+inexact_methods = {"cut laminate": ("FFT-TFA",)}
 
 # The problems on which every method's stopping accuracy is checked.
-stopping_check_problems = ("fiber", "k-means sphere")
+stopping_check_problems = ("fiber", "sphere")
 
 ## ------- Exact Laminate Solution ------- ##
 
@@ -219,38 +209,48 @@ def get_laminate_error(result, exact_phase_stress):
 
 def get_interaction_error(mesh, clusters, matrix_L):
     # FFT-TFA's interaction with every partition within reach of every other (FT-2 to FT-4), against the element-level
-    # LS operator: random polarizations, one per region, spread over its elements, strains −Γ0 * τ = −D0 τ by FFT on
-    # the element lattice (Moulinec–Suquet kernel, C0 = L_m), averaged over each region's and each cluster's elements.
-    # The largest relative difference in the regions' and the clusters' strains. At full reach FT-3 corrects every
-    # pair of partitions, so the two must agree to round-off; FT-4 then removes a mean that is zero to round-off.
+    # LS operator: random polarizations, one per cluster, spread over its elements, strains −Γ0 * τ = −D0 τ by FFT on the
+    # element lattice (Moulinec–Suquet kernel, C0 = L_m), averaged over each cluster's elements. The largest relative
+    # difference. At full reach FT-3 corrects every pair of partitions, so the two must agree to round-off; FT-4 then
+    # removes a mean that is zero to round-off.
     discretization = mesh.discretization
     interaction = fft_tfa_model.get_interaction(mesh, clusters, matrix_L,
                                                 max(discretization.partition_lattice_shape) // 2)
-    region_count = len(interaction.region_cluster)
-    polarization = 1e6 * np.random.default_rng(0).standard_normal((region_count, 6))
+    polarization = 1e6 * np.random.default_rng(0).standard_normal((clusters.cluster_count, 6))
     kernel = ls_model.get_transformed(ls_model.get_moulinec_suquet_kernel(discretization.element_lattice_shape,
                                                                           matrix_L),
                                       discretization.element_lattice_shape)
-    element_region = interaction.piece_region[clusters.element_piece]
-    element_strain = ls_model.apply_on_lattice(kernel, np.linalg.solve(matrix_L, polarization[element_region].T).T)
+    element_strain = ls_model.apply_on_lattice(
+        kernel, np.linalg.solve(matrix_L, polarization[clusters.element_cluster].T).T)
+    element_average = np.zeros((clusters.cluster_count, 6))
+    np.add.at(element_average, clusters.element_cluster, element_strain)
+    element_average /= np.bincount(clusters.element_cluster)[:, None]
+    return get_relative_difference(fft_tfa_model.get_strain_change(interaction, polarization), element_average)
 
-    def get_element_average(element_group, group_count):
-        total = np.zeros((group_count, 6))
-        np.add.at(total, element_group, element_strain)
-        return total / np.bincount(element_group, minlength=group_count)[:, None]
-
-    region_strain = fft_tfa_model.get_strain_change(interaction, polarization)
-    return max(get_relative_difference(region_strain, get_element_average(element_region, region_count)),
-               get_relative_difference(interaction.region_to_cluster @ region_strain,
-                                       get_element_average(clusters.element_cluster, clusters.cluster_count)))
-
-def solve_at_full_reach(problem):
-    # FFT-TFA's load path on the problem's clusters with every partition within reach of every other.
-    discretization = problem.mesh.discretization
-    interaction = fft_tfa_model.get_interaction(problem.mesh, problem.fft_tfa.clusters, problem.matrix_L,
-                                                max(discretization.partition_lattice_shape) // 2)
+def solve_at_full_reach(mesh, clusters, matrix_L):
+    # FFT-TFA's load path on the clusters with every partition within reach of every other.
+    interaction = fft_tfa_model.get_interaction(mesh, clusters, matrix_L,
+                                                max(mesh.discretization.partition_lattice_shape) // 2)
     with contextlib.redirect_stdout(io.StringIO()):
         return run.run_load_path("FFT-TFA", fft_tfa_model.FFTTFASolver(interaction), run.get_applied_macro_strain())
+
+def get_split_clusters(mesh):
+    # Each partition's part in each phase, its matrix part cut into two clusters along y by element row, in the order
+    # cell.get_clusters expects: by partition, matrix first.
+    row = mesh.discretization.element_lattice_shape[1]
+    element_rows = (np.arange(mesh.discretization.element_count) // row) % row
+    in_second_half = (element_rows % mesh.discretization.elements_per_partition_side
+                      >= mesh.discretization.elements_per_partition_side // 2)
+    keys = 3 * mesh.element_partition_ids + np.where(mesh.element_material_ids == 1, 2, in_second_half)
+    return cell.get_clusters(mesh, np.unique(keys, return_inverse=True)[1])
+
+def solve_on_split_clusters(mesh, matrix_L):
+    # FFT-TFA at full reach and TFA along the load path on get_split_clusters.
+    clusters = get_split_clusters(mesh)
+    E, P, _ = tfa_model.get_E_and_P(mesh, clusters)
+    with contextlib.redirect_stdout(io.StringIO()):
+        return {"FFT-TFA at full reach": solve_at_full_reach(mesh, clusters, matrix_L),
+                "TFA": run.run_load_path("TFA", tfa_model.TFASolver(E, P, clusters), run.get_applied_macro_strain())}
 
 ## ------- Stopping Accuracy ------- ##
 
@@ -338,10 +338,18 @@ def main():
                     all_passed &= report(error <= config.laminate_tolerance,
                                          f"{problem_name}: {method} matches the exact solution (largest relative "
                                          f"difference {error:.1e}, tolerance {config.laminate_tolerance:.0e})")
-                error = get_laminate_error(solve_at_full_reach(problem), exact_phase_stress)
+                error = get_laminate_error(solve_at_full_reach(problem.mesh, problem.fft_tfa.clusters, problem.matrix_L),
+                                           exact_phase_stress)
                 all_passed &= report(error <= config.laminate_tolerance,
                                      f"{problem_name}: FFT-TFA at full reach matches the exact solution (largest "
                                      f"relative difference {error:.1e}, tolerance {config.laminate_tolerance:.0e})")
+                if problem_name == "laminate":
+                    for method, result in solve_on_split_clusters(problem.mesh, problem.matrix_L).items():
+                        error = get_laminate_error(result, exact_phase_stress)
+                        all_passed &= report(error <= config.laminate_tolerance,
+                                             f"{problem_name}: {method} on clusters dividing a partition's matrix part "
+                                             f"matches the exact solution (largest relative difference {error:.1e}, "
+                                             f"tolerance {config.laminate_tolerance:.0e})")
             if problem.reference is not None:
                 all_passed &= report(is_reference_spectral_ls(problem, results["Spectral LS"]),
                                      f"{problem_name}: the reference at the working resolution equals Spectral LS "

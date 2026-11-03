@@ -1,6 +1,6 @@
 # TFA, the baseline: the actual E/P model of notes/3_tfa_baseline.md, whose residual is r = ε - E ε̄ - P μ(ε) (ER-4),
 # with E and P the exact FE influence functions of the composite. Its regions, called partitions in the notes, are the
-# clusters config.tfa_clusters names (cell.Clusters), each with one uniform eigenstrain and one material update at its
+# clusters (cell.Clusters), each with one uniform eigenstrain and one material update at its
 # average strain; the strain itself varies inside a cluster. Each load step is solved by Newton with GMRES (Strategy 2),
 # on the matrix-free Jacobian J v = v - P (H_μ v) of ER-21.
 #

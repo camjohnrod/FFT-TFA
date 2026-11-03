@@ -9,17 +9,17 @@
 # setting for several methods sits as a group. The three grids mean different things to each method:
 #
 #                 elements                      partitions                         clusters
-#   FFT-TFA       its kernel and corrections,   its FFT lattice: with its          fft_tfa_clusters
+#   FFT-TFA       its kernel and corrections,   its FFT lattice: with its          the k_means_ counts
 #                 offline only                  clusters, sets its online cost
 #   Spectral LS   its lattice, unless it has    not used                           one per element
 #                 its own: sets all cost
-#   TFA           its FE mesh: offline cost     only if tfa_clusters uses them     tfa_clusters
-#   k-means       its features, offline         only for "partition k-means"       the k_means_ counts
+#   TFA           its FE mesh: offline cost     its clusters lie in them           the k_means_ counts
+#   k-means       its features, offline         it runs inside each                the k_means_ counts
 #   reference     its own finer mesh (reference_elements_per_side), solved once and cached
 #
 #   elements    elements_per_side: the fine mesh, which resolves the geometry
 #   partitions  partitions_per_side: a uniform lattice of blocks of elements
-#   clusters    the material states: regions of one phase with one uniform plastic eigenstrain each
+#   clusters    the material states: regions of one phase in one partition, with one uniform plastic eigenstrain each
 
 import os
 import pathlib
@@ -88,19 +88,11 @@ include_tfa                 = False
 include_reference           = True
 reference_elements_per_side = 512
 
-# The clusters (material states) of FFT-TFA and TFA, chosen independently (Spectral LS keeps one per element):
-#   "partition phases"   each partition's part in each phase
-#   "partition k-means"  k-means inside each partition's part in each phase: up to
-#                        k_means_matrix_clusters_per_partition in the matrix part and
-#                        k_means_inclusion_clusters_per_partition in the inclusion part (one each: "partition phases")
-#   "k-means"            k-means over the whole cell, phase by phase (Liu–Bessa–Liu 2016, section 2.2.1): up to
-#                        k_means_matrix_clusters and k_means_inclusion_clusters, each possibly spanning many partitions
-# k-means groups the elements by elastic strain concentration. Methods on the same setting share clusters. An elastic
-# inclusion needs one cluster (more only resolve its stress). TFA's P takes (6 × its clusters)² doubles.
-fft_tfa_clusters            = "partition k-means"
-tfa_clusters                = "partition k-means"
-k_means_matrix_clusters     = 16
-k_means_inclusion_clusters  = 1
+# The clusters (material states) of FFT-TFA and TFA: k-means inside each partition's part in each phase, on the elements'
+# elastic strain concentration, up to k_means_matrix_clusters_per_partition in the matrix part and
+# k_means_inclusion_clusters_per_partition in the inclusion part. One each needs no k-means: each partition's part in
+# each phase is one cluster. An elastic inclusion needs one cluster (more only resolve its stress). TFA's P takes
+# (6 × its clusters)² doubles.
 k_means_matrix_clusters_per_partition = 8
 k_means_inclusion_clusters_per_partition = 1
 
@@ -146,8 +138,7 @@ spectral_ls_reference_stiffness = "midpoint"
 # meshes: 24³ works with 7 GB of memory, 36³ does not.
 fe_columns_per_solve        = 100
 
-# k-means: Lloyd iterations from a seeded k-means++ start, on features from six elastic Spectral LS solves, smoothed
-# within each phase (cell.smooth_within_phases).
+# k-means: Lloyd iterations from a seeded k-means++ start, on features from six elastic Spectral LS solves.
 k_means_iterations          = 50
 k_means_seed                = 0
 
@@ -252,12 +243,7 @@ def check_inputs():
 
     if load_path_shape not in ("monotonic", "cyclic"):
         raise ValueError(f"load_path_shape must be \"monotonic\" or \"cyclic\". Got {load_path_shape!r}.")
-    for method, setting in (("fft_tfa_clusters", fft_tfa_clusters), ("tfa_clusters", tfa_clusters)):
-        if setting not in ("partition phases", "partition k-means", "k-means"):
-            raise ValueError(f"{method} must be \"partition phases\", \"partition k-means\" or \"k-means\". "
-                             f"Got {setting!r}.")
-    if min(k_means_matrix_clusters, k_means_inclusion_clusters, k_means_matrix_clusters_per_partition,
-           k_means_inclusion_clusters_per_partition, k_means_iterations) < 1:
+    if min(k_means_matrix_clusters_per_partition, k_means_inclusion_clusters_per_partition, k_means_iterations) < 1:
         raise ValueError("The k-means cluster counts and iteration count must all be at least 1.")
     if spectral_ls_reference_stiffness not in ("midpoint", "matrix"):
         raise ValueError("spectral_ls_reference_stiffness must be \"midpoint\" or \"matrix\". "

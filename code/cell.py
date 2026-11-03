@@ -2,8 +2,7 @@
 #   elements    the periodic hexahedral mesh, which resolves the geometry;
 #   partitions  a uniform lattice of blocks of k × k elements (k × k × k for a geometry that varies along z; columns
 #               through the thickness otherwise);
-#   clusters    regions of one phase and one material state each, possibly spanning several partitions; a cluster's
-#               part in one partition is a piece.
+#   clusters    regions of one phase and one material state each, inside one partition.
 # Every method keeps one material state per cluster. The same code builds the partitions (FFT-TFA's, TFA's) and
 # Spectral LS's lattice, which is the same mesh with one partition per element (per element column). The cache of
 # expensive results is here too.
@@ -215,15 +214,12 @@ def get_materials(material_ids):
 ## ------- Clusters ------- ##
 
 class Clusters(NamedTuple):
-    # The material states of a lattice and where they lie. A cluster is a set of elements of one phase with one material
-    # state (one uniform eigenstrain); it may span several partitions. A piece is the part of a cluster inside one
-    # partition, so a partition holds one piece per cluster it meets. Pieces are ordered by partition.
+    # The material states of a lattice and where they lie. A cluster is a set of elements of one phase in one partition,
+    # with one material state (one uniform eigenstrain). Clusters are ordered by partition.
     materials: Materials               # one row per cluster
-    volume: np.ndarray                 # each cluster's volume, in units of one partition's volume
-    element_piece: np.ndarray          # the piece of every element
-    piece_partition: np.ndarray        # the partition of each piece
-    piece_cluster: np.ndarray          # the cluster of each piece
-    piece_volume_fraction: np.ndarray  # each piece's share of its partition's volume
+    volume: np.ndarray                 # each cluster's volume, as a share of its partition's
+    element_cluster: np.ndarray        # the cluster of every element
+    cluster_partition: np.ndarray      # the partition of each cluster
 
     @property
     def cluster_count(self):
@@ -231,11 +227,7 @@ class Clusters(NamedTuple):
 
     @property
     def partition_count(self):
-        return self.piece_partition[-1] + 1
-
-    @property
-    def element_cluster(self):
-        return self.piece_cluster[self.element_piece]
+        return self.cluster_partition[-1] + 1
 
     def average(self, values):
         # The volume average over the cell of one value per cluster (rows of values). The cell's volume is
@@ -250,53 +242,12 @@ def label_partition_phases(mesh):
     _, element_cluster = np.unique(2 * mesh.element_partition_ids + mesh.element_material_ids, return_inverse=True)
     return element_cluster
 
-def smooth_within_phases(mesh, element_features):
-    # The features filtered by [1, 2, 1] / 4 along each axis of the element lattice longer than one (periodic), over
-    # same-phase neighbours only, the weights renormalized where a neighbour lies in the other phase. Spectral
-    # discretizations ring at interfaces (Schneider 2021, section 2.5), an alternation from element to element that in
-    # the stiff phase, whose strain is small, outweighs the real variation; the filter's response cos²(ω/2) removes
-    # that highest frequency and keeps linear trends. Written as each value plus its neighbours' differences from it,
-    # so a uniform phase stays exactly uniform.
-    shape = mesh.discretization.element_lattice_shape
-    field = element_features.reshape(*shape, -1)
-    phase = mesh.element_material_ids.reshape(shape)
-    for axis in [axis for axis in range(3) if shape[axis] > 1]:
-        change, weight = np.zeros_like(field), np.full(shape, 2.0)
-        for offset in (-1, 1):
-            same = np.roll(phase, offset, axis) == phase
-            change += np.where(same[..., None], np.roll(field, offset, axis) - field, 0)
-            weight += same
-        field = field + change / weight[..., None]
-    return field.reshape(element_features.shape)
-
-def label_k_means(mesh, element_features):
-    # Every element's cluster by k-means on its features (one row per element; the elastic strain concentration,
-    # Liu–Bessa–Liu 2016, section 2.2.1, smoothed by smooth_within_phases), in each phase apart, so every cluster lies
-    # in one phase: up to k_means_matrix_clusters in the matrix, then up to k_means_inclusion_clusters in the
-    # inclusion. A phase gets no more clusters than it has distinct features, and clusters k-means leaves empty are
-    # dropped.
-    rng = np.random.default_rng(config.k_means_seed)
-    element_cluster = np.zeros(len(element_features), dtype=int)
-    first_cluster = 0
-    for phase, cluster_count in ((0, config.k_means_matrix_clusters), (1, config.k_means_inclusion_clusters)):
-        elements = np.flatnonzero(mesh.element_material_ids == phase)
-        features = element_features[elements]
-        cluster_count = min(cluster_count, len(np.unique(features, axis=0)))
-        with warnings.catch_warnings():
-            # An empty cluster is dropped below, and run.py prints how many clusters each phase got.
-            warnings.filterwarnings("ignore", "One of the clusters is empty")
-            _, labels = scipy.cluster.vq.kmeans2(features, cluster_count, iter=config.k_means_iterations,
-                                                 minit="++", rng=rng)
-        _, labels = np.unique(labels, return_inverse=True)
-        element_cluster[elements] = first_cluster + labels
-        first_cluster += labels.max() + 1
-    return element_cluster
-
 def label_partition_k_means(mesh, element_features):
-    # Every element's cluster by k-means inside each partition, on label_k_means's features, in each phase apart: up
-    # to k_means_matrix_clusters_per_partition clusters in a partition's matrix part and
+    # Every element's cluster by k-means inside each partition, in each phase apart, on its features (one row per
+    # element; the elastic strain concentration, Liu–Bessa–Liu 2016, section 2.2.1): up to
+    # k_means_matrix_clusters_per_partition clusters in a partition's matrix part and
     # k_means_inclusion_clusters_per_partition in its inclusion part, fewer when a part has fewer distinct features,
-    # and clusters k-means leaves empty are dropped. So every cluster lies in one partition. A cluster's key is
+    # and clusters k-means leaves empty are dropped. A cluster's key is
     # (2 × partition + phase) × the larger count + its label in its part, so the clusters are ordered by partition,
     # matrix first, and with one cluster per part this is label_partition_phases.
     rng = np.random.default_rng(config.k_means_seed)
@@ -312,6 +263,7 @@ def label_partition_k_means(mesh, element_features):
         if cluster_count == 1:
             continue
         with warnings.catch_warnings():
+            # An empty cluster is dropped below, and run.py prints how many clusters there are.
             warnings.filterwarnings("ignore", "One of the clusters is empty")
             _, part_labels = scipy.cluster.vq.kmeans2(features, cluster_count, iter=config.k_means_iterations,
                                                       minit="++", rng=rng)
@@ -320,22 +272,20 @@ def label_partition_k_means(mesh, element_features):
     return element_cluster
 
 def get_clusters(mesh, element_cluster):
-    # The clusters, given every element's cluster, and their pieces. A piece's key is partition × cluster count +
-    # cluster, so sorting the keys orders the pieces by partition.
+    # The clusters, given every element's cluster.
     if mesh.element_material_ids.min() == mesh.element_material_ids.max():
         raise ValueError("Every element is the same phase, so the cell is homogeneous: the inclusion is too small or "
                          "too large for this element grid.")
     cluster_count = element_cluster.max() + 1
-    material_ids = np.zeros(cluster_count, dtype=int)
+    material_ids, cluster_partition = np.zeros(cluster_count, dtype=int), np.zeros(cluster_count, dtype=int)
     material_ids[element_cluster] = mesh.element_material_ids
+    cluster_partition[element_cluster] = mesh.element_partition_ids
     if np.any(material_ids[element_cluster] != mesh.element_material_ids):
         raise ValueError("A cluster holds both phases; every cluster must lie in one phase.")
-    piece_keys, element_piece = np.unique(cluster_count * mesh.element_partition_ids + element_cluster,
-                                          return_inverse=True)
-    elements_per_partition = mesh.discretization.elements_per_partition
-    return Clusters(get_materials(material_ids), np.bincount(element_cluster) / elements_per_partition, element_piece,
-                    piece_keys // cluster_count, piece_keys % cluster_count,
-                    np.bincount(element_piece) / elements_per_partition)
+    if np.any(cluster_partition[element_cluster] != mesh.element_partition_ids):
+        raise ValueError("A cluster spans partitions; every cluster must lie in one partition.")
+    return Clusters(get_materials(material_ids), np.bincount(element_cluster) / mesh.discretization.elements_per_partition,
+                    element_cluster, cluster_partition)
 
 ## ------- Cache ------- ##
 
