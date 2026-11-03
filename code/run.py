@@ -22,15 +22,15 @@ import numpy as np
 import tqdm
 
 import plots
-from fe import (Clusters, Mesh, get_cached, get_clusters, get_E_and_P, get_fiber_radius,
+from cell import (Clusters, Mesh, get_cached, get_clusters, get_fiber_radius,
                 get_geometry_parameters, get_inclusion_L, get_matrix_L, get_partition_discretization, get_periodic_mesh,
                 get_spectral_discretization, get_spectral_ls_discretization, label_k_means,
                 label_partition_k_means, label_partition_phases, smooth_within_phases)
 from fft_tfa_model import FFTTFASolver, Interaction, get_interaction
-from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_P0_transformed, get_spectral_reference_L
-from material import get_flow_stress, get_unloaded_plastic_state, get_von_mises_stress
-from newton import LoadPathAbandoned, MaterialFullySoftened
-from tfa_model import get_tfa_solver
+from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_P0_transformed, get_spectral_C0
+from material import get_unloaded_plastic_state, get_von_mises_stress
+from newton import SolverDidNotConverge
+from tfa_model import TFASolver, get_E_and_P
 
 ## ------- Problem ------- ##
 
@@ -45,7 +45,7 @@ class Lattice(NamedTuple):
     # What an LS method needs on its lattice: the clusters, the reference stiffness C0, and the kernel P̂0 as one
     # 6 × 6 block per frequency.
     clusters: Clusters
-    reference_L: np.ndarray
+    C0: np.ndarray
     P0_transformed: np.ndarray
 
 class Problem(NamedTuple):
@@ -63,15 +63,15 @@ def get_spectral_lattice(matrix_L, inclusion_L, discretization):
     # A Spectral LS lattice, and its mesh: one partition per element (column) of the given discretization (Spectral
     # LS's, the mesh's for the k-means features, or the reference's).
     spectral_mesh = get_periodic_mesh(discretization)
-    spectral_reference_L = get_spectral_reference_L(matrix_L, inclusion_L)
+    spectral_C0 = get_spectral_C0(matrix_L, inclusion_L)
     return spectral_mesh, Lattice(get_clusters(spectral_mesh, label_partition_phases(spectral_mesh)),
-                                  spectral_reference_L,
-                                  get_P0_transformed(spectral_mesh.discretization, spectral_reference_L))
+                                  spectral_C0,
+                                  get_P0_transformed(spectral_mesh.discretization, spectral_C0))
 
 def get_cluster_labels(setting, mesh, matrix_L, inclusion_L):
     # Every element's cluster for a clusters setting (config.fft_tfa_clusters and the others). The k-means settings
     # cluster each element's elastic strain concentration (36 numbers), from Spectral LS on the same elements, whatever
-    # Spectral LS's own, smoothed within each phase (fe.smooth_within_phases).
+    # Spectral LS's own, smoothed within each phase (cell.smooth_within_phases).
     if setting == "partition phases":
         return label_partition_phases(mesh)
     spectral_mesh, spectral_lattice = get_spectral_lattice(
@@ -118,7 +118,7 @@ def get_problem():
     if config.include_spectral_ls:
         start_time = time.perf_counter()
         spectral_mesh, spectral_lattice = get_spectral_lattice(matrix_L, inclusion_L, get_spectral_ls_discretization())
-        print(f"Spectral LS's C0: C0_1111 = {spectral_lattice.reference_L[0, 0] / 1e6:.4g} MPa")
+        print(f"Spectral LS's C0: C0_1111 = {spectral_lattice.C0[0, 0] / 1e6:.4g} MPa")
         if config.spectral_ls_elements_per_side is not None:
             print(f"Inclusion volume fraction on Spectral LS's elements: "
                   f"{np.mean(spectral_mesh.element_material_ids):.4g}")
@@ -152,11 +152,11 @@ def get_solvers(problem):
     if config.include_spectral_ls:
         solvers["Spectral LS"] = SpectralLSSolver(problem.spectral_lattice, problem.matrix_L)
     if config.include_tfa:
-        solvers["TFA"] = get_tfa_solver(problem.E, problem.P, problem.tfa_clusters)
+        solvers["TFA"] = TFASolver(problem.E, problem.P, problem.tfa_clusters)
     return solvers
 
 class LoadPathResult(NamedTuple):
-    # One method's results at every load step: the stress and accumulated plastic strain per cluster (fe.Clusters),
+    # One method's results at every load step: the stress and accumulated plastic strain per cluster (cell.Clusters),
     # and the stress's volume average over the cell. Steps past completed_step_count were not solved and hold zeros.
     # With run_load_path's keep_every_step off, the per-cluster arrays hold one step only, the last one solved.
     clusters: tuple
@@ -168,12 +168,6 @@ class LoadPathResult(NamedTuple):
     solve_time_per_step: np.ndarray
     completed_step_count: int
     failure_reason: str
-
-def check_flow_stress_is_positive(materials, plastic_state):
-    flow_stress = get_flow_stress(materials, plastic_state.accumulated_plastic_strain)
-    if np.any(flow_stress <= 0):
-        raise MaterialFullySoftened(f"{np.count_nonzero(flow_stress <= 0)} clusters softened to zero flow stress "
-                                    f"(lowest {flow_stress.min():.3g} Pa)")
 
 def run_load_path(method, solver, applied_macro_strain, keep_every_step=True):
     # Solves every load step in turn, each from the plastic history the previous one accepted. A step the method
@@ -202,15 +196,14 @@ def run_load_path(method, solver, applied_macro_strain, keep_every_step=True):
         start_time = time.perf_counter()
         try:
             step_result = solver.solve_step(macro_strain, plastic_history)
-            check_flow_stress_is_positive(clusters.materials, step_result.plastic_state)
-        except LoadPathAbandoned as failure:
+        except SolverDidNotConverge as failure:
             if step == 0:
                 raise
             completed_step_count, failure_reason = step, str(failure)
             break
         solve_time_per_step[step] = time.perf_counter() - start_time
 
-        newton_iterations_per_step[step] = len(step_result.residual_history) - 1
+        newton_iterations_per_step[step] = step_result.newton_iteration_count
         krylov_iterations_per_step[step] = step_result.krylov_iteration_count
         macroscopic_stress[step] = clusters.average(step_result.stress)
         field_step = step if keep_every_step else 0
@@ -232,7 +225,7 @@ def solve_all(problem):
 ## ------- Reference ------- ##
 
 # The reference (config.include_reference): Spectral LS on its own finer mesh, solved along the same load path once and
-# cached (fe.get_cached) under every input that changes its answer, like E and P.
+# cached (cell.get_cached) under every input that changes its answer, like E and P.
 
 # Increase whenever a code change alters the reference, so caches made by the old code are recomputed.
 reference_cache_version = 2
@@ -295,7 +288,7 @@ def format_table(rows):
                        for column, (cell, width) in enumerate(zip(row, widths))) for row in rows]
 
 def get_timing_table(results, offline_seconds, step_count):
-    # Offline: building the method's operators (fe.get_problem). Online: solving the load steps it completed, with its
+    # Offline: building the method's operators (get_problem). Online: solving the load steps it completed, with its
     # Newton and Krylov (GMRES, or CG for Spectral LS) iterations over them. Then why a method stopped early.
     rows = [("Method", "Offline (s)", "Online (s)", "Newton its", "Krylov its", "Steps")]
     for method, result in results.items():

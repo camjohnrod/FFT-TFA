@@ -47,7 +47,7 @@ layer_thickness             = 0.5e-3
 # random centres (fiber_seed), each kept if it stays fiber_gap (a fraction of the domain side, so the placing does not
 # depend on any mesh) clear of the others across the periodic cell. That placing jams near 55 % of the cell (fibers
 # with half the gap around each); past it, the remaining fibers go at random and all are pushed apart until none
-# overlap (fe.get_fiber_centres), which reaches about 80 %.
+# overlap (cell.get_fiber_centres), which reaches about 80 %.
 fiber_count                 = 100
 fiber_volume_fraction       = 0.50
 fiber_gap                   = 1 / 128
@@ -124,17 +124,9 @@ loaded_stress_fraction      = 0.05
 
 ## ------- Materials ------- ##
 
-# Isotropic elasticity and J2 plasticity with linear isotropic hardening. A yield stress of np.inf keeps a phase
-# elastic; a phase that yields needs a hardening modulus above -3G.
-# matrix_elastic_modulus      = 100e6
-# matrix_poisson_ratio        = 0.19
-# matrix_yield_stress         = 1.0e6
-# matrix_hardening_modulus    = 10e6
-# inclusion_elastic_modulus   = 10e9
-# inclusion_poisson_ratio     = 0.3
-# inclusion_yield_stress      = np.inf
-# inclusion_hardening_modulus = 0.0
-
+# Isotropic elasticity and J2 plasticity with linear isotropic hardening, the hardening modulus zero or above (Spectral
+# LS's conjugate gradients need a positive definite tangent, notes/2_ls_model.md section 7.7). A yield stress of np.inf
+# keeps a phase elastic.
 matrix_elastic_modulus      = 2.1e9
 matrix_poisson_ratio        = 0.3
 matrix_yield_stress         = 29e6
@@ -155,7 +147,7 @@ spectral_ls_reference_stiffness = "midpoint"
 fe_columns_per_solve        = 100
 
 # k-means: Lloyd iterations from a seeded k-means++ start, on features from six elastic Spectral LS solves, smoothed
-# within each phase (fe.smooth_within_phases).
+# within each phase (cell.smooth_within_phases).
 k_means_iterations          = 50
 k_means_seed                = 0
 
@@ -255,15 +247,8 @@ def check_inputs():
         raise ValueError("inclusion_shape must be \"fiber\", \"laminate\", \"laminate_z\", \"sphere\" or "
                          f"\"random fibers\". Got {inclusion_shape!r}.")
 
-    # The radial return divides by 3G + H, so at or below zero it has no admissible solution.
-    for phase, elastic_modulus, poisson_ratio, yield_stress, hardening_modulus in (
-            ("matrix", matrix_elastic_modulus, matrix_poisson_ratio, matrix_yield_stress, matrix_hardening_modulus),
-            ("inclusion", inclusion_elastic_modulus, inclusion_poisson_ratio, inclusion_yield_stress,
-             inclusion_hardening_modulus)):
-        shear_modulus = elastic_modulus / (2 * (1 + poisson_ratio))
-        if np.isfinite(yield_stress) and 3 * shear_modulus + hardening_modulus <= 0:
-            raise ValueError(f"The {phase} hardening modulus must be above -3G = {-3 * shear_modulus:.4g} Pa, or the "
-                             f"return map has no admissible solution. Got {hardening_modulus:.4g} Pa.")
+    if min(matrix_hardening_modulus, inclusion_hardening_modulus) < 0:
+        raise ValueError("The hardening moduli must be zero or above: softening is not supported.")
 
     if load_path_shape not in ("monotonic", "cyclic"):
         raise ValueError(f"load_path_shape must be \"monotonic\" or \"cyclic\". Got {load_path_shape!r}.")

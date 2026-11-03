@@ -2,8 +2,8 @@
 # any change to the code:
 #
 #   python code/check.py         run the checks (about a minute)
-#   python code/check.py save    run the checks (except the comparison with the old reference) and, if they all
-#                                pass, save the results as the reference that later runs must reproduce exactly
+#   python code/check.py save    run the checks (except the comparison with the old results) and, if they all pass,
+#                                save the results, which later runs must reproduce exactly
 #
 # The problems:
 #   laminate      a laminate loaded in tension and shear, then unloaded and loaded in reverse. Its exact solution
@@ -30,7 +30,7 @@
 # On every laminate, FFT-TFA is also solved with every partition within reach, where its interaction is exact
 # (FT-3), so it must reproduce the exact solution: that separates its truncation, a model error, from a wrong law,
 # region or Newton solve.
-# On all seven, every method must complete every load step and, once a reference is saved, reproduce it bit for bit.
+# On all seven, every method must complete every load step and, once results are saved, reproduce them bit for bit.
 # On every problem, FFT-TFA's interaction with every partition within reach (FT-2, FT-3) must equal the element-level
 # LS operator averaged over its regions and clusters, computed here from the elements: a wrong offset, pair count,
 # correction block or average fails there.
@@ -41,8 +41,8 @@
 # On the fiber, the reference (config.include_reference) is solved at the working resolution: it must equal Spectral
 # LS bit for bit, and load back from its cache unchanged.
 # So a change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
-# results, then save a new reference. The reference is code/check_reference.npz, and holds bit for bit only at
-# the config.thread_count it was saved with.
+# results, then save them anew. They are in code/check_saved_results.npz, and hold bit for bit only at the
+# config.thread_count they were saved with.
 #
 # The problems are set below, not read from config.py, so that the checks mean the same thing whatever config.py holds;
 # only the check settings (Checks in config.py) come from config.py. config.py, the cache and code/output are not
@@ -57,14 +57,14 @@ import pathlib
 import config  # first: it sets the thread count before numpy loads
 import numpy as np
 
-import fe
+import cell
 import fft_tfa_model
 import ls_model
 import run
 from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_unloaded_plastic_state
 
 # Next to the code, not in the cache folder, so clearing the cache to rebuild E and P keeps it.
-reference_path = pathlib.Path(__file__).parent / "check_reference.npz"
+saved_results_path = pathlib.Path(__file__).parent / "check_saved_results.npz"
 
 # Every config.py input that shapes the problems or the solvers, pinned to a fixed value: a 27 × 27 element mesh
 # with 9 × 9 partitions, a yielding and hardening matrix, every method switched on.
@@ -271,7 +271,7 @@ def is_reference_spectral_ls(problem, spectral_ls_result):
     # its fields at the last, to the bit, and whether asking for it again loads the same arrays from its cache.
     reference = problem.reference
     with contextlib.redirect_stdout(io.StringIO()):
-        reloaded = run.get_reference(problem.matrix_L, fe.get_inclusion_L())
+        reloaded = run.get_reference(problem.matrix_L, cell.get_inclusion_L())
     return (np.array_equal(reference.macroscopic_stress, spectral_ls_result.macroscopic_stress)
             and np.array_equal(reference.stress, spectral_ls_result.cluster_stress_per_step[-1])
             and np.array_equal(reference.accumulated_plastic_strain,
@@ -299,7 +299,7 @@ def report(passed, description):
     return passed
 
 def get_result_arrays(problem_name, results):
-    # Every array the reference holds, keyed "<problem>/<method>/<array>".
+    # Every array the saved results hold, keyed "<problem>/<method>/<array>".
     arrays = {}
     for method, result in results.items():
         for field in ("macroscopic_stress", "cluster_stress_per_step", "newton_iterations_per_step",
@@ -311,10 +311,10 @@ def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "check"
     if mode not in ("check", "save"):
         sys.exit(f"unknown option {mode!r}: use no option, or save")
-    reference = None
-    if reference_path.exists():
-        with np.load(reference_path) as saved:
-            reference = {name: saved[name] for name in saved.files}
+    saved_results = None
+    if saved_results_path.exists():
+        with np.load(saved_results_path) as saved:
+            saved_results = {name: saved[name] for name in saved.files}
 
     all_passed = True
     result_arrays = {}
@@ -363,21 +363,20 @@ def main():
                                          f"{config.stopping_accuracy_tolerance:.0e})")
             arrays = get_result_arrays(problem_name, results)
             result_arrays.update(arrays)
-            if reference is not None and mode == "check":
-                changed = [name for name in arrays if name not in reference
-                           or not np.array_equal(arrays[name], reference[name])]
-                all_passed &= report(not changed, f"{problem_name}: identical to the saved reference"
+            if saved_results is not None and mode == "check":
+                changed = [name for name in arrays if name not in saved_results
+                           or not np.array_equal(arrays[name], saved_results[name])]
+                all_passed &= report(not changed, f"{problem_name}: identical to the saved results"
                                      + "".join(f"\n       differs: {name}" for name in changed))
 
-    if reference is None and mode == "check":
-        print("No reference saved yet: run python code/check.py save to save one.")
+    if saved_results is None and mode == "check":
+        print("No results saved yet: run python code/check.py save to save them.")
     if mode == "save":
         if all_passed:
-            reference_path.parent.mkdir(exist_ok=True)
-            np.savez(reference_path, **result_arrays)
-            print(f"Reference saved to {reference_path}")
+            np.savez(saved_results_path, **result_arrays)
+            print(f"Results saved to {saved_results_path}")
         else:
-            print("Reference not saved, since not every check passed.")
+            print("Results not saved, since not every check passed.")
     print("All checks passed." if all_passed else "Some checks FAILED.")
     sys.exit(0 if all_passed else 1)
 

@@ -12,8 +12,8 @@ import scipy.fft
 import scipy.sparse
 
 import config
-from material import get_algorithmic_stiffness, get_plastic_eigenstrain, get_unloaded_plastic_state
-from newton import Evaluation, SolverDidNotConverge, solve_load_step
+from material import apply_blocks, get_algorithmic_stiffness, get_plastic_eigenstrain, get_unloaded_plastic_state
+from newton import Evaluation, Solver, SolverDidNotConverge
 
 ## ------- Convolution on a Lattice ------- ##
 
@@ -32,7 +32,7 @@ def apply_on_lattice(fourier_blocks, field):
 
 ## ------- Reference Stiffness ------- ##
 
-def get_spectral_reference_L(matrix_L, inclusion_L):
+def get_spectral_C0(matrix_L, inclusion_L):
     # Spectral LS's reference stiffness. Its solution does not depend on it (its P0 is a projection; Schneider 2021,
     # section 2), so it is a solver setting: "midpoint" is Moulinec–Suquet's rule (1998, section 3.1), the phases'
     # Lamé constants averaged, which for two isotropic phases is (L_m + L_f) / 2.
@@ -59,7 +59,7 @@ def get_direction_strain_matrix(directions):
     rows = [(n1, zero, zero), (zero, n2, zero), (zero, zero, n3), (n2, n1, zero), (zero, n3, n2), (n3, zero, n1)]
     return np.stack([np.stack(row, axis=-1) for row in rows], axis=-2)
 
-def get_moulinec_suquet_kernel(lattice_shape, reference_L):
+def get_moulinec_suquet_kernel(lattice_shape, C0):
     # P̂0(ξ) = Γ̂0(ξ) C0 at every frequency of a lattice of the given shape [z, y, x] over the cubic cell (LS-21), with
     # the continuum Green operator Γ̂0 = B (Bᵀ C0 B)⁻¹ Bᵀ, B = B(ξ / |ξ|), returned as offset blocks. P̂0(0) = 0
     # (LS-9). Along an axis with an even count N, Γ̂0 is not even in a component equal to N / 2, so it has no
@@ -73,7 +73,7 @@ def get_moulinec_suquet_kernel(lattice_shape, reference_L):
     wave_vectors[0, 0, 0] = [1, 0, 0]  # any direction at ξ = 0, whose block is set to zero below
     B = get_direction_strain_matrix(wave_vectors / np.linalg.norm(wave_vectors, axis=-1, keepdims=True))
     B_transposed = np.swapaxes(B, -1, -2)
-    P0_transformed = B @ np.linalg.inv(B_transposed @ reference_L @ B) @ B_transposed @ reference_L
+    P0_transformed = B @ np.linalg.inv(B_transposed @ C0 @ B) @ B_transposed @ C0
     P0_transformed[0, 0, 0] = 0
     highest_frequencies = np.zeros(frequency_x.shape, dtype=bool)
     for frequency, count in zip((frequency_z, frequency_y, frequency_x), lattice_shape):
@@ -104,28 +104,24 @@ def average_over_partitions(element_P0, discretization):
                                                            (partition_offsets + d_i) % element_side)]
     return partition_P0.reshape(-1, 6)
 
-def get_P0_transformed(discretization, reference_L):
+def get_P0_transformed(discretization, C0):
     # P̂0 on the discretization's partition lattice: the Moulinec–Suquet kernel on its element grid, averaged over its
     # partitions, as SCA averages its fine-grid operator over clusters (Liu et al. 2016).
-    element_P0 = get_moulinec_suquet_kernel(discretization.element_lattice_shape, reference_L)
+    element_P0 = get_moulinec_suquet_kernel(discretization.element_lattice_shape, C0)
     return get_transformed(average_over_partitions(element_P0, discretization), discretization.partition_lattice_shape)
 
 ## ------- Residual in Matrix Units (LS-24) ------- ##
 
-def get_residual_in_matrix_units(P0_transformed, reference_L, matrix_L):
+def get_residual_in_matrix_units(P0_transformed, C0, matrix_L):
     # LS-24: the LS residual r is a strain of the reference medium, so its size depends on C0. Convergence is judged
     # instead on the strain correction an all-matrix cell would need to cancel r, M_m⁻¹ r, with M_m the Newton
     # Jacobian of a homogeneous cell of matrix stiffness C_m (LS-20 with L_t = C_m everywhere):
     #   M̂_m(ξ) = I − P̂0(ξ) (I − C0⁻¹ C_m),
     # a fixed Fourier operator like P0, so the tolerance means the same whatever C0. Returns M̂_m⁻¹ per frequency.
-    matrix_cell_jacobian = np.eye(6) - P0_transformed @ (np.eye(6) - np.linalg.solve(reference_L, matrix_L))
+    matrix_cell_jacobian = np.eye(6) - P0_transformed @ (np.eye(6) - np.linalg.solve(C0, matrix_L))
     return np.linalg.inv(matrix_cell_jacobian)
 
 ## ------- Block Helpers ------- ##
-
-def apply_blocks(blocks, rows):
-    # One 6 × 6 block times one row of 6, row by row.
-    return np.einsum('pij,pj->pi', blocks, rows)
 
 def assemble_blocks(blocks, block_rows, block_columns, shape_in_blocks):
     # A sparse matrix of 6 × 6 blocks, each block at its block row and column, blocks at the same position summed.
@@ -140,26 +136,26 @@ def apply_sparse(matrix, rows):
 
 ## ------- Spectral LS ------- ##
 
-class SpectralLSSolver:
-    # Spectral LS along the load path: LS-18 with one partition per element (per element column), each partition one
-    # cluster, so a partition's stress is its cluster's at the partition strain. solve_step(macro_strain,
-    # plastic_history) solves one load step by Newton on the partition strains, from the previous step's shifted by the
-    # macrostrain increment, each correction by conjugate gradients (LS-28), convergence judged in matrix units (LS-24).
+class SpectralLSSolver(Solver):
+    # Spectral LS: LS-18 with one partition per element (per element column), each partition one cluster, so a
+    # partition's stress is its cluster's at the partition strain. Newton on the partition strains, each correction by
+    # conjugate gradients (LS-28), convergence judged in matrix units (LS-24).
     def __init__(self, lattice, matrix_L):
-        self.clusters = lattice.clusters
-        self.reference_L = lattice.reference_L                  # C0
+        super().__init__(lattice.clusters, lattice.clusters.partition_count)
+        self.C0 = lattice.C0
         self.P0_transformed = lattice.P0_transformed
         if self.clusters.cluster_count != self.clusters.partition_count:
             raise ValueError("Spectral LS needs exactly one cluster per partition.")
-        self.residual_in_matrix_units = get_residual_in_matrix_units(self.P0_transformed, self.reference_L, matrix_L)
-        self.previous_strain = np.zeros((self.clusters.partition_count, 6))
-        self.previous_macro_strain = np.zeros(6)
+        self.residual_in_matrix_units = get_residual_in_matrix_units(self.P0_transformed, self.C0, matrix_L)
+
+    def measure_residual(self, residual):
+        return apply_on_lattice(self.residual_in_matrix_units, residual)
 
     def evaluate(self, strain, macro_strain, plastic_history):
         # The LS-18 residual r = ε − ε̄ − P0 μ*, with μ* = ε − C0⁻¹ σ the equivalent eigenstrain (LS-6), and the
         # candidate plastic state and stress.
         plastic_state, stress = get_plastic_eigenstrain(strain, self.clusters.materials, plastic_history)
-        equivalent_eigenstrain = strain - np.linalg.solve(self.reference_L, stress.T).T
+        equivalent_eigenstrain = strain - np.linalg.solve(self.C0, stress.T).T
         b = np.tile(macro_strain, (len(strain), 1))
         residual = strain - b - apply_on_lattice(self.P0_transformed, equivalent_eigenstrain)
         return Evaluation(strain, plastic_state, stress, residual)
@@ -170,10 +166,10 @@ class SpectralLSSolver:
         # every correction lie in (LS-28). It stops once ‖r + J δε‖ is below krylov_tolerance ‖r‖. Returns δε and the
         # number of CG iterations.
         tangent = get_algorithmic_stiffness(current.strain, self.clusters.materials, plastic_history)
-        D_blocks = np.eye(6) - np.linalg.solve(self.reference_L, tangent)
+        D_blocks = np.eye(6) - np.linalg.solve(self.C0, tangent)
 
         def inner_product(u, v):
-            return np.sum((u @ self.reference_L) * v)
+            return np.sum((u @ self.C0) * v)
 
         correction = np.zeros_like(current.residual)
         linear_residual = -current.residual                       # −r − J δε, at δε = 0
@@ -198,16 +194,6 @@ class SpectralLSSolver:
             residual_product = next_residual_product
         raise SolverDidNotConverge(f"CG did not converge inside a Newton iteration within {max_iterations} "
                                    "iterations. Loosen krylov_tolerance or raise spectral_ls_cg_max_iterations")
-
-    def solve_step(self, macro_strain, plastic_history):
-        initial_strain = self.previous_strain + (macro_strain - self.previous_macro_strain)
-        step_result = solve_load_step(
-            evaluate=lambda strain: self.evaluate(strain, macro_strain, plastic_history),
-            get_correction=lambda current: self.get_newton_correction(current, plastic_history),
-            initial_strain=initial_strain, macro_strain=macro_strain, divergence_limit=config.ls_divergence_limit,
-            measure_residual=lambda residual: apply_on_lattice(self.residual_in_matrix_units, residual))
-        self.previous_strain, self.previous_macro_strain = step_result.strain, macro_strain
-        return step_result
 
 def get_elastic_strain_concentration(lattice, matrix_L):
     # The strain of every partition of the lattice per unit macrostrain in elasticity, partitions × 6 × 6 (column k for

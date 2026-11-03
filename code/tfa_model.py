@@ -1,92 +1,281 @@
 # TFA, the baseline: the actual E/P model of notes/3_tfa_baseline.md, whose residual is r = ε - E ε̄ - P μ(ε) (ER-4),
-# with E and P the exact FE influence functions of the composite (fe.py). Its regions, called partitions below as in
-# the notes, are the clusters config.tfa_clusters names (fe.Clusters), each with one uniform eigenstrain and one
-# material update at its average strain; the strain itself varies inside a region. Each load step is
-# solved by Newton with GMRES (Strategy 2), on the matrix-free Jacobian J v = v - P (H_μ v) of ER-21.
+# with E and P the exact FE influence functions of the composite. Its regions, called partitions in the notes, are the
+# clusters config.tfa_clusters names (cell.Clusters), each with one uniform eigenstrain and one material update at its
+# average strain; the strain itself varies inside a cluster. Each load step is solved by Newton with GMRES (Strategy 2),
+# on the matrix-free Jacobian J v = v - P (H_μ v) of ER-21.
+#
+# From the 8-node element matrices come the influence functions on the clusters:
+#   E  the cluster-average strain per unit macrostrain (ER-1),
+#   P  the cluster-average strain per unit eigenstrain in each cluster (ER-24), a dense (6 × clusters)² matrix.
+# Both come from one factorization of the stiffness K and are cached in code/cache/, since P takes minutes.
 
-import functools
+import sys
+import time
 import numpy as np
+import scipy.sparse
+import scipy.sparse.linalg
+import tqdm
 
 import config
-from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_yielding_partitions
-from newton import Evaluation, Solver, solve_load_step, solve_newton_correction
+from cell import get_cached, get_geometry_parameters, get_grid_id, get_inclusion_L, get_matrix_L, get_value_per_material
+from material import apply_blocks, get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_yielding_clusters
+from newton import Evaluation, Solver, solve_by_gmres
 
-def get_induced_strain(P, eigenstrain):
-    return (P @ eigenstrain.reshape(-1)).reshape(-1, 6)
+## ------- Element Matrices ------- ##
 
-def get_partition_runs(partitions):
-    # (first, stop) of every run of consecutive partitions in the mask, in partition order.
-    edges = np.diff(np.concatenate(([0], partitions.astype(int), [0])))
+# The element's corners in natural coordinates, in the order get_grid_id gives them (x fastest).
+corner_natural_coordinates = np.array([[-1, -1, -1], [1, -1, -1], [-1, 1, -1], [1, 1, -1],
+                                       [-1, -1,  1], [1, -1,  1], [-1, 1,  1], [1, 1,  1]])
+
+def get_shape_function_derivatives(xi, eta, zeta):
+    # The trilinear shape functions' derivatives with respect to the natural coordinates, one entry per corner.
+    corner_xi, corner_eta, corner_zeta = corner_natural_coordinates.T
+    xi_bracket   = 1 + corner_xi   * xi
+    eta_bracket  = 1 + corner_eta  * eta
+    zeta_bracket = 1 + corner_zeta * zeta
+    derivative_wrt_xi   = corner_xi   * eta_bracket * zeta_bracket / 8
+    derivative_wrt_eta  = corner_eta  * xi_bracket  * zeta_bracket / 8
+    derivative_wrt_zeta = corner_zeta * xi_bracket  * eta_bracket  / 8
+    return derivative_wrt_xi, derivative_wrt_eta, derivative_wrt_zeta
+
+def get_B(discretization):
+    # The strain-displacement matrix ε = B u (engineering shear) at each of the 2 × 2 × 2 Gauss points, the same for
+    # every element of the regular mesh: shape (8 Gauss points, 6, 24).
+    gauss_point_coordinates = corner_natural_coordinates / np.sqrt(3)
+    B = np.zeros((8, 6, 24))
+
+    for gauss_index, (xi, eta, zeta) in enumerate(gauss_point_coordinates):
+        derivatives_wrt_xi, derivatives_wrt_eta, derivatives_wrt_zeta = get_shape_function_derivatives(xi, eta, zeta)
+        derivatives_wrt_x = derivatives_wrt_xi   * 2 / discretization.element_side_length
+        derivatives_wrt_y = derivatives_wrt_eta  * 2 / discretization.element_side_length
+        derivatives_wrt_z = derivatives_wrt_zeta * 2 / discretization.element_length_along_z
+
+        for corner in range(8):
+            column = 3 * corner
+            B[gauss_index, 0, column]     = derivatives_wrt_x[corner]
+            B[gauss_index, 1, column + 1] = derivatives_wrt_y[corner]
+            B[gauss_index, 2, column + 2] = derivatives_wrt_z[corner]
+            B[gauss_index, 3, column]     = derivatives_wrt_y[corner]
+            B[gauss_index, 3, column + 1] = derivatives_wrt_x[corner]
+            B[gauss_index, 4, column + 1] = derivatives_wrt_z[corner]
+            B[gauss_index, 4, column + 2] = derivatives_wrt_y[corner]
+            B[gauss_index, 5, column]     = derivatives_wrt_z[corner]
+            B[gauss_index, 5, column + 2] = derivatives_wrt_x[corner]
+
+    return B
+
+def get_K_element(B, gauss_point_volume, L):
+    # ∫ Bᵀ L B dV by 2 × 2 × 2 Gauss quadrature.
+    K_element = np.zeros((24, 24))
+    for gauss_index in range(8):
+        K_element += gauss_point_volume * B[gauss_index].T @ L @ B[gauss_index]
+    return K_element
+
+## ------- Assembly ------- ##
+
+def get_element_dofs(discretization):
+    # The 24 degrees of freedom of each element, its 8 nodes in corner_natural_coordinates order, nodes numbered as the
+    # elements are, periodically.
+    k, j, i = [axis.reshape(-1, 1) for axis in np.meshgrid(*map(np.arange, discretization.element_lattice_shape),
+                                                           indexing="ij")]
+    offset_i, offset_j, offset_k = (corner_natural_coordinates.T + 1) // 2
+    element_nodes = get_grid_id((i + offset_i) % discretization.elements_per_side,
+                                (j + offset_j) % discretization.elements_per_side,
+                                (k + offset_k) % discretization.elements_along_z, discretization.elements_per_side)
+    return (3 * element_nodes[:, :, None] + np.arange(3)).reshape(-1, 24)
+
+def get_cluster_components(element_cluster):
+    # The six entries of each element's cluster in a cluster-stacked vector such as ε, μ or b.
+    return 6 * element_cluster[:, None] + np.arange(6)
+
+def assemble_element_blocks(element_blocks, element_rows, element_columns, shape):
+    # Adds each element's block into a sparse global matrix at the given global rows and columns. Blocks that share
+    # an entry are summed, as in finite-element assembly.
+    rows = np.broadcast_to(element_rows[:, :, None], element_blocks.shape)
+    columns = np.broadcast_to(element_columns[:, None, :], element_blocks.shape)
+    return scipy.sparse.coo_matrix((element_blocks.ravel(), (rows.ravel(), columns.ravel())), shape=shape).tocsr()
+
+class FEModel:
+    # The periodic FE model of the composite on a mesh: its element matrices and the global operators of ER-24.
+    def __init__(self, mesh):
+        self.mesh = mesh
+        self.discretization = mesh.discretization
+        self.B = get_B(self.discretization)
+        self.gauss_point_volume = self.discretization.element_volume / 8
+        self.integrated_B = self.gauss_point_volume * np.sum(self.B, axis=0)    # ∫ B dV over one element
+        self.L_per_element = get_value_per_material(get_matrix_L(), get_inclusion_L(), mesh.element_material_ids)
+        self.element_dofs = get_element_dofs(self.discretization)
+
+    def get_K(self):
+        K_elements = np.array([get_K_element(self.B, self.gauss_point_volume, L) for L in self.L_per_element])
+        dof_count = self.discretization.dof_count
+        return assemble_element_blocks(K_elements, self.element_dofs, self.element_dofs, (dof_count, dof_count))
+
+    def get_F_elements(self):
+        # Each element's nodal load per unit eigenstrain, ∫ Bᵀ L dV (24 × 6).
+        return self.integrated_B.T @ self.L_per_element
+
+    def get_F_macrostrain(self):
+        # Nodal loads per unit macrostrain. Moving the applied strain to the right-hand side gives −∫ Bᵀ L ε̄ dV.
+        macrostrain_columns = np.tile(np.arange(6), (self.discretization.element_count, 1))
+        return -assemble_element_blocks(self.get_F_elements(), self.element_dofs, macrostrain_columns,
+                                        (self.discretization.dof_count, 6))
+
+    def get_F_eigenstrain(self, clusters):
+        # F_μ in ER-24: nodal loads per unit cluster eigenstrain, one block of six columns per cluster.
+        return assemble_element_blocks(self.get_F_elements(), self.element_dofs,
+                                       get_cluster_components(clusters.element_cluster),
+                                       (self.discretization.dof_count, 6 * clusters.cluster_count))
+
+    def get_cluster_averaging_operator(self, clusters):
+        # A_ε in ER-24: maps nodal displacements to cluster-average strain.
+        partition_volume = self.discretization.elements_per_partition * self.discretization.element_volume
+        cluster_volume = clusters.volume * partition_volume
+        element_blocks = self.integrated_B / cluster_volume[clusters.element_cluster, None, None]
+        return assemble_element_blocks(element_blocks, get_cluster_components(clusters.element_cluster),
+                                       self.element_dofs, (6 * clusters.cluster_count, self.discretization.dof_count))
+
+## ------- Influence Functions E and P ------- ##
+
+def get_influence_function_solver(model, clusters):
+    # Factorizes K once and returns solve(F), the cluster-average strain response A_ε K⁻¹ F to every load column of
+    # F, so that several sets of load columns share one factorization. Pinning one node's three displacements removes
+    # the rigid translation of the periodic cell.
+    dof_count = model.discretization.dof_count
+    free_dofs = np.arange(3, dof_count)
+    K_free = model.get_K()[free_dofs][:, free_dofs].tocsc()
+    print(f"  {f'factor K ({K_free.shape[0]} DOFs)':<26}: ", end="", flush=True)
+    start_time = time.perf_counter()
+    K_free_factorization = scipy.sparse.linalg.splu(K_free, permc_spec='MMD_AT_PLUS_A')
+    print(f"{time.perf_counter() - start_time:.1f} s")
+    A = model.get_cluster_averaging_operator(clusters)
+
+    def solve(F):
+        F_free = F.tocsr()[free_dofs].tocsc()
+        columns_per_solve = config.fe_columns_per_solve
+        average_strain = np.zeros((A.shape[0], F.shape[1]))
+        column_batches = tqdm.tqdm(range(0, F.shape[1], columns_per_solve),
+                                   desc=f"  {f'solve {F.shape[1]} load columns':<26}",
+                                   bar_format="{desc}: {percentage:3.0f}% |{bar:25}| {n_fmt}/{total_fmt} batches "
+                                              "[{elapsed} elapsed, {remaining} left]", file=sys.stdout)
+        for first_column in column_batches:
+            columns = slice(first_column, first_column + columns_per_solve)
+            batch_F_free = F_free[:, columns].toarray()
+            batch_displacements = np.zeros((dof_count, batch_F_free.shape[1]))
+            batch_displacements[free_dofs] = K_free_factorization.solve(batch_F_free)
+            average_strain[:, columns] = A @ batch_displacements
+        return average_strain
+
+    return solve
+
+def compute_E_and_P(mesh, clusters):
+    # E and P from one factorization of K, each with the seconds it took: E's include assembling and factorizing K, P's
+    # only its own solves.
+    start_time = time.perf_counter()
+    model = FEModel(mesh)
+    solve = get_influence_function_solver(model, clusters)
+    # ER-1: E is the applied macrostrain plus the fluctuation it causes; P is A_ε K⁻¹ F_μ (ER-24).
+    E = np.tile(np.eye(6), (clusters.cluster_count, 1)) + solve(model.get_F_macrostrain())
+    E_seconds = time.perf_counter() - start_time
+    P = solve(model.get_F_eigenstrain(clusters))
+    P_seconds = time.perf_counter() - start_time - E_seconds
+    return {"E": E, "P": P}, {"E": E_seconds, "P": P_seconds}
+
+## ------- Cache of E and P ------- ##
+
+# Increase whenever a code change alters E or P, so caches made by the old code are recomputed.
+# 2: the geometry is resolved on the elements, not the partitions. 3: E and P are built on clusters.
+cache_version = 3
+
+def get_E_and_P(mesh, clusters):
+    # E and P on the clusters, and the seconds they took to build, by name ("E", "P"), measured when they were computed,
+    # even if they now come from the cache.
+    discretization = mesh.discretization
+    parameters = {"cache_version": cache_version,
+                  **get_geometry_parameters(),
+                  "elements_per_side": discretization.elements_per_side,
+                  "elements_along_z": discretization.elements_along_z,
+                  "partitions_per_side": discretization.partitions_per_side,
+                  "L_matrix": get_matrix_L(),
+                  "L_inclusion": get_inclusion_L(),
+                  # The clusters themselves, so any change of clustering (k-means settings included) finds its own
+                  # cache.
+                  "element_cluster": clusters.element_cluster}
+    E_P, build_seconds = get_cached(("E", "P"), parameters, lambda: compute_E_and_P(mesh, clusters))
+    # Column-major, so the columns of a run of consecutive clusters are contiguous and P products can read just the
+    # yielding clusters' columns without copying them (apply_P_to_clusters).
+    return E_P["E"], np.asfortranarray(E_P["P"]), build_seconds
+
+## ------- Solver ------- ##
+
+def get_cluster_runs(clusters):
+    # (first, stop) of every run of consecutive clusters in the mask, in cluster order.
+    edges = np.diff(np.concatenate(([0], clusters.astype(int), [0])))
     return zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1))
 
-def apply_P_to_partitions(P, partition_field, partitions):
-    # P times a partition field that is zero outside the given partitions, from only those partitions' columns of P.
-    # P is column-major, so each run of consecutive partitions is one contiguous block of columns, used without a
-    # copy. Fancy-indexing P[:, columns] instead would copy them, which costs more than the full product.
+def apply_P_to_clusters(P, cluster_field, clusters):
+    # P times a cluster field that is zero outside the given clusters, from only those clusters' columns of P. P is
+    # column-major, so each run of consecutive clusters is one contiguous block of columns, used without a copy.
+    # Fancy-indexing P[:, columns] instead would copy them, which costs more than the full product.
     product = np.zeros(P.shape[0])
-    for first, stop in get_partition_runs(partitions):
-        product += P[:, 6 * first:6 * stop] @ partition_field[first:stop].reshape(-1)
+    for first, stop in get_cluster_runs(clusters):
+        product += P[:, 6 * first:6 * stop] @ cluster_field[first:stop].reshape(-1)
     return product.reshape(-1, 6)
 
-def get_induced_strain_reusing_history(P, plastic_state, plastic_history, induced_strain_history):
-    # Pμ = Pμₙ + PΔμ, where Δμ is zero outside the partitions yielding in this step, so only their columns of P
-    # are needed. The mask is taken from Δμ itself, so every skipped column multiplies an exact zero.
-    eigenstrain_increment = plastic_state.plastic_strain - plastic_history.plastic_strain
-    changed_partitions = np.any(eigenstrain_increment != 0, axis=1)
-    if not np.any(changed_partitions):
-        return induced_strain_history
-    return induced_strain_history + apply_P_to_partitions(P, eigenstrain_increment, changed_partitions)
+class TFASolver(Solver):
+    # TFA on the given clusters, which E and P were built on. Each step starts from the exact elastic predictor
+    # E ε̄ + P μₙ, and every evaluation solves the clusters that stay elastic exactly (evaluate).
+    def __init__(self, E, P, clusters):
+        super().__init__(clusters, clusters.cluster_count)
+        self.E = E
+        self.P = P
 
-def reset_elastic_partitions(strain, b, P, induced_strain_history, materials, plastic_history):
-    # Updates the material at the given strain, solves the partitions that stay elastic exactly, and returns the
-    # residual r = ε - b - Pμ(ε) of ER-4, which is then zero in every elastic partition.
-    #
-    # An elastic partition's eigenstrain stays at its accepted value, so setting its strain to b + Pμ zeroes its
-    # residual without changing μ. Yielding partitions keep their strain, so their μ does not change either. The
-    # second material update catches elastic partitions that the reset pushed past yield: only then does μ, and
-    # so Pμ, change.
-    plastic_state, stress = get_plastic_eigenstrain(strain, materials, plastic_history)
-    induced_strain = get_induced_strain_reusing_history(P, plastic_state, plastic_history, induced_strain_history)
-    yielding_partitions = get_yielding_partitions(plastic_state, plastic_history)
+    def divergence_limit(self):
+        return config.tfa_divergence_limit
 
-    strain = strain.copy()
-    strain[~yielding_partitions] = b[~yielding_partitions] + induced_strain[~yielding_partitions]
+    def start_step(self, macro_strain, plastic_history):
+        self.b = (self.E @ macro_strain).reshape(-1, 6)
+        self.induced_strain_history = (self.P @ plastic_history.plastic_strain.reshape(-1)).reshape(-1, 6)
+        return self.b + self.induced_strain_history
 
-    plastic_state, stress = get_plastic_eigenstrain(strain, materials, plastic_history)
-    if not np.array_equal(get_yielding_partitions(plastic_state, plastic_history), yielding_partitions):
-        induced_strain = get_induced_strain_reusing_history(P, plastic_state, plastic_history, induced_strain_history)
+    def get_induced_strain(self, plastic_state, plastic_history):
+        # Pμ = Pμₙ + PΔμ, where Δμ is zero outside the clusters yielding in this step, so only their columns of P are
+        # needed. The mask is taken from Δμ itself, so every skipped column multiplies an exact zero.
+        eigenstrain_increment = plastic_state.plastic_strain - plastic_history.plastic_strain
+        changed_clusters = np.any(eigenstrain_increment != 0, axis=1)
+        if not np.any(changed_clusters):
+            return self.induced_strain_history
+        return self.induced_strain_history + apply_P_to_clusters(self.P, eigenstrain_increment, changed_clusters)
 
-    residual = strain - b - induced_strain
-    return strain, plastic_state, stress, residual
+    def evaluate(self, strain, macro_strain, plastic_history):
+        # Updates the material at the given strain, solves the clusters that stay elastic exactly, and returns the
+        # residual r = ε - b - Pμ(ε) of ER-4, which is then zero in every elastic cluster.
+        #
+        # An elastic cluster's eigenstrain stays at its accepted value, so setting its strain to b + Pμ zeroes its
+        # residual without changing μ. Yielding clusters keep their strain, so their μ does not change either. The
+        # second material update catches elastic clusters that the reset pushed past yield: only then does μ, and so
+        # Pμ, change.
+        materials = self.clusters.materials
+        plastic_state, stress = get_plastic_eigenstrain(strain, materials, plastic_history)
+        induced_strain = self.get_induced_strain(plastic_state, plastic_history)
+        yielding_clusters = get_yielding_clusters(plastic_state, plastic_history)
 
-def get_newton_krylov_correction(P, sensitivity, residual):
-    # Solves J δε = -r (ER-18) by GMRES, with the matrix-free product J v = v - P (H_μ v) of ER-21. H_μ is zero
-    # outside the yielding partitions, so each product reads only their columns of P.
-    yielding_partitions = np.any(sensitivity != 0, axis=(1, 2))
+        strain = strain.copy()
+        strain[~yielding_clusters] = self.b[~yielding_clusters] + induced_strain[~yielding_clusters]
 
-    def apply_jacobian(vector):
-        return vector - apply_P_to_partitions(P, np.einsum('pij,pj->pi', sensitivity, vector), yielding_partitions)
+        plastic_state, stress = get_plastic_eigenstrain(strain, materials, plastic_history)
+        if not np.array_equal(get_yielding_clusters(plastic_state, plastic_history), yielding_clusters):
+            induced_strain = self.get_induced_strain(plastic_state, plastic_history)
 
-    return solve_newton_correction(apply_jacobian, residual)
+        return Evaluation(strain, plastic_state, stress, strain - self.b - induced_strain)
 
-def newton_krylov_iteration(E, P, clusters, macro_strain, plastic_history):
-    # One load step (Strategy 2): Newton on the actual residual ER-4, from the exact elastic predictor Eε̄ + Pμₙ.
-    # The clusters have different volumes, so the residual norm is a volume average over them.
-    materials = clusters.materials
-    b = (E @ macro_strain).reshape(-1, 6)
-    induced_strain_history = get_induced_strain(P, plastic_history.plastic_strain)
+    def get_newton_correction(self, current, plastic_history):
+        # Solves J δε = -r (ER-18) by GMRES, with the matrix-free product J v = v - P (H_μ v) of ER-21. H_μ is zero
+        # outside the yielding clusters, so each product reads only their columns of P.
+        sensitivity = get_eigenstrain_sensitivity(current.strain, self.clusters.materials, plastic_history)
+        yielding_clusters = np.any(sensitivity != 0, axis=(1, 2))
 
-    def evaluate(strain):
-        return Evaluation(*reset_elastic_partitions(strain, b, P, induced_strain_history, materials,
-                                                    plastic_history))
+        def apply_jacobian(vector):
+            return vector - apply_P_to_clusters(self.P, apply_blocks(sensitivity, vector), yielding_clusters)
 
-    def get_correction(current):
-        sensitivity = get_eigenstrain_sensitivity(current.strain, materials, plastic_history)
-        return get_newton_krylov_correction(P, sensitivity, current.residual)
-
-    return solve_load_step(evaluate, get_correction, b + induced_strain_history, macro_strain,
-                           config.tfa_divergence_limit, clusters.average)
-
-def get_tfa_solver(E, P, clusters):
-    # TFA on the given clusters, which E and P were built on.
-    return Solver(functools.partial(newton_krylov_iteration, E, P, clusters), clusters)
+        return solve_by_gmres(apply_jacobian, current.residual)

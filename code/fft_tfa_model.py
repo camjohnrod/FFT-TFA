@@ -4,7 +4,7 @@
 #
 # With C0 = L_m, a matrix element's polarization τ = (L − C0) ε − L μ is −L_m μ_g: exact for one uniform eigenstrain per
 # cluster, whatever the cluster's shape. An inclusion element's polarization depends on its strain, and is taken
-# uniform on each inclusion cluster's piece (its part in one partition, fe.Clusters). So the polarization lives on
+# uniform on each inclusion cluster's piece (its part in one partition, cell.Clusters). So the polarization lives on
 # regions, each matrix cluster and each inclusion piece, and the unknowns are one strain per region (FT-1). The
 # regions interact through LS-5 averaged over them (FT-2): the partition-averaged kernel on each partition's mean
 # polarization, by FFT on the partitions (LS-17), plus a correction to the exact element-level interaction between
@@ -16,17 +16,16 @@ from typing import NamedTuple
 import numpy as np
 import scipy.sparse
 
-import config
 from ls_model import (apply_on_lattice, apply_sparse, assemble_blocks, get_moulinec_suquet_kernel, get_offset_blocks,
                       get_P0_transformed)
-from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain
-from newton import Evaluation, solve_load_step, solve_newton_correction
+from material import apply_blocks, get_eigenstrain_sensitivity, get_plastic_eigenstrain
+from newton import Evaluation, Solver, solve_by_gmres
 
 ## ------- Regions (FT-1) ------- ##
 
 class Interaction(NamedTuple):
     # FFT-TFA's operators on its clusters, built once (get_interaction). Region volumes are in partition volumes, as
-    # fe.Clusters' are. The sparse averages act on arrays of rows of 6 (@); the *_blocks matrices hold 6 × 6 blocks
+    # cell.Clusters' are. The sparse averages act on arrays of rows of 6 (@); the *_blocks matrices hold 6 × 6 blocks
     # (apply_sparse).
     clusters: tuple
     matrix_L: np.ndarray                     # C0
@@ -192,24 +191,24 @@ def get_strain_change(interaction, region_polarization):
 
 ## ------- Solver (FT-5, FT-6) ------- ##
 
-class FFTTFASolver:
-    # FFT-TFA along the load path: solve_step(macro_strain, plastic_history) solves one load step by Newton on the
-    # region strains, from the previous step's shifted by the macrostrain increment, as the LS methods do. Its residual
-    # is a strain error, like TFA's, judged by its volume average over the regions.
+class FFTTFASolver(Solver):
+    # FFT-TFA: Newton on the region strains. Its residual is a strain error, like TFA's, judged by its volume average
+    # over the regions.
     def __init__(self, interaction):
+        super().__init__(interaction.clusters, len(interaction.region_cluster))
         self.interaction = interaction
-        self.clusters = interaction.clusters
         materials = self.clusters.materials
         self.region_stiffness_contrast = materials.L[interaction.region_cluster] - interaction.matrix_L
         self.region_share = interaction.region_volume / self.clusters.volume[interaction.region_cluster]   # v_r / v_g
-        self.previous_strain = np.zeros((len(interaction.region_cluster), 6))
-        self.previous_macro_strain = np.zeros(6)
+
+    def average(self, values):
+        return self.interaction.region_volume @ values / self.clusters.partition_count
 
     def get_polarization(self, region_strain, eigenstrain):
         # FT-1: τ_r = (L_g − C0) ε_r − L_g μ_g, which is −L_m μ_g in a matrix region.
         materials, region_cluster = self.clusters.materials, self.interaction.region_cluster
-        return (np.einsum('rij,rj->ri', self.region_stiffness_contrast, region_strain)
-                - np.einsum('rij,rj->ri', materials.L[region_cluster], eigenstrain[region_cluster]))
+        return (apply_blocks(self.region_stiffness_contrast, region_strain)
+                - apply_blocks(materials.L[region_cluster], eigenstrain[region_cluster]))
 
     def evaluate(self, region_strain, macro_strain, plastic_history):
         # FT-5: r = ε − ε̄ + (FT-2's strain change), each cluster's eigenstrain from its return map at its average
@@ -232,9 +231,10 @@ class FFTTFASolver:
         plastic_stiffness = materials.L @ sensitivity                                   # L_g H_g
 
         def apply_polarization_change(vector):
-            return (np.einsum('rij,rj->ri', self.region_stiffness_contrast, vector)
-                    - apply_cluster_blocks(plastic_stiffness, interaction.region_to_cluster @ vector,
-                                           interaction.region_cluster))
+            cluster_change = interaction.region_to_cluster @ vector
+            return (apply_blocks(self.region_stiffness_contrast, vector)
+                    - apply_blocks(plastic_stiffness[interaction.region_cluster],
+                                   cluster_change[interaction.region_cluster]))
 
         def apply_jacobian(vector):
             return vector + get_strain_change(interaction, apply_polarization_change(vector))
@@ -245,27 +245,8 @@ class FFTTFASolver:
                            @ plastic_stiffness[interaction.region_cluster])
         inverse_blocks = np.linalg.inv(diagonal_blocks)
 
-        def apply_preconditioner(vector):
-            return np.einsum('rij,rj->ri', inverse_blocks, vector)
-
-        y, gmres_iteration_count = solve_newton_correction(lambda vector: apply_jacobian(apply_preconditioner(vector)),
-                                                           current.residual)
-        return apply_preconditioner(y), gmres_iteration_count
-
-    def solve_step(self, macro_strain, plastic_history):
-        initial_strain = self.previous_strain + (macro_strain - self.previous_macro_strain)
-        region_volume, partition_count = self.interaction.region_volume, self.clusters.partition_count
-        step_result = solve_load_step(
-            evaluate=lambda strain: self.evaluate(strain, macro_strain, plastic_history),
-            get_correction=lambda current: self.get_newton_correction(current, plastic_history),
-            initial_strain=initial_strain, macro_strain=macro_strain, divergence_limit=config.ls_divergence_limit,
-            average=lambda values: region_volume @ values / partition_count)
-        self.previous_strain, self.previous_macro_strain = step_result.strain, macro_strain
-        return step_result
-
-def apply_cluster_blocks(cluster_blocks, cluster_rows, region_cluster):
-    # Every region's cluster's block times that cluster's row.
-    return np.einsum('rij,rj->ri', cluster_blocks[region_cluster], cluster_rows[region_cluster])
+        return solve_by_gmres(apply_jacobian, current.residual,
+                              apply_preconditioner=lambda vector: apply_blocks(inverse_blocks, vector))
 
 def get_pairs_within_groups(groups, members):
     # Every pair (i, j) of a member i of the given ones with any j of i's group (j = i included).

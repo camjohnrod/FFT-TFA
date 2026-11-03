@@ -5,17 +5,17 @@ from typing import NamedTuple
 import numpy as np
 
 class PlasticState(NamedTuple):
-    # Partition-stacked plastic history: either the accepted history z_n of ER-3 or a candidate for the current step.
+    # Cluster-stacked plastic history: either the accepted history z_n of ER-3 or a candidate for the current step.
     plastic_strain: np.ndarray
     accumulated_plastic_strain: np.ndarray
 
-def get_unloaded_plastic_state(partition_count):
+def get_unloaded_plastic_state(cluster_count):
     # The plastic history before the first load step: no plastic strain anywhere.
-    return PlasticState(np.zeros((partition_count, 6)), np.zeros(partition_count))
+    return PlasticState(np.zeros((cluster_count, 6)), np.zeros(cluster_count))
 
-def get_yielding_partitions(plastic_state, plastic_history):
-    # The partitions that flow plastically in a candidate state: those that accumulate plastic strain beyond the
-    # accepted history.
+def get_yielding_clusters(plastic_state, plastic_history):
+    # The clusters that flow plastically in a candidate state: those that accumulate plastic strain beyond the accepted
+    # history.
     return plastic_state.accumulated_plastic_strain > plastic_history.accumulated_plastic_strain
 
 class TrialState(NamedTuple):
@@ -32,6 +32,10 @@ deviatoric_projector = np.zeros((6, 6))
 deviatoric_projector[:3, :3] = np.eye(3) - np.ones((3, 3)) / 3
 deviatoric_projector[3:, 3:] = np.eye(3)
 
+def apply_blocks(blocks, rows):
+    # One 6 × 6 block times one row of 6, row by row.
+    return np.einsum('pij,pj->pi', blocks, rows)
+
 def get_deviatoric_stress(stress):
     return stress @ deviatoric_projector.T
 
@@ -45,7 +49,7 @@ def get_flow_stress(materials, accumulated_plastic_strain):
     return materials.yield_stress + materials.hardening_modulus * accumulated_plastic_strain
 
 def get_trial_state(strain, materials, plastic_history):
-    stress = np.einsum('pij,pj->pi', materials.L, strain - plastic_history.plastic_strain)
+    stress = apply_blocks(materials.L, strain - plastic_history.plastic_strain)
     mean_stress = np.sum(stress[:, :3], axis=1) / 3
     deviatoric_stress = stress - np.outer(mean_stress, volumetric_direction)
     equivalent_stress = get_equivalent_stress(deviatoric_stress)
@@ -86,7 +90,7 @@ def get_plastic_eigenstrain(strain, materials, plastic_history):
     return PlasticState(plastic_strain, accumulated_plastic_strain), stress
 
 def get_eigenstrain_sensitivity(strain, materials, plastic_history):
-    # H_μ = ∂μ/∂ε at the current strain (ER-8), zero in partitions that stay elastic.
+    # H_μ = ∂μ/∂ε at the current strain (ER-8), zero in clusters that stay elastic.
     trial = get_trial_state(strain, materials, plastic_history)
 
     sensitivity = np.zeros((len(strain), 6, 6))
