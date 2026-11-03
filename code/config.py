@@ -49,7 +49,7 @@ run_name                    = "biaxial cyclic"
 # What to compare: any number of entries per method, each a line in the table and in the figures; an empty list switches
 # a method off. Later entries of a method are drawn darker, so list them coarse to fine. With several entries of a
 # method and the reference on, error_against_time.png shows the trade-off.
-#   FFT-TFA      the method under development (notes/2_ls_model.md section 10): TFA's clusters interacting through the
+#   FFT-TFA      the method under development (notes/2_ls_model.md section 5): TFA's clusters interacting through the
 #                Lippmann–Schwinger (LS) equation of the matrix, by an FFT on the partitions plus exact corrections
 #                between nearby clusters.
 #                partitions          per side, must divide elements_per_side
@@ -113,7 +113,7 @@ fiber_seed                  = 1
 
 # The phases, by a name from material_sets: isotropic elasticity and J2 plasticity with linear isotropic hardening, the
 # hardening zero or above (Spectral LS's conjugate gradients need a positive definite tangent, notes/2_ls_model.md
-# section 7.7). A yield stress of np.inf keeps a phase elastic.
+# section 4.2). A yield stress of np.inf keeps a phase elastic.
 materials                   = "glass/PA"
 material_sets = {
     "glass/PA": dict(matrix=dict(E=2.1 * GPa, poisson=0.3, yield_stress=29 * MPa, hardening=139 * MPa),
@@ -172,10 +172,10 @@ fiber_push_margin           = 1e-3
 fiber_push_passes           = 10000
 
 # Every method solves each load step by Newton, each Newton correction by a Krylov method, with these settings: GMRES,
-# or conjugate gradients for Spectral LS, whose Newton system is symmetric (notes/2_ls_model.md section 7.7). A step has
+# or conjugate gradients for Spectral LS, whose Newton system is symmetric (notes/2_ls_model.md section 4.2). A step has
 # converged when its relative residual (the strain residual over the imposed strain, never over less than
 # residual_strain_scale_floor) is below convergence_tolerance. The residual of Spectral LS is a strain of its reference
-# medium, so it is judged as the correction an all-matrix cell would need (notes/2_ls_model.md section 7.5), and the
+# medium, so it is judged as the correction an all-matrix cell would need (notes/2_ls_model.md section 4.3), and the
 # tolerance means the same for any reference stiffness. FFT-TFA's reference medium is the matrix already.
 convergence_tolerance       = 1e-6
 residual_strain_scale_floor = 1e-4
@@ -206,7 +206,7 @@ laminate_tolerance          = 1e-5
 laminate_solver_tolerance   = 1e-11
 laminate_solver_max_iterations = 50
 # FFT-TFA's interaction at full reach must match the element-level LS operator, to this relative tolerance
-# (notes/2_ls_model.md section 10.6; measured below 1e-14).
+# (notes/2_ls_model.md section 5.6; measured below 1e-14).
 interaction_check_tolerance = 1e-12
 # Every method stopped at convergence_tolerance must lie within stopping_accuracy_tolerance (relative, as
 # laminate_tolerance) of its own solution at stopping_check_tolerance, so none gains speed by stopping less accurately

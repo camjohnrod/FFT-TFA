@@ -89,7 +89,7 @@ def average_over_partitions(element_P0, discretization):
     # The partitions' kernel from the elements' (same mesh), by linearity. Unit eigenstrain in a partition is unit
     # eigenstrain in each of its k × k × k_z elements, and a partition's strain is the mean over its elements, so with
     # K = (k_z, k, k) and offsets grouped by d = s − t, which (k_z − |d_z|)(k − |d_y|)(k − |d_x|) pairs share:
-    #   P0[D] = Σ_d (k_z − |d_z|)(k − |d_y|)(k − |d_x|) / (k_z k²) · p0_element[K D + d]       (LS note, section 6.5)
+    #   P0[D] = Σ_d (k_z − |d_z|)(k − |d_y|)(k − |d_x|) / (k_z k²) · p0_element[K D + d]       (LS note, section 3.2)
     # Offsets are periodic. One element per partition returns the kernel unchanged. A column through the thickness
     # averages over every z offset, which keeps only the ξ_z = 0 frequencies: the in-plane kernel.
     k, k_z = discretization.elements_per_partition_side, discretization.elements_per_partition_along_z

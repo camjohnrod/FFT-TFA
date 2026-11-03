@@ -95,7 +95,7 @@ check_problems = {
     # A layer 7 elements thick, so each interface cuts a partition (2/3 fiber), so partitions there hold both phases. In
     # transverse shear γ12 both phases carry the same stress. FFT-TFA represents the exact polarization, but its
     # interaction is exact only within reach of each partition, and the cut partitions line up along the layer, so their
-    # far-field error adds up instead of decaying (notes/2_ls_model.md section 10.5).
+    # far-field error adds up instead of decaying (notes/2_ls_model.md section 5.5).
     "cut laminate": {"inclusion_shape": "laminate", "layer_thickness": (7 / 27) * 1e-3,
                      **get_cyclic_load(strain(g12=0.03))},
     # A circular fiber under tension and shear, with a band of mixed partitions around it, and the reference switched

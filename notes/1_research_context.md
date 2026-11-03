@@ -101,7 +101,7 @@ $\widehat{\boldsymbol\Gamma}_0$ over the alias directions. The known operators a
 | **Moulinec–Suquet** | $\mathbf m=\mathbf 0$ only, weight 1 | Closed form. Wrong near the highest lattice frequency $\xi=n/2$, where the true weight is $(2/\pi)^2\approx0.41$ per direction. |
 | **Filtered** (Brisard–Dormieux 2012, eqs. 44–45) | 2 per direction, $\cos^2$ weights | MS on a grid twice as fine, averaged back. |
 | **Fine grid, averaged** (how SCA computes $\mathbf D$) | $k$ per direction | Tends to consistent as $k$ grows. MS is $k=1$, filtered $k=2$ (our observation). |
-| **FE kernel** (our code, LS-14) | — | The FE discretization's Green operator, averaged. Not of this form. |
+| **FE kernel** (an earlier version of our code) | — | The FE discretization's Green operator, averaged. Not of this form. |
 
 Notes on each:
 
@@ -240,7 +240,7 @@ Titles only flag candidates; none was read.
 ## 6. Consequences for this project
 
 - With single-phase partitions the partition grid already resolves the geometry, so the fine mesh enters LS only
-  through $\mathbf P_0$. With the consistent operator, $\mathbf P_0$ contains no mesh at all and CP and a
+  through $\mathbf P_0$. With the consistent operator, $\mathbf P_0$ contains no mesh at all and the partition-averaged equation and a
   Moulinec–Suquet solve on the partition grid coincide. Comparing them then measures the operator, which Brisard–Dormieux did for linear elasticity
   (section 3).
 - Two cautions from the literature. Spatial clusters converged poorly in Liu–Bessa–Liu's test, and coarse
@@ -248,14 +248,14 @@ Titles only flag candidates; none was read.
   fibre; Kabel et al.: relative error near 20 % at half resolution). Uniform partitions will likely need many
   partitions; the FFT is what makes many affordable.
 - What follows for the project, adopted as its research question and roadmap (README, "Status and roadmap"):
-  1. **Moulinec–Suquet kernel** (roadmap step 2, done, LS-21): MS on the element grid, averaged over
+  1. **Moulinec–Suquet kernel** (done, LS-21): MS on the element grid, averaged over
      partitions as SCA averages its fine-grid operator over clusters ("fine grid, averaged" in the table of
      section 2). The consistent kernel, its limit as the element grid is refined, is left for later.
-  2. **The TFA–LS relationship** (step 4), the main thread: Schneider's §4 gives the formal link (full against
+  2. **The TFA–LS relationship** (step 2), the main thread: Schneider's §4 gives the formal link (full against
      averaged Green operator), and nobody in the papers read measures it. Can TFA be written as LS plus a correction
      for the strain varying inside partitions, how large is it, and do the two converge at the same rate? A first
      data point from a scratch test: no $\mathbf C_0$ reproduced the translation average of TFA's $\mathbf P$.
-  3. **Cost at equal accuracy** (step 5): many uniform partitions with an FFT, $O(M\log M)$, against a few adaptive
+  3. **Cost at equal accuracy** (step 3): many uniform partitions with an FFT, $O(M\log M)$, against a few adaptive
      clusters with a dense $\mathbf D$, $O(K^2)$.
 
 ## Sources

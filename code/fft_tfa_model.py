@@ -1,4 +1,4 @@
-# FFT-TFA (notes/2_ls_model.md section 10, equations FT-*): TFA's clusters, each with one uniform eigenstrain and one
+# FFT-TFA (notes/2_ls_model.md section 5, equations FT-*): TFA's clusters, each with one uniform eigenstrain and one
 # material update at its average strain, interacting through the Lippmann–Schwinger equation of a homogeneous medium
 # of the matrix's elastic stiffness, C0 = L_m, instead of the composite's FE influence functions.
 #

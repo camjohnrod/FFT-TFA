@@ -2,7 +2,7 @@
 
 "An optimal preconditioned FFT-accelerated finite element solver for homogenization". PDF:
 `../An-optimal-preconditioned-FFT-accelerated-finite-element-solver-for-homogenization.pdf`. Read 2026-10-27 to
-choose preconditioners for CP and Spectral LS.
+choose preconditioners for Spectral LS and for CP, the earlier method (git tag `pre-cleanup-2`).
 
 ## Scope
 Displacement-based (DB) FE discretization on a regular periodic grid (any space-filling stencil: bilinear quads,
@@ -53,8 +53,8 @@ linear triangles, trilinear hexes, several nodes per stencil), small-strain nonl
 ## Relevance (our reading)
 - A displacement-based FE scheme, not a Lippmann–Schwinger one: the user's decision (2026-10-27) is not to cite it
   for the preconditioners of CP and Spectral LS. Their justification rests on the LS derivation itself
-  (`notes/2_ls_model.md` section 7.4) and on the LS literature.
-- Relevant to roadmap step 3, the FE-consistent gold-standard reference (displacement unknowns, plasticity at the
+  (the earlier LS note's section 7.4, git tag `pre-cleanup-2`) and on the LS literature.
+- Relevant to roadmap step 1, the FE-consistent gold-standard reference (displacement unknowns, plasticity at the
   Gauss points): Algorithms 1–2 and (14) are a recipe for its Newton–PCG solver with an FFT-inverted reference
   preconditioner; the mean-stiffness reference beat the identity in every test (Fig. 9, Table 1).
 - Their eigenvalue bounds assume a Galerkin (consistent) FE discretization with PCG.
