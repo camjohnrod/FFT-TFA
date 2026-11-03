@@ -17,7 +17,8 @@ import scipy.sparse.linalg
 import tqdm
 
 import config
-from cell import get_cached, get_geometry_parameters, get_grid_id, get_inclusion_L, get_matrix_L, get_value_per_material
+from cell import (get_cached, get_geometry_parameters, get_grid_id, get_inclusion_L, get_matrix_L, get_memory_MB,
+                  get_value_per_material)
 from material import apply_blocks, get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_yielding_clusters
 from newton import Evaluation, Solver, solve_by_gmres
 
@@ -146,7 +147,7 @@ def get_influence_function_solver(model, clusters):
     K_free = model.get_K()[free_dofs][:, free_dofs].tocsc()
     print(f"  {f'factor K ({K_free.shape[0]} DOFs)':<26}: ", end="", flush=True)
     start_time = time.perf_counter()
-    K_free_factorization = scipy.sparse.linalg.splu(K_free, permc_spec='MMD_AT_PLUS_A')
+    K_free_factorization = scipy.sparse.linalg.splu(K_free, permc_spec=config.fe_factorization_ordering)
     print(f"{time.perf_counter() - start_time:.1f} s")
     A = model.get_cluster_averaging_operator(clusters)
 
@@ -169,27 +170,24 @@ def get_influence_function_solver(model, clusters):
     return solve
 
 def compute_E_and_P(mesh, clusters):
-    # E and P from one factorization of K, each with the seconds it took: E's include assembling and factorizing K, P's
-    # only its own solves.
-    start_time = time.perf_counter()
+    # E and P from one factorization of K, the seconds they took and the memory they needed.
+    start_time, start_memory = time.perf_counter(), get_memory_MB("VmRSS")
     model = FEModel(mesh)
     solve = get_influence_function_solver(model, clusters)
     # ER-1: E is the applied macrostrain plus the fluctuation it causes; P is A_ε K⁻¹ F_μ (ER-24).
     E = np.tile(np.eye(6), (clusters.cluster_count, 1)) + solve(model.get_F_macrostrain())
-    E_seconds = time.perf_counter() - start_time
     P = solve(model.get_F_eigenstrain(clusters))
-    P_seconds = time.perf_counter() - start_time - E_seconds
-    return {"E": E, "P": P}, {"E": E_seconds, "P": P_seconds}
+    return {"E": E, "P": P, "build_seconds": time.perf_counter() - start_time,
+            "build_peak_MB": get_memory_MB("VmHWM") - start_memory}
 
 ## ------- Cache of E and P ------- ##
 
 # Increase whenever a code change alters E or P, so caches made by the old code are recomputed.
-# 2: the geometry is resolved on the elements, not the partitions. 3: E and P are built on clusters.
-cache_version = 3
+cache_version = 4
 
 def get_E_and_P(mesh, clusters):
-    # E and P on the clusters, and the seconds they took to build, by name ("E", "P"), measured when they were computed,
-    # even if they now come from the cache.
+    # E and P on the clusters, and the seconds and memory they took to build, measured when they were computed, even if
+    # they now come from the cache.
     discretization = mesh.discretization
     parameters = {"cache_version": cache_version,
                   **get_geometry_parameters(),
@@ -201,10 +199,13 @@ def get_E_and_P(mesh, clusters):
                   # The clusters themselves, so any change of clustering (k-means settings included) finds its own
                   # cache.
                   "element_cluster": clusters.element_cluster}
-    E_P, build_seconds = get_cached(("E", "P"), parameters, lambda: compute_E_and_P(mesh, clusters))
+    description = (f"E and P on {clusters.cluster_count} clusters, {discretization.elements_per_side} elements per "
+                   f"side, {discretization.partitions_per_side} partitions per side, {config.inclusion_shape}, "
+                   f"{config.materials}")
+    arrays = get_cached("E_and_P", parameters, description, lambda: compute_E_and_P(mesh, clusters))
     # Column-major, so the columns of a run of consecutive clusters are contiguous and P products can read just the
     # yielding clusters' columns without copying them (apply_P_to_clusters).
-    return E_P["E"], np.asfortranarray(E_P["P"]), build_seconds
+    return arrays["E"], np.asfortranarray(arrays["P"]), float(arrays["build_seconds"]), float(arrays["build_peak_MB"])
 
 ## ------- Solver ------- ##
 

@@ -8,6 +8,7 @@
 # expensive results is here too.
 
 import hashlib
+import re
 import warnings
 from typing import NamedTuple
 import numpy as np
@@ -137,19 +138,6 @@ def get_discretization(elements_per_side, partitions_per_side):
         return Discretization(elements_per_side, 1, partitions_per_side, 1)
     return Discretization(elements_per_side, elements_per_side, partitions_per_side, partitions_per_side)
 
-def get_partition_discretization():
-    # The mesh and partitions config.py describes, shared by FFT-TFA and TFA.
-    return get_discretization(config.elements_per_side, config.partitions_per_side)
-
-def get_spectral_discretization(elements_per_side):
-    # A lattice of one partition per element, elements_per_side per side.
-    return get_discretization(elements_per_side, elements_per_side)
-
-def get_spectral_ls_discretization():
-    # Spectral LS's lattice: on its own elements (config.spectral_ls_elements_per_side), or the mesh's when None.
-    elements = config.spectral_ls_elements_per_side
-    return get_spectral_discretization(config.elements_per_side if elements is None else elements)
-
 ## ------- Periodic Mesh ------- ##
 
 class Mesh(NamedTuple):
@@ -194,11 +182,15 @@ def get_L(elastic_modulus, poisson_ratio):
     L[3:, 3:] = shear_modulus * np.eye(3)
     return L
 
+def get_phase(name):
+    # A phase's properties ("matrix" or "inclusion") in the material set config.py names.
+    return config.material_sets[config.materials][name]
+
 def get_matrix_L():
-    return get_L(config.matrix_elastic_modulus, config.matrix_poisson_ratio)
+    return get_L(get_phase("matrix")["E"], get_phase("matrix")["poisson"])
 
 def get_inclusion_L():
-    return get_L(config.inclusion_elastic_modulus, config.inclusion_poisson_ratio)
+    return get_L(get_phase("inclusion")["E"], get_phase("inclusion")["poisson"])
 
 def get_value_per_material(matrix_value, inclusion_value, material_ids):
     return np.array([matrix_value, inclusion_value])[material_ids]
@@ -207,8 +199,9 @@ def get_materials(material_ids):
     return Materials(
         material_ids=material_ids,
         L=get_value_per_material(get_matrix_L(), get_inclusion_L(), material_ids),
-        yield_stress=get_value_per_material(config.matrix_yield_stress, config.inclusion_yield_stress, material_ids),
-        hardening_modulus=get_value_per_material(config.matrix_hardening_modulus, config.inclusion_hardening_modulus,
+        yield_stress=get_value_per_material(get_phase("matrix")["yield_stress"], get_phase("inclusion")["yield_stress"],
+                                            material_ids),
+        hardening_modulus=get_value_per_material(get_phase("matrix")["hardening"], get_phase("inclusion")["hardening"],
                                                  material_ids))
 
 ## ------- Clusters ------- ##
@@ -242,16 +235,15 @@ def label_partition_phases(mesh):
     _, element_cluster = np.unique(2 * mesh.element_partition_ids + mesh.element_material_ids, return_inverse=True)
     return element_cluster
 
-def label_partition_k_means(mesh, element_features):
+def label_partition_k_means(mesh, element_features, matrix_clusters, inclusion_clusters):
     # Every element's cluster by k-means inside each partition, in each phase apart, on its features (one row per
-    # element; the elastic strain concentration, Liu–Bessa–Liu 2016, section 2.2.1): up to
-    # k_means_matrix_clusters_per_partition clusters in a partition's matrix part and
-    # k_means_inclusion_clusters_per_partition in its inclusion part, fewer when a part has fewer distinct features,
-    # and clusters k-means leaves empty are dropped. A cluster's key is
-    # (2 × partition + phase) × the larger count + its label in its part, so the clusters are ordered by partition,
-    # matrix first, and with one cluster per part this is label_partition_phases.
+    # element; the elastic strain concentration, Liu–Bessa–Liu 2016, section 2.2.1): up to matrix_clusters clusters in a
+    # partition's matrix part and inclusion_clusters in its inclusion part, fewer when a part has fewer distinct
+    # features, and clusters k-means leaves empty are dropped. A cluster's key is (2 × partition + phase) × the larger
+    # count + its label in its part, so the clusters are ordered by partition, matrix first, and with one cluster per
+    # part this is label_partition_phases.
     rng = np.random.default_rng(config.k_means_seed)
-    cluster_counts = (config.k_means_matrix_clusters_per_partition, config.k_means_inclusion_clusters_per_partition)
+    cluster_counts = (matrix_clusters, inclusion_clusters)
     part_keys = 2 * mesh.element_partition_ids + mesh.element_material_ids
     part_order = np.argsort(part_keys, kind="stable")
     part_firsts = np.flatnonzero(np.diff(part_keys[part_order], prepend=-1))
@@ -266,7 +258,7 @@ def label_partition_k_means(mesh, element_features):
             # An empty cluster is dropped below, and run.py prints how many clusters there are.
             warnings.filterwarnings("ignore", "One of the clusters is empty")
             _, part_labels = scipy.cluster.vq.kmeans2(features, cluster_count, iter=config.k_means_iterations,
-                                                      minit="++", rng=rng)
+                                                      minit=config.k_means_start, rng=rng)
         labels[elements] = part_labels
     _, element_cluster = np.unique(part_keys * max(cluster_counts) + labels, return_inverse=True)
     return element_cluster
@@ -284,14 +276,21 @@ def get_clusters(mesh, element_cluster):
         raise ValueError("A cluster holds both phases; every cluster must lie in one phase.")
     if np.any(cluster_partition[element_cluster] != mesh.element_partition_ids):
         raise ValueError("A cluster spans partitions; every cluster must lie in one partition.")
-    return Clusters(get_materials(material_ids), np.bincount(element_cluster) / mesh.discretization.elements_per_partition,
-                    element_cluster, cluster_partition)
+    volume = np.bincount(element_cluster) / mesh.discretization.elements_per_partition
+    return Clusters(get_materials(material_ids), volume, element_cluster, cluster_partition)
+
+## ------- Memory ------- ##
+
+def get_memory_MB(field):
+    # A line of the kernel's account of this process: VmRSS (now) or VmHWM (the peak since run.reset_peak_memory).
+    with open("/proc/self/status") as status:
+        return int(re.search(rf"{field}:\s+(\d+) kB", status.read()).group(1)) / 1024
 
 ## ------- Cache ------- ##
 
 def get_cache_path(kind, parameters):
-    # One file per parameter set, so switching between configurations reuses each one's operators instead of
-    # overwriting a single file. The name is a hash of every parameter, so a file that exists matches them.
+    # One file per parameter set, so switching between configurations reuses each one's results instead of overwriting a
+    # single file. The name is a hash of every parameter, so a file that exists matches them.
     digest = hashlib.sha256()
     for name in sorted(parameters):
         value = np.asarray(parameters[name])
@@ -299,31 +298,27 @@ def get_cache_path(kind, parameters):
         digest.update(value.tobytes())
     return config.cache_folder / f"{kind}_{digest.hexdigest()[:12]}.npz"
 
-def is_cached(cache_path):
-    # A cache file counts only if it records how long its array took to build, which the offline times report.
-    if not cache_path.exists():
-        return False
-    with np.load(cache_path) as cached:
-        return "build_seconds" in cached.files
+def get_cached(kind, parameters, description, compute):
+    # A dict of arrays, from its cache file for these parameters when it exists, otherwise from compute(), and saved
+    # there with its description, which `run.py cache` lists.
+    cache_path = get_cache_path(kind, parameters)
+    if cache_path.exists():
+        print(f"{cache_path.name}: loaded from cache.")
+        with np.load(cache_path) as cached:
+            return {name: cached[name] for name in cached.files}
+    print(f"{cache_path.name}: no cache found, computing.")
+    arrays = compute()
+    config.cache_folder.mkdir(parents=True, exist_ok=True)
+    np.savez(cache_path, **arrays, description=description)
+    return arrays
 
-def get_cached(names, parameters, compute):
-    # The named arrays and the seconds each took to build, as two dicts by name, each from its own cache file for these
-    # parameters when they all exist, otherwise computed together by compute(), which returns both dicts, and each
-    # saved to its own file.
-    cache_paths = {name: get_cache_path(name, parameters) for name in names}
-    if all(is_cached(cache_path) for cache_path in cache_paths.values()):
-        arrays, build_seconds = {}, {}
-        for name, cache_path in cache_paths.items():
-            print(f"{cache_path.name}: loaded from cache.")
-            with np.load(cache_path) as cached:
-                arrays[name], build_seconds[name] = cached[name], float(cached["build_seconds"])
-        return arrays, build_seconds
-    print(f"{', '.join(cache_path.name for cache_path in cache_paths.values())}: no cache found, computing.")
-    arrays, build_seconds = compute()
-    config.cache_folder.mkdir(exist_ok=True)
-    for name, cache_path in cache_paths.items():
-        np.savez(cache_path, **{name: arrays[name], "build_seconds": build_seconds[name]})
-    return arrays, build_seconds
+def get_cache_entries():
+    # Every cache file and its description.
+    entries = []
+    for cache_path in sorted(config.cache_folder.glob("*.npz")):
+        with np.load(cache_path) as cached:
+            entries.append((cache_path, str(cached["description"]) if "description" in cached.files else ""))
+    return entries
 
 def get_geometry_parameters():
     # Every input that sets the geometry, for a cache key: the cell, the shape and the shape's own inputs.

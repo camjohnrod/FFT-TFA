@@ -14,6 +14,7 @@ from typing import NamedTuple
 import numpy as np
 import scipy.sparse
 
+from cell import get_matrix_L
 from ls_model import (apply_on_lattice, apply_sparse, assemble_blocks, get_moulinec_suquet_kernel, get_offset_blocks,
                       get_P0_transformed)
 from material import apply_blocks, get_algorithmic_stiffness, get_plastic_eigenstrain
@@ -113,9 +114,15 @@ def get_own_strain_change(clusters, P0_transformed, matrix_L, correction_blocks)
     np.add.at(mean, block_columns, share[block_rows][:, None, None] * correction_blocks.data)
     return own - mean / clusters.partition_count
 
-def get_interaction(mesh, clusters, matrix_L, reach):
+def resolve_reach(reach, partition_lattice_shape):
+    # "full" is every partition: half the periodic lattice along its longest axis.
+    return max(partition_lattice_shape) // 2 if reach == "full" else reach
+
+def get_interaction(mesh, clusters, reach):
     # FFT-TFA's operators on its clusters, with the exact interaction kept between partitions within reach (0: each
-    # partition with itself only).
+    # partition with itself only; "full": every partition).
+    matrix_L = get_matrix_L()
+    reach = resolve_reach(reach, mesh.discretization.partition_lattice_shape)
     cluster_to_partition = scipy.sparse.csr_matrix(
         (clusters.volume, (clusters.cluster_partition, np.arange(clusters.cluster_count))),
         shape=(clusters.partition_count, clusters.cluster_count))
@@ -148,8 +155,8 @@ class FFTTFASolver(Solver):
         self.interaction = interaction
 
     def evaluate(self, strain, macro_strain, plastic_history):
-        # FT-5: r = ε − ε̄ + (FT-2's strain change), with the polarization of FT-1, τ_g = (L_g − C0) ε_g − L_g μ_g, which
-        # is −L_m μ_g in a matrix cluster, and each cluster's eigenstrain from its return map at its strain.
+        # FT-5: r = ε − ε̄ + (FT-2's strain change), with the polarization of FT-1, τ_g = (L_g − C0) ε_g − L_g μ_g,
+        # which is −L_m μ_g in a matrix cluster, and each cluster's eigenstrain from its return map at its strain.
         materials = self.clusters.materials
         plastic_state, stress = get_plastic_eigenstrain(strain, materials, plastic_history)
         polarization = (apply_blocks(materials.L - self.interaction.matrix_L, strain)
@@ -158,8 +165,9 @@ class FFTTFASolver(Solver):
         return Evaluation(strain, plastic_state, stress, residual)
 
     def get_newton_correction(self, current, plastic_history):
-        # FT-6: J v = v + (FT-2's strain change of the polarization change T v), with T = L_t − C0 and L_t each cluster's
-        # algorithmic stiffness. GMRES solves it with J's diagonal blocks inverted (block-Jacobi, FT-7) on the right.
+        # FT-6: J v = v + (FT-2's strain change of the polarization change T v), with T = L_t − C0 and L_t each
+        # cluster's algorithmic stiffness. GMRES solves it with J's diagonal blocks inverted (block-Jacobi, FT-7) on the
+        # right.
         interaction = self.interaction
         T = (get_algorithmic_stiffness(current.strain, self.clusters.materials, plastic_history) - interaction.matrix_L)
 

@@ -1,6 +1,7 @@
-# Every figure run.py saves: the macroscopic stress-strain curves, each method's discretization of the cross-section,
-# and maps of the von Mises stress and the accumulated plastic strain.
-# Every method is drawn the same way in every figure (method_styles). Plot appearance is set here; no solver logic.
+# Every figure run.py saves: the macroscopic stress-strain curves and stress errors, error against time, each entry's
+# discretization of the cross-section, and maps and a profile of the von Mises stress and the accumulated plastic
+# strain. Every method is drawn the same way in every figure (method_styles). Plot appearance is set here; no solver
+# logic.
 
 from typing import NamedTuple
 import numpy as np
@@ -31,6 +32,31 @@ load_path_style = {**figure_style, 'font.size': 12, 'axes.labelsize': 13, 'xtick
                    'ytick.labelsize': 11, 'legend.fontsize': 12, 'lines.linewidth': 1.8, 'axes.spines.top': False,
                    'axes.spines.right': False}
 legend_style = {'loc': 'outside upper center', 'frameon': False, 'handlelength': 3.2}
+# How much lighter a method's first entry is drawn than its last, as a mix with white.
+first_entry_lightening = 0.55
+# Legends wrap past this many entries, so that long labels stay inside the figure.
+legend_columns = 4
+
+def get_method(label):
+    # The method (or the reference) of an entry's label.
+    return next(method for method in method_styles if label.startswith(method))
+
+def get_display_label(label):
+    # An entry's label as figures show it: Computer Modern has no ² or ³ of its own.
+    return label.replace("²", "$^2$").replace("³", "$^3$")
+
+def get_line_styles(labels):
+    # Each label's line: its method's style, a method's earlier entries in lighter tints when it has several.
+    styles = {}
+    for method in method_styles:
+        method_labels = [label for label in labels if get_method(label) == method]
+        for index, label in enumerate(method_labels):
+            share_of_last = 1 if len(method_labels) == 1 else index / (len(method_labels) - 1)
+            lightening = first_entry_lightening * (1 - share_of_last)
+            color = np.array(matplotlib.colors.to_rgb(method_styles[method]['color']))
+            styles[label] = {**method_styles[method], 'color': tuple(color + lightening * (1 - color)),
+                             'label': get_display_label(label)}
+    return styles
 
 def mark_method_failure(axis, x_values, values, completed_step_count, color):
     # An x at the step the method gave up on, drawn level with the last value it produced so it reads as the
@@ -53,27 +79,31 @@ zero_stress_fraction = 1e-4
 stress_strain_figure_width = 11
 stress_strain_row_height = 2.7
 
-def get_load_axis(applied_macro_strain, max_macro_strain):
-    # The stress-strain curves' x axis, from the unloaded state, and its label: the applied strain in % when one
-    # component is loaded, otherwise the load factor t of ε̄ = t ε̄max, labelled with ε̄max.
+def get_load_axis(applied_macro_strain):
+    # The stress-strain curves' x axis, from the unloaded state, and its label. On a path along one direction: the
+    # applied strain in % when one component is loaded, otherwise the load factor t of ε̄ = t ε̄max, labelled with
+    # ε̄max. On any other path, the load step.
+    strains = np.vstack([np.zeros(6), applied_macro_strain])
+    if np.linalg.matrix_rank(applied_macro_strain) > 1:
+        return np.arange(len(strains)), "Load step"
+    max_macro_strain = applied_macro_strain[np.linalg.norm(applied_macro_strain, axis=1).argmax()]
     loaded_components = np.flatnonzero(max_macro_strain)
-    applied_macro_strain = np.vstack([np.zeros(6), applied_macro_strain])
     if len(loaded_components) == 1:
         component = loaded_components[0]
-        return 100 * applied_macro_strain[:, component], f"{macro_strain_component_labels[component]} (%)"
+        return 100 * strains[:, component], f"{macro_strain_component_labels[component]} (%)"
     largest_component = np.abs(max_macro_strain).argmax()
     max_strain_description = ",  ".join(f"{macro_strain_component_labels[component]} = "
                                         f"{100 * max_macro_strain[component]:g} %" for component in loaded_components)
-    return (applied_macro_strain[:, largest_component] / max_macro_strain[largest_component],
+    return (strains[:, largest_component] / max_macro_strain[largest_component],
             r"Load factor $t$,   $\bar{\varepsilon} = t\,\bar{\varepsilon}_{\max}$,   $\bar{\varepsilon}_{\max}$:  "
             + max_strain_description)
 
-def plot_stress_strain(stress_MPa_per_method, completed_step_count_per_method, applied_macro_strain,
-                       max_macro_strain, plot_path):
-    # Each method's macroscopic stress (MPa, one row per step) against the applied strain, one panel per component,
-    # from the unloaded state to the last step it solved. A row whose components are zero for every method is left
+def plot_stress_strain(stress_MPa_per_method, completed_step_count_per_method, applied_macro_strain, plot_path):
+    # Each entry's macroscopic stress (MPa, one row per step) against the applied strain, one panel per component,
+    # from the unloaded state to the last step it solved. A row whose components are zero for every entry is left
     # out (uniaxial loading leaves every shear at zero), and a zero panel in a kept row shows only "0".
-    load_axis, load_axis_label = get_load_axis(applied_macro_strain, max_macro_strain)
+    load_axis, load_axis_label = get_load_axis(applied_macro_strain)
+    line_styles = get_line_styles(stress_MPa_per_method)
     solved_stress_MPa = {method: np.vstack([np.zeros(6), stress[:completed_step_count_per_method[method]]])
                          for method, stress in stress_MPa_per_method.items()}
     largest_stress = max(np.abs(stress).max() for stress in solved_stress_MPa.values())
@@ -101,12 +131,12 @@ def plot_stress_strain(stress_MPa_per_method, completed_step_count_per_method, a
             axis.set_axisbelow(True)
             for method, method_stress in solved_stress_MPa.items():
                 stress = method_stress[:, component]
-                axis.plot(load_axis[:len(stress)], stress, label=method, **method_styles[method])
-                mark_method_failure(axis, load_axis[1:], stress[1:], len(stress) - 1, method_styles[method]['color'])
+                axis.plot(load_axis[:len(stress)], stress, **line_styles[method])
+                mark_method_failure(axis, load_axis[1:], stress[1:], len(stress) - 1, line_styles[method]['color'])
         figure.supxlabel(load_axis_label, fontsize=13)
         figure.align_ylabels(axes)
         handles, labels = axes.flat[0].get_legend_handles_labels()
-        figure.legend(handles, labels, ncols=len(handles), columnspacing=2.4, **legend_style)
+        figure.legend(handles, labels, ncols=min(len(handles), legend_columns), columnspacing=2.4, **legend_style)
         figure.savefig(plot_path)
     plt.close(figure)
 
@@ -122,6 +152,7 @@ def plot_macro_stress_errors(error_percent_per_method, components, step_count, p
     # from the unloaded state (step 0, no error) to the last step the method solved. The load step, not the applied
     # strain, so that a cyclic path unrolls instead of folding back on itself.
     load_steps = np.arange(step_count + 1)
+    line_styles = get_line_styles(error_percent_per_method)
     row_count = -(-len(components) // 3)
     with plt.rc_context(load_path_style):
         figure, axes = plt.subplots(row_count, 3, squeeze=False, sharex=True, layout='constrained',
@@ -140,12 +171,45 @@ def plot_macro_stress_errors(error_percent_per_method, components, step_count, p
             axis.axhline(0, **error_zero_line_style)
             for method, error_percent in error_percent_per_method.items():
                 error = np.concatenate([[0], error_percent[:, column]])
-                axis.plot(load_steps[:len(error)], error, label=method, **method_styles[method])
-                mark_method_failure(axis, load_steps[1:], error[1:], len(error) - 1, method_styles[method]['color'])
+                axis.plot(load_steps[:len(error)], error, **line_styles[method])
+                mark_method_failure(axis, load_steps[1:], error[1:], len(error) - 1, line_styles[method]['color'])
         figure.supxlabel("Load step", fontsize=13)
         figure.align_ylabels(axes)
         handles, labels = axes.flat[0].get_legend_handles_labels()
-        figure.legend(handles, labels, ncols=len(handles), columnspacing=2.4, **legend_style)
+        figure.legend(handles, labels, ncols=min(len(handles), legend_columns), columnspacing=2.4, **legend_style)
+        figure.savefig(plot_path)
+    plt.close(figure)
+
+## ------- Error Against Time ------- ##
+
+def plot_error_against_time(points_per_label, plot_path):
+    # Each entry's root-mean-square macroscopic stress error (%) against its online time, entries of a method joined in
+    # the order listed, each marked with what tells it from the others. points_per_label: label -> (method, seconds,
+    # error).
+    with plt.rc_context(load_path_style):
+        figure, axis = plt.subplots(figsize=(6, 4), layout='constrained')
+        for method, style in method_styles.items():
+            points = {label: point for label, point in points_per_label.items() if point[0] == method}
+            if not points:
+                continue
+            seconds, errors = [[point[column] for point in points.values()] for column in (1, 2)]
+            axis.plot(seconds, errors, marker='o', markersize=6, color=style['color'], linestyle=style['linestyle'],
+                      label=method)
+            for label, x, y in zip(points, seconds, errors):
+                axis.annotate(get_display_label(label.removeprefix(method).strip()), (x, y), textcoords='offset points',
+                              xytext=(6, 5), fontsize=11, color='0.25')
+        axis.set_xscale('log')
+        axis.set_yscale('log')
+        for log_axis in (axis.xaxis, axis.yaxis):
+            log_axis.set_major_locator(matplotlib.ticker.LogLocator(subs=(1, 2, 5)))
+            log_axis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%g'))
+            log_axis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+        axis.set_xlabel("Online time (s)")
+        axis.set_ylabel("Macroscopic stress error, rms (%)")
+        axis.grid(True, which='both', color='0.92', linewidth=0.8)
+        axis.set_axisbelow(True)
+        handles, labels = axis.get_legend_handles_labels()
+        figure.legend(handles, labels, ncols=len(handles), **legend_style)
         figure.savefig(plot_path)
     plt.close(figure)
 
@@ -169,16 +233,15 @@ cluster_color_lightening = 0.25
 inclusion_cluster_greys = (0.62, 0.48, 0.76)
 
 class CellMap(NamedTuple):
-    # One method's discretization on its element grid, with a title and a line of its settings. boundaries maps each
-    # kind of line it draws ("voxel", "cluster", "partition", boundary_styles) to a map of ids on that grid, the line
-    # running along every element edge whose two sides have different ids. fill_cluster_ids colours each element by its
-    # cluster (k-means clusters), or is None to show only the phases. element_material_ids are the phases on the
-    # method's own elements (Spectral LS's), or None for the mesh's.
+    # One entry's discretization on its element grid, with a title and a line of its settings. boundaries maps each kind
+    # of line it draws ("voxel", "cluster", "partition", boundary_styles) to a map of ids on that grid, the line running
+    # along every element edge whose two sides have different ids. element_material_ids are the phases on that grid.
+    # fill_cluster_ids colours each element by its cluster (k-means clusters), or is None to show only the phases.
     title: str
     settings: str
     boundaries: dict
+    element_material_ids: np.ndarray
     fill_cluster_ids: np.ndarray = None
-    element_material_ids: np.ndarray = None
 
 # The kinds of line, drawn in this order, each named in the legend by what it bounds: hairline grey for Spectral LS's
 # voxels, so its fine grid shows without competing, lighter than the clusters' lines so the two read apart; thin dark
@@ -221,8 +284,8 @@ def get_cluster_image(cluster_ids, element_material_ids):
                                                                    % len(inclusion_cluster_greys), None]
     return colors[cluster_ids]
 
-def plot_cross_section(element_material_ids, cell_maps, plot_path):
-    # One panel per method: the phase of every element (fiber dark), or its cluster's colour when the method's clusters
+def plot_cross_section(cell_maps, plot_path):
+    # One panel per entry: the phase of every element (fiber dark), or its cluster's colour when the method's clusters
     # are coloured in, with the method's boundaries on top; one legend below for the kinds of line the panels use.
     used_kinds = [kind for kind in boundary_styles if any(kind in cell_map.boundaries for cell_map in cell_maps)]
     # The legend lies side by side under several panels, stacked under one, which is too narrow for a row.
@@ -233,8 +296,7 @@ def plot_cross_section(element_material_ids, cell_maps, plot_path):
         figure, axes = plt.subplots(1, len(cell_maps), squeeze=False, layout='constrained',
                                     figsize=(cross_section_panel_size * len(cell_maps), figure_height))
         for axis, cell_map in zip(axes[0], cell_maps):
-            material_ids = (element_material_ids if cell_map.element_material_ids is None
-                            else cell_map.element_material_ids)
+            material_ids = cell_map.element_material_ids
             if cell_map.fill_cluster_ids is None:
                 axis.imshow(material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.62']), vmin=0,
                             vmax=1, origin='lower', extent=(0, 1, 0, 1))
@@ -245,7 +307,7 @@ def plot_cross_section(element_material_ids, cell_maps, plot_path):
                 if kind in cell_map.boundaries:
                     draw_boundaries(axis, cell_map.boundaries[kind], boundary_styles[kind])
             axis.plot([0, 1, 1, 0, 0], [0, 0, 1, 1, 0], **frame_style)
-            axis.set_title(f"{cell_map.title}\n{cell_map.settings}")
+            axis.set_title(f"{get_display_label(cell_map.title)}\n{cell_map.settings}")
             axis.set_axis_off()
             # Square panels sit at the bottom of their slots, so the slots' spare height goes to the titles.
             axis.set_anchor('S')
@@ -260,8 +322,7 @@ def plot_cross_section(element_material_ids, cell_maps, plot_path):
 field_map_style = {**figure_style, 'font.size': 13, 'axes.titlesize': 15, 'figure.titlesize': 14}
 field_map_panel_size = 4.2
 # The same colormap for both fields, so the two figures read alike; each colour bar's label names its field.
-von_mises_colormap = 'jet'
-plastic_strain_colormap = 'jet'
+field_map_colormap = 'jet'
 field_map_hidden_color = '0.8'    # elements a map leaves out (NaN), such as the inclusion in a matrix-only map
 
 class FieldMap(NamedTuple):
@@ -269,11 +330,10 @@ class FieldMap(NamedTuple):
     title: str
     values: np.ndarray
 
-def plot_field_maps(field_maps, label, colormap_name, load_step, load_step_count, value_min, value_max, plot_path):
-    # One map per method, side by side on one colour scale between the given limits, in the named colormap (one of
-    # the field colormaps above); label names the field and its unit on the colour bar, whose ends point outwards
-    # where a map goes beyond them (those values take the end colour). Elements without a value (NaN) are drawn in
-    # field_map_hidden_color.
+def plot_field_maps(field_maps, label, title, value_min, value_max, plot_path):
+    # One map per entry, side by side on one colour scale between the given limits; label names the field and its unit
+    # on the colour bar, whose ends point outwards where a map goes beyond them (those values take the end colour).
+    # Elements without a value (NaN) are drawn in field_map_hidden_color.
     with plt.rc_context(field_map_style):
         figure, axes = plt.subplots(1, len(field_maps), squeeze=False, layout='constrained',
                                     figsize=(field_map_panel_size * len(field_maps) + 1.2, field_map_panel_size))
@@ -281,13 +341,13 @@ def plot_field_maps(field_maps, label, colormap_name, load_step, load_step_count
         below = any(np.nanmin(field_map.values) < value_min for field_map in field_maps)
         above = any(np.nanmax(field_map.values) > value_max for field_map in field_maps)
         extend = {(False, False): 'neither', (True, False): 'min', (False, True): 'max', (True, True): 'both'}
-        colormap = plt.get_cmap(colormap_name).with_extremes(bad=field_map_hidden_color)
+        colormap = plt.get_cmap(field_map_colormap).with_extremes(bad=field_map_hidden_color)
         for axis, field_map in zip(axes[0], field_maps):
             image = axis.imshow(field_map.values, origin='lower', extent=(0, 1, 0, 1), cmap=colormap, **limits)
-            axis.set_title(field_map.title)
+            axis.set_title(get_display_label(field_map.title))
             axis.set_axis_off()
         figure.colorbar(image, ax=axes[0], label=label, shrink=0.85, extend=extend[below, above])
-        figure.suptitle(f"Load step {load_step} of {load_step_count}", color='0.3')
+        figure.suptitle(title, color='0.3')
         figure.savefig(plot_path)
     plt.close(figure)
 
@@ -296,8 +356,7 @@ def plot_field_maps(field_maps, label, colormap_name, load_step, load_step_count
 profile_inclusion_color = '0.93'    # the inclusion's stretches along the profile, where an elastic phase has no flow
 profile_figure_size = (11, 3.6)
 
-def plot_field_profiles(field_maps, profile_height, inclusion_map, label, load_step, load_step_count, side_length_mm,
-                        plot_path):
+def plot_field_profiles(field_maps, profile_height, inclusion_map, label, title, side_length_mm, plot_path):
     # Each map's values along the horizontal line at profile_height (a fraction of the side), left to right as on the
     # maps, as steps (one value per element or voxel), in the style of the stress-strain figure. The inclusion's
     # stretches along the line, read from inclusion_map (True inside, the finest available grid), are shaded.
@@ -314,19 +373,19 @@ def plot_field_profiles(field_maps, profile_height, inclusion_map, label, load_s
         changes = np.flatnonzero(np.diff(np.concatenate([[0], inclusion.astype(int), [0]])))
         for first, stop in zip(changes[::2], changes[1::2]):
             axis.axvspan(edges[first], edges[stop], color=profile_inclusion_color, linewidth=0, zorder=0)
+        line_styles = get_line_styles([field_map.title for field_map in field_maps])
         for field_map in field_maps:
             values = get_row(field_map.values)
-            axis.plot(get_edges(values), np.append(values, values[-1]), drawstyle='steps-post', label=field_map.title,
-                      **method_styles[field_map.title])
+            axis.plot(get_edges(values), np.append(values, values[-1]), drawstyle='steps-post',
+                      **line_styles[field_map.title])
         axis.set_xlim(0, side_length_mm)
         axis.set_ylim(bottom=0)
         axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
         axis.grid(True, color='0.9', linewidth=0.8)
         axis.set_axisbelow(True)
         axis.set_ylabel(label)
-        axis.set_xlabel(f"x (mm), along the middle element row at mid-thickness; load step {load_step} of "
-                        f"{load_step_count}")
+        axis.set_xlabel(f"x (mm), along the middle element row at mid-thickness. {title}")
         handles, labels = axis.get_legend_handles_labels()
-        figure.legend(handles, labels, ncols=len(handles), columnspacing=2.4, **legend_style)
+        figure.legend(handles, labels, ncols=min(len(handles), legend_columns), columnspacing=2.4, **legend_style)
         figure.savefig(plot_path)
     plt.close(figure)

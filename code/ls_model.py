@@ -7,11 +7,14 @@
 # non-redundant half (shape (N_z, N, N//2 + 1, 6, 6), lattices indexed [z, y, x] and square in-plane), and applied by
 # FFT (apply_on_lattice).
 
+from typing import NamedTuple
 import numpy as np
 import scipy.fft
 import scipy.sparse
 
 import config
+from cell import (get_clusters, get_discretization, get_inclusion_L, get_matrix_L, get_periodic_mesh,
+                  label_partition_phases)
 from material import apply_blocks, get_algorithmic_stiffness, get_plastic_eigenstrain, get_unloaded_plastic_state
 from newton import Evaluation, Solver, SolverDidNotConverge
 
@@ -32,13 +35,13 @@ def apply_on_lattice(fourier_blocks, field):
 
 ## ------- Reference Stiffness ------- ##
 
-def get_spectral_C0(matrix_L, inclusion_L):
-    # Spectral LS's reference stiffness. Its solution does not depend on it (its P0 is a projection; Schneider 2021,
-    # section 2), so it is a solver setting: "midpoint" is Moulinec–Suquet's rule (1998, section 3.1), the phases'
-    # Lamé constants averaged, which for two isotropic phases is (L_m + L_f) / 2.
-    if config.spectral_ls_reference_stiffness == "midpoint":
-        return (matrix_L + inclusion_L) / 2
-    return matrix_L
+def get_spectral_C0(name):
+    # Spectral LS's reference stiffness by name (config.py). Its solution does not depend on it (its P0 is a projection;
+    # Schneider 2021, section 2), so it is a solver setting: "midpoint" is Moulinec–Suquet's rule (1998, section 3.1),
+    # the phases' Lamé constants averaged, which for two isotropic phases is (L_m + L_f) / 2.
+    if name == "midpoint":
+        return (get_matrix_L() + get_inclusion_L()) / 2
+    return get_matrix_L()
 
 ## ------- Moulinec–Suquet Kernel P0 ------- ##
 
@@ -136,17 +139,34 @@ def apply_sparse(matrix, rows):
 
 ## ------- Spectral LS ------- ##
 
+class Lattice(NamedTuple):
+    # What Spectral LS needs on its lattice: the clusters, the reference stiffness C0, and the kernel P̂0 as one 6 × 6
+    # block per frequency.
+    clusters: tuple
+    C0: np.ndarray
+    P0_transformed: np.ndarray
+
+def get_spectral_clusters(elements_per_side):
+    # One partition and one cluster per element.
+    mesh = get_periodic_mesh(get_discretization(elements_per_side, elements_per_side))
+    return get_clusters(mesh, label_partition_phases(mesh))
+
+def get_spectral_lattice(elements_per_side, C0_name):
+    C0 = get_spectral_C0(C0_name)
+    return Lattice(get_spectral_clusters(elements_per_side), C0,
+                   get_P0_transformed(get_discretization(elements_per_side, elements_per_side), C0))
+
 class SpectralLSSolver(Solver):
     # Spectral LS: LS-18 with one partition per element (per element column), each partition one cluster, so a
     # partition's stress is its cluster's at the partition strain. Newton on the partition strains, each correction by
     # conjugate gradients (LS-28), convergence judged in matrix units (LS-24).
-    def __init__(self, lattice, matrix_L):
+    def __init__(self, lattice):
         super().__init__(lattice.clusters, lattice.clusters.partition_count)
         self.C0 = lattice.C0
         self.P0_transformed = lattice.P0_transformed
         if self.clusters.cluster_count != self.clusters.partition_count:
             raise ValueError("Spectral LS needs exactly one cluster per partition.")
-        self.residual_in_matrix_units = get_residual_in_matrix_units(self.P0_transformed, self.C0, matrix_L)
+        self.residual_in_matrix_units = get_residual_in_matrix_units(self.P0_transformed, self.C0, get_matrix_L())
 
     def measure_residual(self, residual):
         return apply_on_lattice(self.residual_in_matrix_units, residual)
@@ -195,7 +215,7 @@ class SpectralLSSolver(Solver):
         raise SolverDidNotConverge(f"CG did not converge inside a Newton iteration within {max_iterations} "
                                    "iterations. Loosen krylov_tolerance or raise spectral_ls_cg_max_iterations")
 
-def get_elastic_strain_concentration(lattice, matrix_L):
+def get_elastic_strain_concentration(lattice):
     # The strain of every partition of the lattice per unit macrostrain in elasticity, partitions × 6 × 6 (column k for
     # the k-th unit macrostrain): the strain concentration tensor that k-means clusters on (Liu–Bessa–Liu 2016,
     # section 2.2.1). Each column is one Spectral LS load step with every phase elastic.
@@ -203,5 +223,5 @@ def get_elastic_strain_concentration(lattice, matrix_L):
     elastic_materials = materials._replace(yield_stress=np.full(len(materials.yield_stress), np.inf))
     elastic_lattice = lattice._replace(clusters=lattice.clusters._replace(materials=elastic_materials))
     unloaded = get_unloaded_plastic_state(lattice.clusters.cluster_count)
-    return np.stack([SpectralLSSolver(elastic_lattice, matrix_L).solve_step(unit_strain, unloaded).strain
+    return np.stack([SpectralLSSolver(elastic_lattice).solve_step(unit_strain, unloaded).strain
                      for unit_strain in np.eye(6)], axis=-1)

@@ -1,24 +1,25 @@
-# Every setting, and the only file to edit to change a run: other modules read them as config.<name>. Lengths are in
-# m, stresses and moduli in Pa.
+# Every setting, and the only file to edit to change a run: other modules read them as config.<name>.
 #
-#   python code/run.py      solve the problem below with every method switched on; table and figures to code/output/
-#   python code/check.py    check the code on small problems with known answers (about a minute)
+#   python code/run.py                 solve what is listed below; results and figures to a new folder in code/output/
+#   python code/run.py preview         say what that would need, draw the cross-section, solve nothing
+#   python code/run.py replot latest   redraw a saved run's figures with the Figures settings below, solve nothing
+#   python code/run.py cache           list what is cached in code/cache/
+#   python code/check.py               check the code on small problems with known answers (about a minute)
 #
-# Sections run from the settings changed most to those changed least: Problem, Methods, Figures, Materials, Solver
-# details, Checks. A setting of one method carries its prefix (fft_tfa_, spectral_ls_, tfa_, k_means_); the same
-# setting for several methods sits as a group. The three grids mean different things to each method:
+# Sections run from the settings changed most to those changed least. The three grids mean different things to each
+# method:
 #
 #                 elements                      partitions                         clusters
-#   FFT-TFA       its kernel and corrections,   its FFT lattice: with its          the k_means_ counts
-#                 offline only                  clusters, sets its online cost
-#   Spectral LS   its lattice, unless it has    not used                           one per element
-#                 its own: sets all cost
-#   TFA           its FE mesh: offline cost     its clusters lie in them           the k_means_ counts
-#   k-means       its features, offline         it runs inside each                the k_means_ counts
+#   FFT-TFA       its kernel and corrections,   its FFT lattice: with its          matrix_clusters and
+#                 offline only                  clusters, sets its online cost     inclusion_clusters per partition
+#   Spectral LS   its own lattice               not used                           one per element
+#                 (elements): sets all cost
+#   TFA           its FE mesh: offline cost     its clusters lie in them           as FFT-TFA
+#   k-means       its features, offline         it runs inside each                as FFT-TFA
 #   reference     its own finer mesh (reference_elements_per_side), solved once and cached
 #
 #   elements    elements_per_side: the fine mesh, which resolves the geometry
-#   partitions  partitions_per_side: a uniform lattice of blocks of elements
+#   partitions  a uniform lattice of blocks of elements
 #   clusters    the material states: regions of one phase in one partition, with one uniform plastic eigenstrain each
 
 import os
@@ -33,7 +34,64 @@ for thread_variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THRE
 
 import numpy as np  # noqa: E402, after the thread count is set
 
+# Units: lengths in m, stresses and moduli in Pa.
+GPa, MPa = 1e9, 1e6
+
+def strain(e11=0, e22=0, e33=0, g12=0, g23=0, g13=0):
+    # A macroscopic strain by its components, the shears as engineering shear (twice the tensor shear), others zero.
+    return np.array([e11, e22, e33, g12, g23, g13], dtype=float)
+
+## ------- What to Run ------- ##
+
+# Names the run's folder in code/output/, which also holds these settings and the code's version.
+run_name                    = "biaxial cyclic"
+
+# What to compare: any number of entries per method, each a line in the table and in the figures; an empty list switches
+# a method off. Later entries of a method are drawn darker, so list them coarse to fine. With several entries of a
+# method and the reference on, error_against_time.png shows the trade-off.
+#   FFT-TFA      the method under development (notes/2_ls_model.md section 10): TFA's clusters interacting through the
+#                Lippmann–Schwinger (LS) equation of the matrix, by an FFT on the partitions plus exact corrections
+#                between nearby clusters.
+#                partitions          per side, must divide elements_per_side
+#                matrix_clusters     per partition's part in the matrix, by k-means
+#                inclusion_clusters  per partition's part in the inclusion; an elastic inclusion needs one (more only
+#                                    resolve its stress). One of each needs no k-means.
+#                reach               partitions over which the exact interaction is kept: 0 each partition's own
+#                                    clusters, 1 its neighbours too (8 for columns, 26 in 3D, about 9 or 27 times the
+#                                    cost of the corrections), "full" every partition, where the interaction is exact
+#   Spectral LS  the LS equation on its own elements (Moulinec–Suquet).
+#                elements            per side, coarser or finer than elements_per_side
+#                C0                  its reference stiffness, a solver setting only (its kernel is a projection, so its
+#                                    answer does not depend on it): "midpoint", the phases' stiffnesses averaged
+#                                    (Moulinec–Suquet 1998, section 3.1), or "matrix", the same equation as FFT-TFA's,
+#                                    which takes about as long at contrast 34 and 17 % longer at contrast 100
+#   TFA          the baseline (notes/3_tfa_baseline.md): clusters interact through the FE influence functions E and P,
+#                built offline and cached in code/cache/. P takes (6 × clusters)² doubles.
+#                partitions, matrix_clusters, inclusion_clusters  as FFT-TFA
+fft_tfa     = [dict(partitions=8, matrix_clusters=8, inclusion_clusters=1, reach=1)]
+spectral_ls = [dict(elements=128, C0="midpoint")]
+tfa         = []
+
+# A reference, not a method: Spectral LS on a finer mesh of reference_elements_per_side per side (a multiple of
+# elements_per_side), on the same problem. Solved once and cached, shown in the figures, not timed. A first solve takes
+# about 30 min at 540² elements and 120 steps: run it in the background. reference_C0 is its reference stiffness, and
+# that of the elastic solves giving k-means its features.
+include_reference           = True
+reference_elements_per_side = 512
+reference_C0                = "midpoint"
+
+# Each method runs timing_repeats times, in turn, keeping its fastest time (timing noise between runs reaches 30 %).
+# Each entry, and the reference, runs in its own process, stopped by an error above memory_limit_GB (None: no limit),
+# so that a run too large fails instead of taking the machine down; the others carry on.
+timing_repeats              = 1
+memory_limit_GB             = 5
+
 ## ------- Problem ------- ##
+
+# The fine mesh of every FFT-TFA and TFA entry. A shape constant along z (fiber, laminate, random fibers) has
+# elements_per_side² elements in one layer, which is exact, and columns of partitions through the thickness; any other
+# shape has the same counts along x, y and z.
+elements_per_side           = 128
 
 # A periodic cubic cell holding one inclusion_shape, each shape's own settings below it.
 domain_side_length          = 1e-3
@@ -53,55 +111,36 @@ fiber_volume_fraction       = 0.50
 fiber_gap                   = 1 / 128
 fiber_seed                  = 1
 
-# The grids (table above). A shape constant along z (fiber, laminate, random fibers) gets elements_per_side² elements in
-# one layer, which is exact, and partitions_per_side² partitions, columns through the thickness; any other shape gets
-# cubes, the same counts along x, y and z. Partition counts must divide element counts. Spectral LS runs on
-# spectral_ls_elements_per_side elements per side instead of the mesh's, coarser or finer, unless None (the k-means
-# features stay on the mesh).
-elements_per_side           = 128
-partitions_per_side         = 8
-spectral_ls_elements_per_side = 128
+# The phases, by a name from material_sets: isotropic elasticity and J2 plasticity with linear isotropic hardening, the
+# hardening zero or above (Spectral LS's conjugate gradients need a positive definite tangent, notes/2_ls_model.md
+# section 7.7). A yield stress of np.inf keeps a phase elastic.
+materials                   = "glass/PA"
+material_sets = {
+    "glass/PA": dict(matrix=dict(E=2.1 * GPa, poisson=0.3, yield_stress=29 * MPa, hardening=139 * MPa),
+                     inclusion=dict(E=72 * GPa, poisson=0.22, yield_stress=np.inf, hardening=0)),
+    "contrast 100": dict(matrix=dict(E=100 * MPa, poisson=0.19, yield_stress=1 * MPa, hardening=10 * MPa),
+                         inclusion=dict(E=10 * GPa, poisson=0.3, yield_stress=np.inf, hardening=0)),
+}
 
-# The macroscopic strain (ε11, ε22, ε33, γ12, γ23, γ13) reaches max_macro_strain in strain_increment_count equal steps.
-# load_path_shape is
-#   "monotonic"  0 -> max
-#   "cyclic"     0 -> +max -> -max -> 0, 4 × strain_increment_count steps: unloading and reverse yielding
-max_macro_strain            = np.array([0.025, 0.025, 0.0, 0.0, 0.0, 0.0])
+# The macroscopic strain, by a name from load_paths: straight lines from zero through each turning point in turn.
+# strain_increment_count equal steps reach the first; the other lines keep that step length. Fields are saved at every
+# turning point.
+load                        = "biaxial cyclic"
 strain_increment_count      = 50
-load_path_shape             = "cyclic"
-
-## ------- Methods ------- ##
-
-# FFT-TFA, the method under development, always runs (notes/2_ls_model.md section 10): TFA's clusters interacting
-# through the Lippmann–Schwinger (LS) equation of the matrix, by an FFT on the partitions plus exact corrections
-# between nearby clusters. The comparisons:
-#   include_spectral_ls  the LS equation on the elements (Moulinec–Suquet), the finest lattice the mesh allows
-#   include_tfa          the baseline (notes/3_tfa_baseline.md): clusters interact through the FE influence functions
-#                        E and P, built offline and cached in code/cache/
-include_spectral_ls         = True
-include_tfa                 = False
-
-# A reference, not a method: Spectral LS on a finer mesh of reference_elements_per_side per side (a multiple of
-# elements_per_side), on the same problem. Solved once and cached (macroscopic stress at every step, fields at the
-# last), shown in the figures, not timed. A first solve takes about 30 min at 540² elements and 120 steps: run it in
-# the background.
-include_reference           = True
-reference_elements_per_side = 512
-
-# The clusters (material states) of FFT-TFA and TFA: k-means inside each partition's part in each phase, on the elements'
-# elastic strain concentration, up to k_means_matrix_clusters_per_partition in the matrix part and
-# k_means_inclusion_clusters_per_partition in the inclusion part. One each needs no k-means: each partition's part in
-# each phase is one cluster. An elastic inclusion needs one cluster (more only resolve its stress). TFA's P takes
-# (6 × its clusters)² doubles.
-k_means_matrix_clusters_per_partition = 8
-k_means_inclusion_clusters_per_partition = 1
-
-# FFT-TFA keeps the exact interaction among each partition's clusters, and with fft_tfa_neighbour_blocks also with
-# those of the neighbouring partitions (8 for columns, 26 in 3D), at about 9 or 27 times the cost of those corrections.
-fft_tfa_neighbour_blocks    = True
+load_paths = {
+    "biaxial cyclic": [strain(e11=0.02, e22=0.02), strain(e11=-0.02, e22=-0.02), strain()],
+    "uniaxial": [strain(e11=0.05)],
+    "uniaxial cyclic": [strain(e11=0.02), strain(e11=-0.02), strain()],
+    "along the fibers": [strain(e33=0.02, g13=0.03)],
+    "tension, then shear": [strain(e11=0.02), strain(e11=0.02, g12=0.03)],
+}
 
 ## ------- Figures ------- ##
 
+# replot uses these settings on a saved run. The maps show the fields at turning point map_turning_point of the load
+# path (1: the first; "last": the last, which on a cyclic path is back at zero strain, so residual stress), and each
+# entry that reached it.
+map_turning_point           = "last"
 # Colour-scale ranges (min, max) of the von Mises stress maps (MPa) and the accumulated plastic strain maps (%), to
 # share a scale across runs. An end left at None comes from the finest field (the reference, else Spectral LS, else
 # every map); values beyond an end take its colour. field_maps_matrix_only greys out the inclusion in both maps
@@ -109,38 +148,21 @@ fft_tfa_neighbour_blocks    = True
 von_mises_range_MPa         = (None, None)
 field_maps_matrix_only      = True
 plastic_strain_range_percent = (None, None)
-
 # With the reference on, the macroscopic stress errors (macro_stress_error.png, errors.txt) cover each stress component
 # whose reference value reaches loaded_stress_fraction of the largest one somewhere along the path.
 loaded_stress_fraction      = 0.05
 
-## ------- Materials ------- ##
+## ------- Solver Details ------- ##
 
-# Isotropic elasticity and J2 plasticity with linear isotropic hardening, the hardening modulus zero or above (Spectral
-# LS's conjugate gradients need a positive definite tangent, notes/2_ls_model.md section 7.7). A yield stress of np.inf
-# keeps a phase elastic.
-matrix_elastic_modulus      = 2.1e9
-matrix_poisson_ratio        = 0.3
-matrix_yield_stress         = 29e6
-matrix_hardening_modulus    = 139e6
-inclusion_elastic_modulus   = 72e9
-inclusion_poisson_ratio     = 0.22
-inclusion_yield_stress      = np.inf
-inclusion_hardening_modulus = 0.0
-
-## ------- Solver details ------- ##
-
-# Spectral LS's reference stiffness, a solver setting only (its kernel is a projection, so its answer does not depend
-# on it): "midpoint", the phases' Lamé constants averaged (Moulinec–Suquet 1998, section 3.1), or "matrix".
-spectral_ls_reference_stiffness = "midpoint"
-
-# TFA's E and P are solved this many load columns at a time (memory against speed). Their FE factorization limits 3D
-# meshes: 24³ works with 7 GB of memory, 36³ does not.
+# TFA's E and P are solved this many load columns at a time (memory against speed), with this fill-reducing ordering of
+# the sparse factorization. It limits 3D meshes: 24³ works with 7 GB of memory, 36³ does not.
 fe_columns_per_solve        = 100
+fe_factorization_ordering   = "MMD_AT_PLUS_A"
 
-# k-means: Lloyd iterations from a seeded k-means++ start, on features from six elastic Spectral LS solves.
+# k-means: Lloyd iterations from a seeded start (scipy's minit), on features from six elastic Spectral LS solves.
 k_means_iterations          = 50
 k_means_seed                = 0
+k_means_start               = "++"
 
 # Random fibers: random sequential addition gives up after fiber_placement_attempts random centres; pushing apart
 # then moves overlapping pairs to (1 + fiber_push_margin) times their minimum distance, and stops with an error after
@@ -199,57 +221,65 @@ output_folder = pathlib.Path(__file__).parent / "output"
 
 ## ------- Input Checks ------- ##
 
+def check_entries(name, entries, needed_settings):
+    for entry in entries:
+        if set(entry) != set(needed_settings):
+            raise ValueError(f"Each entry of {name} needs exactly {', '.join(needed_settings)}. Got {entry}.")
+
 def check_inputs():
-    # Stops on an input the code cannot run with. check.py calls it again after setting its own inputs.
-    if min(elements_per_side, partitions_per_side, strain_increment_count) < 1:
-        raise ValueError("The element, partition and strain increment counts must all be at least 1.")
-    if elements_per_side % partitions_per_side != 0:
-        raise ValueError("The number of elements per side must be a multiple of the number of partitions per side.")
-    if spectral_ls_elements_per_side is not None and spectral_ls_elements_per_side < 1:
-        raise ValueError("spectral_ls_elements_per_side must be None or at least 1.")
+    # Stops on an input the code cannot run with, naming the setting to change. check.py calls it again after setting
+    # its own inputs.
+    if not (fft_tfa or spectral_ls or tfa):
+        raise ValueError("Nothing to run: fft_tfa, spectral_ls and tfa are all empty.")
+    check_entries("fft_tfa", fft_tfa, ("partitions", "matrix_clusters", "inclusion_clusters", "reach"))
+    check_entries("spectral_ls", spectral_ls, ("elements", "C0"))
+    check_entries("tfa", tfa, ("partitions", "matrix_clusters", "inclusion_clusters"))
+    for entry in fft_tfa + tfa:
+        if elements_per_side % entry["partitions"] != 0:
+            raise ValueError(f"partitions={entry['partitions']} must divide elements_per_side={elements_per_side}.")
+        if min(entry["matrix_clusters"], entry["inclusion_clusters"]) < 1:
+            raise ValueError(f"The cluster counts must be at least 1. Got {entry}.")
+    for entry in fft_tfa:
+        if entry["reach"] != "full" and not (isinstance(entry["reach"], int) and entry["reach"] >= 0):
+            raise ValueError(f"reach must be \"full\" or an integer from 0. Got {entry}.")
+    for C0 in [reference_C0] + [entry["C0"] for entry in spectral_ls]:
+        if C0 not in ("midpoint", "matrix"):
+            raise ValueError(f"A reference stiffness must be \"midpoint\" or \"matrix\". Got {C0!r}.")
     if include_reference and reference_elements_per_side % elements_per_side != 0:
         raise ValueError("reference_elements_per_side must be a multiple of elements_per_side.")
-    if spectral_ls_cg_max_iterations is not None and spectral_ls_cg_max_iterations < 1:
-        raise ValueError("spectral_ls_cg_max_iterations must be None or at least 1.")
 
     if inclusion_shape in ("fiber", "sphere"):
         if not 0 < inclusion_radius < domain_side_length / 2:
-            raise ValueError("The inclusion's radius must be positive and below half the domain side, so neighbouring "
+            raise ValueError("inclusion_radius must be positive and below half the domain side, so neighbouring "
                              f"inclusions do not touch. Got {inclusion_radius}.")
     elif inclusion_shape in ("laminate", "laminate_z"):
         if not 0 < layer_thickness < domain_side_length:
-            raise ValueError("The fiber layer's thickness must be positive and below the domain side, so matrix "
-                             f"surrounds it. Got {layer_thickness}.")
+            raise ValueError(f"layer_thickness must lie between zero and the domain side. Got {layer_thickness}.")
     elif inclusion_shape == "random fibers":
-        if min(fiber_count, fiber_placement_attempts, fiber_push_passes) < 1 or fiber_gap < 0:
-            raise ValueError("fiber_count, fiber_placement_attempts and fiber_push_passes must be at least 1, "
-                             "fiber_gap at least 0.")
-        # At zero, pushed pairs only approach their minimum distance.
-        if not fiber_push_margin > 0:
-            raise ValueError(f"fiber_push_margin must be positive. Got {fiber_push_margin}.")
         if not 0 < fiber_volume_fraction < 1:
             raise ValueError(f"fiber_volume_fraction must lie between 0 and 1. Got {fiber_volume_fraction}.")
         # A fiber and its own periodic image must keep the gap too.
         fiber_diameter = 2 * domain_side_length * np.sqrt(fiber_volume_fraction / (np.pi * fiber_count))
         if fiber_diameter + fiber_gap * domain_side_length >= domain_side_length:
-            raise ValueError("A fiber's diameter plus the gap must be below the domain side, so a fiber does not touch "
-                             "its own periodic image.")
+            raise ValueError("A fiber's diameter plus fiber_gap must be below the domain side, so a fiber does not "
+                             "touch its own periodic image.")
     else:
         raise ValueError("inclusion_shape must be \"fiber\", \"laminate\", \"laminate_z\", \"sphere\" or "
                          f"\"random fibers\". Got {inclusion_shape!r}.")
 
-    if min(matrix_hardening_modulus, inclusion_hardening_modulus) < 0:
+    if materials not in material_sets:
+        raise ValueError(f"materials must be one of material_sets: {', '.join(material_sets)}. Got {materials!r}.")
+    if min(phase["hardening"] for phase in material_sets[materials].values()) < 0:
         raise ValueError("The hardening moduli must be zero or above: softening is not supported.")
-
-    if load_path_shape not in ("monotonic", "cyclic"):
-        raise ValueError(f"load_path_shape must be \"monotonic\" or \"cyclic\". Got {load_path_shape!r}.")
-    if min(k_means_matrix_clusters_per_partition, k_means_inclusion_clusters_per_partition, k_means_iterations) < 1:
-        raise ValueError("The k-means cluster counts and iteration count must all be at least 1.")
-    if spectral_ls_reference_stiffness not in ("midpoint", "matrix"):
-        raise ValueError("spectral_ls_reference_stiffness must be \"midpoint\" or \"matrix\". "
-                         f"Got {spectral_ls_reference_stiffness!r}.")
-    if not 0 < loaded_stress_fraction <= 1:
-        raise ValueError(f"loaded_stress_fraction must lie in (0, 1]. Got {loaded_stress_fraction}.")
+    if load not in load_paths:
+        raise ValueError(f"load must be one of load_paths: {', '.join(load_paths)}. Got {load!r}.")
+    if not np.any(load_paths[load][0]):
+        raise ValueError("A load path's first turning point must not be zero: it sets the step length.")
+    if map_turning_point != "last" and not 1 <= map_turning_point <= len(load_paths[load]):
+        raise ValueError(f"map_turning_point must be \"last\" or from 1 to {len(load_paths[load])}, this load path's "
+                         f"turning points. Got {map_turning_point!r}.")
+    if strain_increment_count < 1 or timing_repeats < 1:
+        raise ValueError("strain_increment_count and timing_repeats must be at least 1.")
     for name, (minimum, maximum) in (("von_mises_range_MPa", von_mises_range_MPa),
                                      ("plastic_strain_range_percent", plastic_strain_range_percent)):
         if minimum is not None and maximum is not None and minimum >= maximum:

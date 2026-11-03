@@ -1,42 +1,26 @@
-# Checks the code on small problems, each solved by every method (FFT-TFA, Spectral LS, TFA). Run it after
-# any change to the code:
+# Checks the code on small problems, each solved by every method (FFT-TFA, Spectral LS, TFA). Run it after any change to
+# the code:
 #
 #   python code/check.py         run the checks (about a minute)
 #   python code/check.py save    run the checks (except the comparison with the old results) and, if they all pass,
 #                                save the results, which later runs must reproduce exactly
 #
-# The problems:
-#   laminate      a laminate loaded in tension and shear, then unloaded and loaded in reverse. Its exact solution
-#                 (below) is known, and every method must reproduce it in every cluster; Spectral LS on its own
-#                 coarser elements (9 per side against the mesh's 27), which resolve the layer exactly.
-#   cut laminate  a laminate whose interfaces cut through partitions, so partitions there hold both phases, loaded in
-#                 transverse shear. Spectral LS and TFA must reproduce the exact solution in every cluster. FFT-TFA
-#                 represents the exact polarization, but its interaction is exact only within reach of each partition,
-#                 and the cut partitions line up along the layer, so their far-field error adds up instead of decaying
-#                 (notes/2_ls_model.md section 10.5). Its difference is reported but not judged.
-#   fiber         a circular fiber under tension and shear, the kind of problem config.py sets up by default, with a
-#                 band of mixed partitions around the fiber.
-#   z laminate    a laminate with interfaces normal to z, so the geometry varies along z: meshed and partitioned in 3D,
-#                 the only test of the kernel's ξ_z frequencies. Every method must reproduce its exact solution,
-#                 Spectral LS on its own finer elements (18 per side against the mesh's 9).
-#   sphere        a spherical inclusion, meshed and partitioned in 3D, with mixed partitions all around it.
-#   k-means sphere
-#                 the sphere with k-means clusters, FFT-TFA with neighbour blocks.
-#   random fibers several fibers at random positions, with k-means clusters.
-# On every laminate, FFT-TFA is also solved with every partition within reach, where its interaction is exact (FT-3), so
-# it must reproduce the exact solution: that separates its truncation, a model error, from a wrong law or Newton solve.
-# On the laminate, FFT-TFA at full reach and TFA must also reproduce it with each partition's matrix part cut into two
-# clusters, since each phase's exact state is uniform: that tests clusters dividing a partition's phase.
-# On all of them, every method must complete every load step and, once results are saved, reproduce them bit for bit.
-# On every problem, FFT-TFA's interaction with every partition within reach (FT-2, FT-3) must equal the element-level
-# LS operator averaged over its clusters, computed here from the elements: a wrong offset, pair count, correction block
-# or average fails there.
-# On the fiber and the sphere, every method must stop at the same accuracy: its stresses at convergence_tolerance within
-# stopping_accuracy_tolerance of its own solution at stopping_check_tolerance. (Not with k-means clusters of a few
-# elements: there a cluster on the verge of yielding can converge elastic at one tolerance and plastic at the other, for
-# TFA too.)
-# On the fiber, the reference (config.include_reference) is solved at the working resolution: it must equal Spectral
-# LS bit for bit, and load back from its cache unchanged.
+# The problems are in check_problems below. The checks:
+# - On every problem, every method must complete every load step and, once results are saved, reproduce them bit for
+#   bit.
+# - On every problem, FFT-TFA's interaction at full reach (FT-2, FT-3) must equal the element-level LS operator averaged
+#   over its clusters, computed here from the elements: a wrong offset, pair count, correction block or average fails.
+# - On every laminate, every method must reproduce its exact solution in every cluster, except where inexact_methods
+#   says its model is not exact there, and FFT-TFA at full reach must too: that separates its truncation, a model error, from
+#   a wrong law or Newton solve.
+# - On the laminate, FFT-TFA at full reach and TFA must also reproduce it with each partition's matrix part cut into two
+#   clusters, since each phase's exact state is uniform: that tests clusters dividing a partition's phase.
+# - On the fiber and the sphere, every method must stop at the same accuracy: its stresses at convergence_tolerance
+#   within stopping_accuracy_tolerance of its own solution at stopping_check_tolerance. (Not with k-means clusters of a few
+#   elements: there a cluster on the verge of yielding can converge elastic at one tolerance and plastic at the other,
+#   for TFA too.)
+# - On the fiber, the reference, solved at the working resolution, must equal Spectral LS bit for bit, and load back
+#   from its cache unchanged.
 # So a change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
 # results, then save them anew. They are in code/check_saved_results.npz, and hold bit for bit only at the
 # config.thread_count they were saved with.
@@ -52,6 +36,7 @@ import tempfile
 import pathlib
 
 import config  # first: it sets the thread count before numpy loads
+from config import strain
 import numpy as np
 
 import cell
@@ -61,62 +46,81 @@ import run
 import tfa_model
 from material import get_eigenstrain_sensitivity, get_plastic_eigenstrain, get_unloaded_plastic_state
 
-# Next to the code, not in the cache folder, so clearing the cache to rebuild E and P keeps it.
+# Next to the code, not in the cache folder, so clearing the cache keeps it.
 saved_results_path = pathlib.Path(__file__).parent / "check_saved_results.npz"
 
-# Every config.py input that shapes the problems or the solvers, pinned to a fixed value: a 27 × 27 element mesh
-# with 9 × 9 partitions, a yielding and hardening matrix, every method switched on.
+# The stiffly contrasted materials of every problem.
+check_materials = dict(matrix=dict(E=100e6, poisson=0.19, yield_stress=1.0e6, hardening=10e6),
+                       inclusion=dict(E=10e9, poisson=0.3, yield_stress=np.inf, hardening=0))
+
+def get_entries(partitions, spectral_elements, matrix_clusters=1, reach=0):
+    # One entry of each method.
+    return {"fft_tfa": [dict(partitions=partitions, matrix_clusters=matrix_clusters, inclusion_clusters=1,
+                             reach=reach)],
+            "spectral_ls": [dict(elements=spectral_elements, C0="midpoint")],
+            "tfa": [dict(partitions=partitions, matrix_clusters=matrix_clusters, inclusion_clusters=1)]}
+
+def get_cyclic_load(max_strain):
+    # Out to the given strain, to its opposite and back to zero: unloading, reverse yielding and zero imposed strain.
+    return {"load_paths": {"check": [max_strain, -max_strain, strain()]}, "strain_increment_count": 4}
+
+def get_monotonic_load(max_strain):
+    return {"load_paths": {"check": [max_strain]}, "strain_increment_count": 12}
+
+# Every config.py input that shapes the problems or the solvers, pinned to a fixed value: a 27 × 27 element mesh, a
+# yielding and hardening matrix.
 pinned_inputs = {
     "domain_side_length": 1e-3, "inclusion_shape": "fiber", "inclusion_radius": 0.35e-3,
-    "layer_thickness": (3 / 9) * 1e-3, "elements_per_side": 27, "partitions_per_side": 9,
-    "spectral_ls_elements_per_side": None,
-    "inclusion_elastic_modulus": 10e9, "matrix_elastic_modulus": 100e6, "inclusion_poisson_ratio": 0.3,
-    "matrix_poisson_ratio": 0.19, "inclusion_yield_stress": np.inf, "matrix_yield_stress": 1.0e6,
-    "inclusion_hardening_modulus": 0.0, "matrix_hardening_modulus": 10e6,
-    "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.0]), "strain_increment_count": 12,
-    "load_path_shape": "monotonic",
-    "include_spectral_ls": True, "include_tfa": True, "fft_tfa_neighbour_blocks": False, "spectral_ls_reference_stiffness": "midpoint",
+    "layer_thickness": (3 / 9) * 1e-3, "elements_per_side": 27,
+    "material_sets": {"check": check_materials}, "materials": "check", "load": "check",
+    **get_entries(partitions=9, spectral_elements=27),
+    **get_monotonic_load(strain(e11=0.015, e22=0.020, g12=0.03)),
     "convergence_tolerance": 1e-6, "residual_strain_scale_floor": 1e-4, "newton_max_iterations": 50,
     "krylov_tolerance": 1e-3, "gmres_restart": 50, "gmres_max_restarts": None, "spectral_ls_cg_max_iterations": None,
     "ls_divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "fe_columns_per_solve": 100,
+    "fe_factorization_ordering": "MMD_AT_PLUS_A",
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
-    "k_means_matrix_clusters_per_partition": 1, "k_means_inclusion_clusters_per_partition": 1,
-    "k_means_iterations": 50, "k_means_seed": 0,
-    "include_reference": False, "reference_elements_per_side": 27}
+    "k_means_iterations": 50, "k_means_seed": 0, "k_means_start": "++", "fiber_placement_attempts": 100000,
+    "fiber_push_margin": 1e-3, "fiber_push_passes": 10000, "include_reference": False,
+    "reference_elements_per_side": 27, "reference_C0": "midpoint", "timing_repeats": 1, "memory_limit_GB": None,
+    "map_turning_point": "last"}
 
 # What each problem changes from pinned_inputs.
 check_problems = {
-    # A layer 3 partitions thick, loaded so that every interface-normal component (ε11, γ12, γ13) takes part, over a
-    # cyclic path: the only test of unloading, reverse yielding and zero imposed strain. 4 increments per quarter
-    # still yield at both zero crossings. Spectral LS runs on 9 elements per side, the layer 3 of them thick: the only
-    # test of Spectral LS coarser than the mesh.
-    "laminate": {"inclusion_shape": "laminate", "max_macro_strain": np.array([0.015, 0.020, 0.0, 0.03, 0.0, 0.01]),
-                 "load_path_shape": "cyclic", "strain_increment_count": 4, "spectral_ls_elements_per_side": 9},
-    # A layer 7 elements thick, so each interface cuts a partition (2/3 fiber). In transverse shear γ12 both phases
-    # carry the same stress, so the equal-stress split is exact there and every method must match the exact solution.
+    # A layer 3 partitions thick, loaded so that every interface-normal component (ε11, γ12, γ13) takes part. Its exact
+    # solution is known. 4 increments per quarter still yield at both zero crossings. Spectral LS runs on 9 elements per
+    # side, the layer 3 of them thick: the only test of Spectral LS coarser than the mesh.
+    "laminate": {"inclusion_shape": "laminate", **get_cyclic_load(strain(e11=0.015, e22=0.020, g12=0.03, g13=0.01)),
+                 **get_entries(partitions=9, spectral_elements=9)},
+    # A layer 7 elements thick, so each interface cuts a partition (2/3 fiber), so partitions there hold both phases. In
+    # transverse shear γ12 both phases carry the same stress. FFT-TFA represents the exact polarization, but its
+    # interaction is exact only within reach of each partition, and the cut partitions line up along the layer, so their
+    # far-field error adds up instead of decaying (notes/2_ls_model.md section 10.5).
     "cut laminate": {"inclusion_shape": "laminate", "layer_thickness": (7 / 27) * 1e-3,
-                     "max_macro_strain": np.array([0.0, 0.0, 0.0, 0.03, 0.0, 0.0]), "load_path_shape": "cyclic",
-                     "strain_increment_count": 4},
-    # With the reference switched on, at the working resolution, so it must equal Spectral LS bit for bit.
+                     **get_cyclic_load(strain(g12=0.03))},
+    # A circular fiber under tension and shear, with a band of mixed partitions around it, and the reference switched
+    # on, at the working resolution, so it must equal Spectral LS bit for bit.
     "fiber": {"include_reference": True},
     # The laminate turned so its interfaces are normal to z, on a 9³ mesh with 3³ partitions (the layer is the middle
-    # partition layer), loaded like the laminate with every interface-normal component (ε33, γ23, γ13) taking part.
-    # Spectral LS runs on 18³ elements, the layer 6 of them thick: the only test of Spectral LS finer than the mesh.
-    "z laminate": {"inclusion_shape": "laminate_z", "elements_per_side": 9, "partitions_per_side": 3,
-                   "max_macro_strain": np.array([0.020, 0.0, 0.015, 0.0, 0.03, 0.01]), "load_path_shape": "cyclic",
-                   "strain_increment_count": 4, "spectral_ls_elements_per_side": 18},
+    # partition layer), loaded with every interface-normal component (ε33, γ23, γ13) taking part: the only test of the
+    # kernel's ξ_z frequencies. Spectral LS runs on 18³ elements, the layer 6 of them thick: the only test of Spectral
+    # LS finer than the mesh.
+    "z laminate": {"inclusion_shape": "laminate_z", "elements_per_side": 9,
+                   **get_cyclic_load(strain(e11=0.020, e33=0.015, g23=0.03, g13=0.01)),
+                   **get_entries(partitions=3, spectral_elements=18)},
     # A sphere on a 12³ mesh with 4³ partitions, loaded with z components: the only test of mixed partitions in 3D.
-    "sphere": {"inclusion_shape": "sphere", "elements_per_side": 12, "partitions_per_side": 4,
-               "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03])},
-    # The sphere with k-means clusters, so a partition's matrix part holds several: the only test of k-means in 3D and of
-    # FFT-TFA's neighbour blocks along a load path.
-    "k-means sphere": {"inclusion_shape": "sphere", "elements_per_side": 12, "partitions_per_side": 4,
-                       "max_macro_strain": np.array([0.015, 0.0, 0.020, 0.0, 0.0, 0.03]),
-                       "k_means_matrix_clusters_per_partition": 2, "fft_tfa_neighbour_blocks": True},
+    "sphere": {"inclusion_shape": "sphere", "elements_per_side": 12,
+               **get_monotonic_load(strain(e11=0.015, e33=0.020, g13=0.03)),
+               **get_entries(partitions=4, spectral_elements=12)},
+    # The sphere with k-means clusters, so a partition's matrix part holds several: the only test of k-means in 3D and
+    # of FFT-TFA's neighbour blocks along a load path.
+    "k-means sphere": {"inclusion_shape": "sphere", "elements_per_side": 12,
+                       **get_monotonic_load(strain(e11=0.015, e33=0.020, g13=0.03)),
+                       **get_entries(partitions=4, spectral_elements=12, matrix_clusters=2, reach=1)},
     # The shape config.py sets up by default: fibers at random positions, with k-means clusters.
     "random fibers": {"inclusion_shape": "random fibers", "fiber_count": 6, "fiber_volume_fraction": 0.3,
-                      "fiber_gap": 1 / 27, "fiber_seed": 1, "k_means_matrix_clusters_per_partition": 2,
-                      "fiber_placement_attempts": 100000, "fiber_push_margin": 1e-3, "fiber_push_passes": 10000},
+                      "fiber_gap": 1 / 27, "fiber_seed": 1,
+                      **get_entries(partitions=9, spectral_elements=27, matrix_clusters=2)},
 }
 
 # The methods whose model is not exact on a problem: compared with the exact solution, but not judged by it.
@@ -189,33 +193,35 @@ def get_laminate_phase_stress(clusters, applied_macro_strain):
         previous_macro_strain = macro_strain
     return phase_stress
 
-def get_relative_difference(stress, exact_stress):
-    # The largest difference over every step and component, relative to the largest exact stress.
-    return np.abs(stress - exact_stress).max() / np.abs(exact_stress).max()
+## ------- Differences ------- ##
+
+def get_relative_difference(stress, other_stress):
+    # The largest difference over every step and component, relative to the largest of the other stress.
+    return np.abs(stress - other_stress).max() / np.abs(other_stress).max()
+
+def get_stress_error(result, other_macroscopic_stress, other_cluster_stress):
+    # The larger of the macroscopic stress's difference and every cluster's, clusters judged phase by phase on their own
+    # phase's stress scale: on the fiber's, about a hundred times larger, a matrix error would hide.
+    material_ids = result.clusters.materials.material_ids
+    return max(get_relative_difference(result.macroscopic_stress, other_macroscopic_stress),
+               *(get_relative_difference(result.cluster_stress[:, phase], other_cluster_stress[:, phase])
+                 for phase in (material_ids == 0, material_ids == 1)))
 
 def get_laminate_error(result, exact_phase_stress):
-    # The larger of the macroscopic stress's difference and every cluster's, clusters judged phase by phase on their
-    # own phase's stress scale: on the fiber's, about a hundred times larger, a matrix error would hide.
-    material_ids = result.clusters.materials.material_ids
-    exact_cluster_stress = exact_phase_stress[:, material_ids]
-    exact_macroscopic_stress = result.clusters.average(np.moveaxis(exact_cluster_stress, 1, 0))
-    errors = [get_relative_difference(result.macroscopic_stress, exact_macroscopic_stress)]
-    for phase_clusters in (material_ids == 0, material_ids == 1):
-        errors.append(get_relative_difference(result.cluster_stress_per_step[:, phase_clusters],
-                                              exact_cluster_stress[:, phase_clusters]))
-    return max(errors)
+    exact_cluster_stress = exact_phase_stress[:, result.clusters.materials.material_ids]
+    return get_stress_error(result, result.clusters.average(np.moveaxis(exact_cluster_stress, 1, 0)),
+                            exact_cluster_stress)
 
-## ------- FFT-TFA's Interaction ------- ##
+## ------- FFT-TFA at Full Reach ------- ##
 
-def get_interaction_error(mesh, clusters, matrix_L):
-    # FFT-TFA's interaction with every partition within reach of every other (FT-2 to FT-4), against the element-level
-    # LS operator: random polarizations, one per cluster, spread over its elements, strains −Γ0 * τ = −D0 τ by FFT on the
-    # element lattice (Moulinec–Suquet kernel, C0 = L_m), averaged over each cluster's elements. The largest relative
-    # difference. At full reach FT-3 corrects every pair of partitions, so the two must agree to round-off; FT-4 then
-    # removes a mean that is zero to round-off.
-    discretization = mesh.discretization
-    interaction = fft_tfa_model.get_interaction(mesh, clusters, matrix_L,
-                                                max(discretization.partition_lattice_shape) // 2)
+def get_interaction_error(mesh, clusters):
+    # FFT-TFA's interaction at full reach (FT-2 to FT-4), against the element-level LS operator: random polarizations,
+    # one per cluster, spread over its elements, strains −Γ0 * τ = −D0 τ by FFT on the element lattice (Moulinec–Suquet
+    # kernel, C0 = L_m), averaged over each cluster's elements. The largest relative difference. At full reach FT-3
+    # corrects every pair of partitions, so the two must agree to round-off; FT-4 then removes a mean that is zero to
+    # round-off.
+    discretization, matrix_L = mesh.discretization, cell.get_matrix_L()
+    interaction = fft_tfa_model.get_interaction(mesh, clusters, "full")
     polarization = 1e6 * np.random.default_rng(0).standard_normal((clusters.cluster_count, 6))
     kernel = ls_model.get_transformed(ls_model.get_moulinec_suquet_kernel(discretization.element_lattice_shape,
                                                                           matrix_L),
@@ -227,92 +233,146 @@ def get_interaction_error(mesh, clusters, matrix_L):
     element_average /= np.bincount(clusters.element_cluster)[:, None]
     return get_relative_difference(fft_tfa_model.get_strain_change(interaction, polarization), element_average)
 
-def solve_at_full_reach(mesh, clusters, matrix_L):
-    # FFT-TFA's load path on the clusters with every partition within reach of every other.
-    interaction = fft_tfa_model.get_interaction(mesh, clusters, matrix_L,
-                                                max(mesh.discretization.partition_lattice_shape) // 2)
+def solve_load_path(solver):
+    load_path = run.get_load_path()
     with contextlib.redirect_stdout(io.StringIO()):
-        return run.run_load_path("FFT-TFA", fft_tfa_model.FFTTFASolver(interaction), run.get_applied_macro_strain())
+        return run.run_load_path("check", solver, load_path.applied_macro_strain,
+                                 np.arange(len(load_path.applied_macro_strain)))
+
+def solve_at_full_reach(mesh, clusters):
+    return solve_load_path(fft_tfa_model.FFTTFASolver(fft_tfa_model.get_interaction(mesh, clusters, "full")))
 
 def get_split_clusters(mesh):
     # Each partition's part in each phase, its matrix part cut into two clusters along y by element row, in the order
     # cell.get_clusters expects: by partition, matrix first.
-    row = mesh.discretization.element_lattice_shape[1]
-    element_rows = (np.arange(mesh.discretization.element_count) // row) % row
-    in_second_half = (element_rows % mesh.discretization.elements_per_partition_side
-                      >= mesh.discretization.elements_per_partition_side // 2)
+    side = mesh.discretization.elements_per_side
+    block = mesh.discretization.elements_per_partition_side
+    element_rows = (np.arange(mesh.discretization.element_count) // side) % side
+    in_second_half = element_rows % block >= block // 2
     keys = 3 * mesh.element_partition_ids + np.where(mesh.element_material_ids == 1, 2, in_second_half)
     return cell.get_clusters(mesh, np.unique(keys, return_inverse=True)[1])
 
-def solve_on_split_clusters(mesh, matrix_L):
+def solve_on_split_clusters(mesh):
     # FFT-TFA at full reach and TFA along the load path on get_split_clusters.
     clusters = get_split_clusters(mesh)
-    E, P, _ = tfa_model.get_E_and_P(mesh, clusters)
-    with contextlib.redirect_stdout(io.StringIO()):
-        return {"FFT-TFA at full reach": solve_at_full_reach(mesh, clusters, matrix_L),
-                "TFA": run.run_load_path("TFA", tfa_model.TFASolver(E, P, clusters), run.get_applied_macro_strain())}
-
-## ------- Stopping Accuracy ------- ##
-
-def get_stopping_error(result, tight_result):
-    # The larger of the macroscopic stress's difference from the tight solution and every cluster's, clusters judged
-    # phase by phase on their own phase's stress scale, as get_laminate_error does.
-    material_ids = result.clusters.materials.material_ids
-    errors = [get_relative_difference(result.macroscopic_stress, tight_result.macroscopic_stress)]
-    for phase_clusters in (material_ids == 0, material_ids == 1):
-        errors.append(get_relative_difference(result.cluster_stress_per_step[:, phase_clusters],
-                                              tight_result.cluster_stress_per_step[:, phase_clusters]))
-    return max(errors)
-
-## ------- Reference ------- ##
-
-def is_reference_spectral_ls(problem, spectral_ls_result):
-    # Whether the reference, solved at the working resolution, holds Spectral LS's macroscopic stress at every step and
-    # its fields at the last, to the bit, and whether asking for it again loads the same arrays from its cache.
-    reference = problem.reference
-    with contextlib.redirect_stdout(io.StringIO()):
-        reloaded = run.get_reference(problem.matrix_L, cell.get_inclusion_L())
-    return (np.array_equal(reference.macroscopic_stress, spectral_ls_result.macroscopic_stress)
-            and np.array_equal(reference.stress, spectral_ls_result.cluster_stress_per_step[-1])
-            and np.array_equal(reference.accumulated_plastic_strain,
-                               spectral_ls_result.accumulated_plastic_strain_per_step[-1])
-            and all(np.array_equal(saved, loaded) for saved, loaded in zip(reference, reloaded)))
+    E, P, *_ = tfa_model.get_E_and_P(mesh, clusters)
+    return {"FFT-TFA at full reach": solve_at_full_reach(mesh, clusters),
+            "TFA": solve_load_path(tfa_model.TFASolver(E, P, clusters))}
 
 ## ------- Checks ------- ##
 
 def solve_check_problem(problem_inputs, cache_folder):
-    # Every method's results on one check problem, with config's inputs replaced in memory and the solvers' printing
-    # silenced.
+    # Every method's results by method, with config's inputs replaced in memory and the solvers' printing silenced, and
+    # fields at every load step.
     for name, value in {**pinned_inputs, **problem_inputs}.items():
         if not hasattr(config, name):
             raise AttributeError(f"config.py has no input {name}: update check.py's pinned_inputs or check_problems")
         setattr(config, name, value)
     config.cache_folder = cache_folder
     config.check_inputs()
+    load_path = run.get_load_path()
     with contextlib.redirect_stdout(io.StringIO()):
-        problem = run.get_problem()
-        results = run.solve_all(problem)
-    return problem, results
+        results = run.solve_all(load_path, np.arange(len(load_path.applied_macro_strain)))
+    return {label: entry_result.result for label, entry_result in results.items()}
 
 def report(passed, description):
     print(f"[{'PASS' if passed else 'FAIL'}] {description}")
     return passed
 
+def check_laminate(problem_name, results):
+    # Every method, and FFT-TFA at full reach, against the laminate's exact solution.
+    mesh, clusters = run.get_partition_clusters(config.fft_tfa[0])
+    exact_phase_stress = get_laminate_phase_stress(clusters, run.get_load_path().applied_macro_strain)
+    tolerance = config.laminate_tolerance
+    all_passed = True
+    for method, result in results.items():
+        error = get_laminate_error(result, exact_phase_stress)
+        if method in inexact_methods.get(problem_name, ()):
+            print(f"[INFO] {problem_name}: {method} differs from the exact solution by {error:.1e} (not exact by "
+                  "design)")
+            continue
+        all_passed &= report(error <= tolerance, f"{problem_name}: {method} matches the exact solution (largest "
+                                                 f"relative difference {error:.1e}, tolerance {tolerance:.0e})")
+    error = get_laminate_error(solve_at_full_reach(mesh, clusters), exact_phase_stress)
+    all_passed &= report(error <= tolerance, f"{problem_name}: FFT-TFA at full reach matches the exact solution "
+                                             f"(largest relative difference {error:.1e}, tolerance {tolerance:.0e})")
+    if problem_name == "laminate":
+        for method, result in solve_on_split_clusters(mesh).items():
+            error = get_laminate_error(result, exact_phase_stress)
+            all_passed &= report(error <= tolerance,
+                                 f"{problem_name}: {method} on clusters dividing a partition's matrix part matches the "
+                                 f"exact solution (largest relative difference {error:.1e}, tolerance {tolerance:.0e})")
+    return all_passed
+
+def check_reference(problem_name, spectral_ls_result):
+    # The reference, solved at the working resolution, holds Spectral LS's macroscopic stress at every step and its
+    # fields at the turning points, to the bit, and asking for it again loads the same arrays from its cache.
+    load_path = run.get_load_path()
+    with contextlib.redirect_stdout(io.StringIO()):
+        reference, reloaded = run.get_reference(load_path), run.get_reference(load_path)
+    turning_steps = load_path.turning_steps
+    return report(np.array_equal(reference.macroscopic_stress, spectral_ls_result.macroscopic_stress)
+                  and np.array_equal(reference.stress, spectral_ls_result.cluster_stress[turning_steps])
+                  and np.array_equal(reference.accumulated_plastic_strain,
+                                     spectral_ls_result.accumulated_plastic_strain[turning_steps])
+                  and all(np.array_equal(solved, loaded) for solved, loaded in zip(reference, reloaded)),
+                  f"{problem_name}: the reference at the working resolution equals Spectral LS bit for bit, and loads "
+                  "back from its cache unchanged")
+
+def check_stopping_accuracy(problem_name, problem_inputs, results, cache_folder):
+    tolerance = config.stopping_check_tolerance
+    tight_results = solve_check_problem({**problem_inputs, "convergence_tolerance": tolerance}, cache_folder)
+    all_passed = True
+    for method, result in results.items():
+        tight = tight_results[method]
+        error = get_stress_error(result, tight.macroscopic_stress, tight.cluster_stress)
+        all_passed &= report(error <= config.stopping_accuracy_tolerance,
+                             f"{problem_name}: {method} stops within {error:.1e} of its solution at tolerance "
+                             f"{tolerance:.0e} (tolerance {config.stopping_accuracy_tolerance:.0e})")
+    return all_passed
+
 def get_result_arrays(problem_name, results):
     # Every array the saved results hold, keyed "<problem>/<method>/<array>".
-    arrays = {}
+    return {f"{problem_name}/{method}/{field}": np.asarray(getattr(result, field))
+            for method, result in results.items()
+            for field in ("macroscopic_stress", "cluster_stress", "newton_iterations_per_step",
+                          "krylov_iterations_per_step", "completed_step_count")}
+
+def check_problem(problem_name, problem_inputs, saved_results, cache_folder):
+    # Every check of one problem: whether they all passed, and the problem's arrays to save.
+    results = solve_check_problem(problem_inputs, cache_folder)
+    step_count = len(run.get_load_path().applied_macro_strain)
+    all_passed = True
     for method, result in results.items():
-        for field in ("macroscopic_stress", "cluster_stress_per_step", "newton_iterations_per_step",
-                      "krylov_iterations_per_step", "completed_step_count"):
-            arrays[f"{problem_name}/{method}/{field}"] = np.asarray(getattr(result, field))
-    return arrays
+        all_passed &= report(result.completed_step_count == step_count,
+                             f"{problem_name}: {method} completed {result.completed_step_count} of {step_count} "
+                             "load steps")
+    if config.inclusion_shape in interface_normal_components_by_shape:
+        all_passed &= check_laminate(problem_name, results)
+    if config.include_reference:
+        all_passed &= check_reference(problem_name, results["Spectral LS"])
+    mesh, clusters = run.get_partition_clusters(config.fft_tfa[0])
+    interaction_error = get_interaction_error(mesh, clusters)
+    all_passed &= report(interaction_error <= config.interaction_check_tolerance,
+                         f"{problem_name}: FFT-TFA's interaction at full reach matches the element-level LS operator "
+                         f"(largest relative difference {interaction_error:.1e}, tolerance "
+                         f"{config.interaction_check_tolerance:.0e})")
+    arrays = get_result_arrays(problem_name, results)
+    if problem_name in stopping_check_problems:
+        all_passed &= check_stopping_accuracy(problem_name, problem_inputs, results, cache_folder)
+    if saved_results is not None:
+        changed = [name for name in arrays if name not in saved_results
+                   or not np.array_equal(arrays[name], saved_results[name])]
+        all_passed &= report(not changed, f"{problem_name}: identical to the saved results"
+                             + "".join(f"\n       differs: {name}" for name in changed))
+    return all_passed, arrays
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "check"
     if mode not in ("check", "save"):
         sys.exit(f"unknown option {mode!r}: use no option, or save")
     saved_results = None
-    if saved_results_path.exists():
+    if mode == "check" and saved_results_path.exists():
         with np.load(saved_results_path) as saved:
             saved_results = {name: saved[name] for name in saved.files}
 
@@ -320,62 +380,9 @@ def main():
     result_arrays = {}
     with tempfile.TemporaryDirectory() as cache_folder:
         for problem_name, problem_inputs in check_problems.items():
-            problem, results = solve_check_problem(problem_inputs, pathlib.Path(cache_folder))
-            step_count = len(run.get_applied_macro_strain())
-            for method, result in results.items():
-                all_passed &= report(result.completed_step_count == step_count,
-                                     f"{problem_name}: {method} completed {result.completed_step_count} of "
-                                     f"{step_count} load steps")
-            if config.inclusion_shape in interface_normal_components_by_shape:
-                exact_phase_stress = get_laminate_phase_stress(problem.fft_tfa.clusters,
-                                                               run.get_applied_macro_strain())
-                for method, result in results.items():
-                    error = get_laminate_error(result, exact_phase_stress)
-                    if method in inexact_methods.get(problem_name, ()):
-                        print(f"[INFO] {problem_name}: {method} differs from the exact solution by {error:.1e} "
-                              "(not exact by design)")
-                        continue
-                    all_passed &= report(error <= config.laminate_tolerance,
-                                         f"{problem_name}: {method} matches the exact solution (largest relative "
-                                         f"difference {error:.1e}, tolerance {config.laminate_tolerance:.0e})")
-                error = get_laminate_error(solve_at_full_reach(problem.mesh, problem.fft_tfa.clusters, problem.matrix_L),
-                                           exact_phase_stress)
-                all_passed &= report(error <= config.laminate_tolerance,
-                                     f"{problem_name}: FFT-TFA at full reach matches the exact solution (largest "
-                                     f"relative difference {error:.1e}, tolerance {config.laminate_tolerance:.0e})")
-                if problem_name == "laminate":
-                    for method, result in solve_on_split_clusters(problem.mesh, problem.matrix_L).items():
-                        error = get_laminate_error(result, exact_phase_stress)
-                        all_passed &= report(error <= config.laminate_tolerance,
-                                             f"{problem_name}: {method} on clusters dividing a partition's matrix part "
-                                             f"matches the exact solution (largest relative difference {error:.1e}, "
-                                             f"tolerance {config.laminate_tolerance:.0e})")
-            if problem.reference is not None:
-                all_passed &= report(is_reference_spectral_ls(problem, results["Spectral LS"]),
-                                     f"{problem_name}: the reference at the working resolution equals Spectral LS "
-                                     "bit for bit, and loads back from its cache unchanged")
-            interaction_error = get_interaction_error(problem.mesh, problem.fft_tfa.clusters, problem.matrix_L)
-            all_passed &= report(interaction_error <= config.interaction_check_tolerance,
-                                 f"{problem_name}: FFT-TFA's interaction at full reach matches the element-level LS "
-                                 f"operator (largest relative difference {interaction_error:.1e}, tolerance "
-                                 f"{config.interaction_check_tolerance:.0e})")
-            if problem_name in stopping_check_problems:
-                _, tight_results = solve_check_problem(
-                    {**problem_inputs, "convergence_tolerance": config.stopping_check_tolerance},
-                    pathlib.Path(cache_folder))
-                for method, result in results.items():
-                    error = get_stopping_error(result, tight_results[method])
-                    all_passed &= report(error <= config.stopping_accuracy_tolerance,
-                                         f"{problem_name}: {method} stops within {error:.1e} of its solution at "
-                                         f"tolerance {config.stopping_check_tolerance:.0e} (tolerance "
-                                         f"{config.stopping_accuracy_tolerance:.0e})")
-            arrays = get_result_arrays(problem_name, results)
+            passed, arrays = check_problem(problem_name, problem_inputs, saved_results, pathlib.Path(cache_folder))
+            all_passed &= passed
             result_arrays.update(arrays)
-            if saved_results is not None and mode == "check":
-                changed = [name for name in arrays if name not in saved_results
-                           or not np.array_equal(arrays[name], saved_results[name])]
-                all_passed &= report(not changed, f"{problem_name}: identical to the saved results"
-                                     + "".join(f"\n       differs: {name}" for name in changed))
 
     if saved_results is None and mode == "check":
         print("No results saved yet: run python code/check.py save to save them.")
