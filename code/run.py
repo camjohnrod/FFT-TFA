@@ -36,8 +36,8 @@ import tqdm
 
 import plots
 from cell import (get_cache_entries, get_cache_path, get_cached, get_clusters, get_discretization, get_fiber_radius,
-                  get_geometry_parameters, get_inclusion_L, get_matrix_L, get_memory_MB, get_periodic_mesh,
-                  is_shape_constant_along_z, label_partition_k_means, label_partition_phases)
+                  get_geometry, get_geometry_parameters, get_inclusion_L, get_matrix_L, get_memory_MB,
+                  get_periodic_mesh, is_shape_constant_along_z, label_partition_k_means, label_partition_phases)
 from fft_tfa_model import FFTTFASolver, get_interaction, get_neighbour_offsets, resolve_reach
 from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_spectral_clusters, get_spectral_lattice
 from material import get_unloaded_plastic_state, get_von_mises_stress
@@ -74,7 +74,7 @@ def get_cluster_labels(mesh, settings):
     # the same elements. One cluster per part needs no features.
     if settings["matrix_clusters"] == settings["inclusion_clusters"] == 1:
         return label_partition_phases(mesh)
-    lattice = get_spectral_lattice(mesh.discretization.elements_per_side, config.reference_C0)
+    lattice = get_spectral_lattice(mesh.discretization.elements_per_side, config.k_means_features_C0)
     return label_partition_k_means(mesh, get_elastic_strain_concentration(lattice).reshape(-1, 36),
                                    settings["matrix_clusters"], settings["inclusion_clusters"])
 
@@ -114,10 +114,10 @@ class LoadPath(NamedTuple):
     turning_steps: np.ndarray          # the load step of each turning point
 
 def get_load_path():
-    # Straight lines through config.load's turning points, config.strain_increment_count steps to the first and the same
-    # step length on the others.
-    turning_points = config.load_paths[config.load]
-    step_length = np.linalg.norm(turning_points[0]) / config.strain_increment_count
+    # Straight lines through config.load_path's turning points, config.steps_to_first_turning_point steps to the first
+    # and the same step length on the others.
+    turning_points = np.array(config.all_load_paths[config.load_path], dtype=float)
+    step_length = np.linalg.norm(turning_points[0]) / config.steps_to_first_turning_point
     lines, start = [], np.zeros(6)
     for point in turning_points:
         step_count = max(1, round(np.linalg.norm(point - start) / step_length))
@@ -253,7 +253,7 @@ def solve_all(load_path, field_steps=None):
 
 ## ------- Reference ------- ##
 
-# The reference (config.include_reference): Spectral LS on its own finer mesh, solved along the same load path once and
+# The reference (config.reference): Spectral LS on its own finer mesh, solved along the same load path once and
 # cached (cell.get_cached) under every input that changes its answer, like E and P.
 
 # Increase whenever a code change alters the reference, so caches made by the old code are recomputed.
@@ -268,12 +268,12 @@ class Reference(NamedTuple):
     build_seconds: float
 
 def get_reference_parameters(load_path):
-    elements = config.reference_elements_per_side
+    elements = config.reference["elements"]
     return {"cache_version": reference_cache_version, "discretization": "Moulinec-Suquet",
             **get_geometry_parameters(), "elements_per_side": elements, "constant_along_z": is_shape_constant_along_z(),
             "L_matrix": get_matrix_L(), "L_inclusion": get_inclusion_L(),
-            "yield_stress": [phase["yield_stress"] for phase in config.material_sets[config.materials].values()],
-            "hardening": [phase["hardening"] for phase in config.material_sets[config.materials].values()],
+            "yield_stress": [phase["yield_stress"] for phase in config.all_materials[config.materials].values()],
+            "hardening": [phase["hardening"] for phase in config.all_materials[config.materials].values()],
             "applied_macro_strain": load_path.applied_macro_strain, "turning_steps": load_path.turning_steps,
             # The solver inputs that change the answer to the last bit.
             "convergence_tolerance": config.convergence_tolerance,
@@ -281,11 +281,11 @@ def get_reference_parameters(load_path):
             "krylov_tolerance": config.krylov_tolerance,
             "line_search": [config.line_search_sufficient_decrease, config.line_search_step_reduction,
                             config.line_search_max_reductions],
-            "reference_C0": config.reference_C0}
+            "reference_C0": config.reference["C0"]}
 
 def get_reference(load_path):
     # The reference from the cache when it matches, otherwise solved now and cached, with the seconds it took to build.
-    elements = config.reference_elements_per_side
+    elements = config.reference["elements"]
     discretization = get_discretization(elements, elements)
 
     def compute():
@@ -293,7 +293,7 @@ def get_reference(load_path):
         print(f"Solving the reference: Spectral LS on {voxel_label} voxels, {len(load_path.applied_macro_strain)} load "
               "steps")
         start_time = time.perf_counter()
-        lattice = get_spectral_lattice(elements, config.reference_C0)
+        lattice = get_spectral_lattice(elements, config.reference["C0"])
         result = run_load_path("Reference", SpectralLSSolver(lattice), load_path.applied_macro_strain,
                                load_path.turning_steps)
         if result.completed_step_count < len(load_path.applied_macro_strain):
@@ -305,7 +305,7 @@ def get_reference(load_path):
                 "build_seconds": time.perf_counter() - start_time}
 
     description = (f"reference, {get_lattice_label(discretization.partition_lattice_shape)} voxels, "
-                   f"{config.inclusion_shape}, {config.materials}, {config.load}")
+                   f"{config.geometry}, {config.materials}, {config.load_path}")
     arrays = get_cached("reference", get_reference_parameters(load_path), description, compute)
     return Reference(discretization.partition_lattice_shape, arrays["material_ids"], arrays["macroscopic_stress"],
                      arrays["stress"], arrays["accumulated_plastic_strain"], float(arrays["build_seconds"]))
@@ -352,8 +352,8 @@ def get_entry_info(entry_result):
             "failure_reason": entry_result.failure_reason}
 
 def get_run_info(results, reference):
-    return {"run_name": config.run_name, "date": datetime.datetime.now().isoformat(timespec="seconds"),
-            "inclusion_shape": config.inclusion_shape, "materials": config.materials, "load": config.load,
+    return {"results_name": config.results_name, "date": datetime.datetime.now().isoformat(timespec="seconds"),
+            "geometry": config.geometry, "materials": config.materials, "load_path": config.load_path,
             "elements_per_side": config.elements_per_side, "side_length_mm": 1e3 * config.domain_side_length,
             "reference": None if reference is None else {"voxels": get_lattice_label(reference.lattice_shape),
                                                          "build_seconds": reference.build_seconds},
@@ -363,7 +363,7 @@ def save_run(load_path, results, reference):
     # A new folder in config.output_folder with the settings, the code's version and the results, and code/output/latest
     # pointing at it.
     date = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    folder = config.output_folder / f"{date}_{re.sub(r'[^A-Za-z0-9.-]+', '-', config.run_name)}"
+    folder = config.output_folder / f"{date}_{re.sub(r'[^A-Za-z0-9.-]+', '-', config.results_name)}"
     folder.mkdir(parents=True)
     shutil.copy(config.__file__, folder / "config.py")
     (folder / "code_version.txt").write_text(get_code_version())
@@ -407,8 +407,8 @@ def append_to_runs_csv(folder, info, errors):
     with open(path, "a", newline="") as runs:
         for entry in info["entries"]:
             rms, largest = errors.get(entry["label"], ("", ""))
-            row = {"folder": folder.name, "date": info["date"], "run_name": info["run_name"],
-                   "shape": info["inclusion_shape"], "materials": info["materials"], "load": info["load"],
+            row = {"folder": folder.name, "date": info["date"], "results_name": info["results_name"],
+                   "geometry": info["geometry"], "materials": info["materials"], "load_path": info["load_path"],
                    "elements_per_side": info["elements_per_side"], "label": entry["label"],
                    "settings": json.dumps(entry["settings"]), "clusters": entry["cluster_count"],
                    "offline_s": f"{entry['offline_seconds']:.2f}", "online_s": f"{entry['online_seconds']:.2f}",
@@ -633,7 +633,7 @@ def draw_run(folder):
 def run():
     load_path = get_load_path()
     reference = None
-    if config.include_reference:
+    if config.reference is not None:
         reference, failure_reason = run_in_own_process(get_reference, load_path)
         if reference is None:
             sys.exit(f"The reference failed: {failure_reason}")
@@ -673,12 +673,12 @@ def get_stored_description(entry, clusters):
 def preview():
     # What config.py asks for, and what it would store, solving nothing but the elastic k-means features.
     load_path = get_load_path()
-    if config.inclusion_shape == "random fibers":
+    if get_geometry()["shape"] == "random fibers":
         diameter = 2 * get_fiber_radius() * config.elements_per_side / config.domain_side_length
-        print(f"{config.fiber_count} random fibers, {diameter:.3g} elements per diameter")
-    phases = config.material_sets[config.materials]
+        print(f"Geometry {config.geometry!r}: {diameter:.3g} elements per fiber diameter")
+    phases = config.all_materials[config.materials]
     print(f"Materials {config.materials!r}: contrast {phases['inclusion']['E'] / phases['matrix']['E']:.3g}")
-    print(f"Load {config.load!r}: {len(load_path.applied_macro_strain)} steps, turning points at steps "
+    print(f"Load path {config.load_path!r}: {len(load_path.applied_macro_strain)} steps, turning points at steps "
           f"{', '.join(str(step + 1) for step in load_path.turning_steps)}")
     info_entries, arrays = [], {}
     for entry in get_entries():
@@ -688,9 +688,9 @@ def preview():
         arrays |= get_entry_arrays(entry, clusters)
         info_entries.append({"label": entry.label, "method": entry.method, "settings": entry.settings,
                              "cluster_count": clusters.cluster_count})
-    if config.include_reference:
+    if config.reference is not None:
         is_cached = get_cache_path("reference", get_reference_parameters(load_path)).exists()
-        print(f"Reference {config.reference_elements_per_side} per side: "
+        print(f"Reference {config.reference['elements']} per side: "
               f"{'cached' if is_cached else 'NOT cached, a run would solve it first'}")
     config.output_folder.mkdir(parents=True, exist_ok=True)
     path = config.output_folder / "preview_cross_section.png"

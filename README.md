@@ -42,37 +42,40 @@ It needs Linux (or WSL), and Python 3.12 with `numpy`, `scipy`, `matplotlib` and
 
 ## Choosing what to run
 
-Every setting is in `code/config.py`, commented, from those changed most to those changed least; there are no other
-inputs. Its first screen is what you will change most. To compare methods, list them; an empty list switches a method
-off, and any method may have several entries, drawn in tints of its colour, so list them coarse to fine:
+Every setting is in `code/config.py`. Its first screen is all you normally touch. Section 1 is the problem, one name from
+each list in section 4, where you can add your own; section 2 is what to compare:
 
 ```python
-run_name    = "biaxial cyclic"
+geometry                     = "100 fibers"
+materials                    = "glass/PA"
+load_path                    = "biaxial cyclic"
+steps_to_first_turning_point = 50
+elements_per_side            = 128
+
 fft_tfa     = [dict(partitions=8,  matrix_clusters=8, inclusion_clusters=1, reach=1),
                dict(partitions=16, matrix_clusters=8, inclusion_clusters=1, reach=1)]
 spectral_ls = [dict(elements=64, C0="midpoint"), dict(elements=128, C0="midpoint")]
 tfa         = []
+reference   = dict(elements=512, C0="midpoint")
 ```
 
-- **FFT-TFA and TFA entries** share one fine mesh, `elements_per_side`; `partitions` must divide it. One cluster of each
-  kind per partition needs no k-means. `reach` is how far FFT-TFA's exact interaction goes: 0 each partition's own
-  clusters, 1 its neighbours too, `"full"` every partition.
-- **Spectral LS entries** set their own `elements`, coarser or finer than the mesh. `C0` is `"midpoint"` or `"matrix"`,
-  a solver setting: the answer does not depend on it.
-- **Geometry:** `inclusion_shape` is `"fiber"`, `"random fibers"` (`fiber_count` non-overlapping fibers along z,
-  `fiber_volume_fraction` in all), `"sphere"`, `"laminate"` (interfaces normal to x) or `"laminate_z"` (normal to z).
-- **Materials:** `materials` names an entry of `material_sets`; add your own. A phase stays elastic if its yield stress
-  is `np.inf`.
-- **Load path:** `load` names an entry of `load_paths`, a list of turning points written like
-  `strain(e11=0.02, g12=0.03)`: straight lines from zero through each in turn, so it need not be proportional.
-  `strain_increment_count` steps reach the first, and the other lines keep that step length.
-- **Reference:** `include_reference` adds a fine solution to compare with: Spectral LS on `reference_elements_per_side`
-  elements per side (a multiple of the mesh's), solved once and cached in `code/cache/`. Any change of geometry,
-  materials, load path or solver tolerance solves it again, and a first solve can take tens of minutes, so run it in the
-  background. It is still Moulinec–Suquet on voxels (the same staircase, ringing at high contrast), until a conforming FE
-  reference exists (roadmap step 1).
-- **Cost:** `thread_count` caps every method alike; `timing_repeats` runs each entry several times, in turn, keeping its
-  fastest time; `memory_limit_GB` stops an entry that needs more, with an error, while the others carry on.
+- **Methods:** any method may have several entries, drawn in tints of its colour, so list them coarse to fine; an empty list
+  switches it off. FFT-TFA and TFA share the fine mesh, `elements_per_side`, whose count `partitions` must divide.
+  `reach` is how far FFT-TFA's exact corrections go: 0 each partition's own clusters, 1 its neighbours too, `"full"`
+  every partition. Spectral LS's `elements` are its own, coarser or finer than the mesh; its `C0` does not change its
+  answer, only how fast it gets there.
+- **Geometry:** each entry of `all_geometries` has a `shape`: `"random fibers"`, `"fiber"`, `"sphere"`, `"laminate"`
+  (interfaces normal to x) or `"laminate_z"` (normal to z).
+- **Materials:** each entry of `all_materials` gives the two phases; a phase stays elastic with `yield_stress=never`.
+- **Load path:** each entry of `all_load_paths` lists turning points written like `strain(e11=0.02, g12=0.03)`: straight
+  lines from zero through each in turn, so it need not be proportional.
+- **Reference:** a fine solution to compare with, Spectral LS with `elements` a multiple of the mesh's, solved once and
+  cached in `code/cache/`; `None` for none. Any change of geometry, materials, load path or solver tolerance solves it
+  again, and a first solve can take tens of minutes, so run it in the background. It is still Moulinec–Suquet on voxels
+  (the same staircase, ringing at high contrast), until a conforming FE reference exists (roadmap step 1).
+- **Results and computer:** `results_name` names the results folder and nothing else. `thread_count` caps every method
+  alike; `timing_repeats` runs each entry several times, in turn, keeping its fastest time; `memory_limit_GB` stops an
+  entry that needs more, with an error, while the others carry on.
 
 TFA builds E and P on a new configuration and caches them. P takes (6 × clusters)² doubles, and in 3D the FE
 factorization limits the mesh too (with 7 GB a 24³ mesh works, 36³ does not); `preview` says what P would need.

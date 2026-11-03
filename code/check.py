@@ -11,13 +11,13 @@
 # - On every problem, FFT-TFA's interaction at full reach (FT-2, FT-3) must equal the element-level LS operator averaged
 #   over its clusters, computed here from the elements: a wrong offset, pair count, correction block or average fails.
 # - On every laminate, every method must reproduce its exact solution in every cluster, except where inexact_methods
-#   says its model is not exact there, and FFT-TFA at full reach must too: that separates its truncation, a model error, from
-#   a wrong law or Newton solve.
+#   says its model is not exact there, and FFT-TFA at full reach must too: that separates its truncation, a model
+#   error, from a wrong law or Newton solve.
 # - On the laminate, FFT-TFA at full reach and TFA must also reproduce it with each partition's matrix part cut into two
 #   clusters, since each phase's exact state is uniform: that tests clusters dividing a partition's phase.
 # - On the fiber and the sphere, every method must stop at the same accuracy: its stresses at convergence_tolerance
-#   within stopping_accuracy_tolerance of its own solution at stopping_check_tolerance. (Not with k-means clusters of a few
-#   elements: there a cluster on the verge of yielding can converge elastic at one tolerance and plastic at the other,
+#   within stopping_accuracy_tolerance of its own solution at stopping_check_tolerance. (Not with k-means clusters of a
+#   few elements: there a cluster on the verge of yielding can converge elastic at one tolerance and plastic at the other,
 #   for TFA too.)
 # - On the fiber, the reference, solved at the working resolution, must equal Spectral LS bit for bit, and load back
 #   from its cache unchanged.
@@ -62,17 +62,27 @@ def get_entries(partitions, spectral_elements, matrix_clusters=1, reach=0):
 
 def get_cyclic_load(max_strain):
     # Out to the given strain, to its opposite and back to zero: unloading, reverse yielding and zero imposed strain.
-    return {"load_paths": {"check": [max_strain, -max_strain, strain()]}, "strain_increment_count": 4}
+    opposite = [-component for component in max_strain]
+    return {"all_load_paths": {"check": [max_strain, opposite, strain()]}, "steps_to_first_turning_point": 4}
 
 def get_monotonic_load(max_strain):
-    return {"load_paths": {"check": [max_strain]}, "strain_increment_count": 12}
+    return {"all_load_paths": {"check": [max_strain]}, "steps_to_first_turning_point": 12}
+
+# The problems' geometries.
+check_geometries = {
+    "fiber": dict(shape="fiber", radius=0.35e-3),
+    "sphere": dict(shape="sphere", radius=0.35e-3),
+    "laminate": dict(shape="laminate", thickness=(3 / 9) * 1e-3),
+    "cut laminate": dict(shape="laminate", thickness=(7 / 27) * 1e-3),
+    "z laminate": dict(shape="laminate_z", thickness=(3 / 9) * 1e-3),
+    "random fibers": dict(shape="random fibers", count=6, volume_fraction=0.3, gap=1 / 27, seed=1),
+}
 
 # Every config.py input that shapes the problems or the solvers, pinned to a fixed value: a 27 × 27 element mesh, a
 # yielding and hardening matrix.
 pinned_inputs = {
-    "domain_side_length": 1e-3, "inclusion_shape": "fiber", "inclusion_radius": 0.35e-3,
-    "layer_thickness": (3 / 9) * 1e-3, "elements_per_side": 27,
-    "material_sets": {"check": check_materials}, "materials": "check", "load": "check",
+    "domain_side_length": 1e-3, "all_geometries": check_geometries, "geometry": "fiber", "elements_per_side": 27,
+    "all_materials": {"check": check_materials}, "materials": "check", "load_path": "check",
     **get_entries(partitions=9, spectral_elements=27),
     **get_monotonic_load(strain(e11=0.015, e22=0.020, g12=0.03)),
     "convergence_tolerance": 1e-6, "residual_strain_scale_floor": 1e-4, "newton_max_iterations": 50,
@@ -81,45 +91,42 @@ pinned_inputs = {
     "fe_factorization_ordering": "MMD_AT_PLUS_A",
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
     "k_means_iterations": 50, "k_means_seed": 0, "k_means_start": "++", "fiber_placement_attempts": 100000,
-    "fiber_push_margin": 1e-3, "fiber_push_passes": 10000, "include_reference": False,
-    "reference_elements_per_side": 27, "reference_C0": "midpoint", "timing_repeats": 1, "memory_limit_GB": None,
-    "map_turning_point": "last"}
+    "fiber_push_margin": 1e-3, "fiber_push_passes": 10000, "reference": None, "k_means_features_C0": "midpoint",
+    "timing_repeats": 1, "memory_limit_GB": None, "map_turning_point": "last"}
 
 # What each problem changes from pinned_inputs.
 check_problems = {
     # A layer 3 partitions thick, loaded so that every interface-normal component (ε11, γ12, γ13) takes part. Its exact
     # solution is known. 4 increments per quarter still yield at both zero crossings. Spectral LS runs on 9 elements per
     # side, the layer 3 of them thick: the only test of Spectral LS coarser than the mesh.
-    "laminate": {"inclusion_shape": "laminate", **get_cyclic_load(strain(e11=0.015, e22=0.020, g12=0.03, g13=0.01)),
+    "laminate": {"geometry": "laminate", **get_cyclic_load(strain(e11=0.015, e22=0.020, g12=0.03, g13=0.01)),
                  **get_entries(partitions=9, spectral_elements=9)},
     # A layer 7 elements thick, so each interface cuts a partition (2/3 fiber), so partitions there hold both phases. In
     # transverse shear γ12 both phases carry the same stress. FFT-TFA represents the exact polarization, but its
     # interaction is exact only within reach of each partition, and the cut partitions line up along the layer, so their
     # far-field error adds up instead of decaying (notes/2_ls_model.md section 5.5).
-    "cut laminate": {"inclusion_shape": "laminate", "layer_thickness": (7 / 27) * 1e-3,
-                     **get_cyclic_load(strain(g12=0.03))},
+    "cut laminate": {"geometry": "cut laminate", **get_cyclic_load(strain(g12=0.03))},
     # A circular fiber under tension and shear, with a band of mixed partitions around it, and the reference switched
     # on, at the working resolution, so it must equal Spectral LS bit for bit.
-    "fiber": {"include_reference": True},
+    "fiber": {"reference": dict(elements=27, C0="midpoint")},
     # The laminate turned so its interfaces are normal to z, on a 9³ mesh with 3³ partitions (the layer is the middle
     # partition layer), loaded with every interface-normal component (ε33, γ23, γ13) taking part: the only test of the
     # kernel's ξ_z frequencies. Spectral LS runs on 18³ elements, the layer 6 of them thick: the only test of Spectral
     # LS finer than the mesh.
-    "z laminate": {"inclusion_shape": "laminate_z", "elements_per_side": 9,
+    "z laminate": {"geometry": "z laminate", "elements_per_side": 9,
                    **get_cyclic_load(strain(e11=0.020, e33=0.015, g23=0.03, g13=0.01)),
                    **get_entries(partitions=3, spectral_elements=18)},
     # A sphere on a 12³ mesh with 4³ partitions, loaded with z components: the only test of mixed partitions in 3D.
-    "sphere": {"inclusion_shape": "sphere", "elements_per_side": 12,
+    "sphere": {"geometry": "sphere", "elements_per_side": 12,
                **get_monotonic_load(strain(e11=0.015, e33=0.020, g13=0.03)),
                **get_entries(partitions=4, spectral_elements=12)},
     # The sphere with k-means clusters, so a partition's matrix part holds several: the only test of k-means in 3D and
     # of FFT-TFA's neighbour blocks along a load path.
-    "k-means sphere": {"inclusion_shape": "sphere", "elements_per_side": 12,
+    "k-means sphere": {"geometry": "sphere", "elements_per_side": 12,
                        **get_monotonic_load(strain(e11=0.015, e33=0.020, g13=0.03)),
                        **get_entries(partitions=4, spectral_elements=12, matrix_clusters=2, reach=1)},
     # The shape config.py sets up by default: fibers at random positions, with k-means clusters.
-    "random fibers": {"inclusion_shape": "random fibers", "fiber_count": 6, "fiber_volume_fraction": 0.3,
-                      "fiber_gap": 1 / 27, "fiber_seed": 1,
+    "random fibers": {"geometry": "random fibers",
                       **get_entries(partitions=9, spectral_elements=27, matrix_clusters=2)},
 }
 
@@ -178,7 +185,7 @@ def solve_laminate_step(macro_strain, matrix_normal_strain, phase_materials, pha
 
 def get_laminate_phase_stress(clusters, applied_macro_strain):
     # The exact stress of each phase at every load step, shape (load steps, 2, 6), matrix first.
-    interface_normal_components = interface_normal_components_by_shape[config.inclusion_shape]
+    interface_normal_components = interface_normal_components_by_shape[cell.get_geometry()["shape"]]
     phase_materials = get_phase_materials(clusters.materials)
     inclusion_fraction = clusters.average(clusters.materials.material_ids)
     phase_history = get_unloaded_plastic_state(2)
@@ -347,9 +354,9 @@ def check_problem(problem_name, problem_inputs, saved_results, cache_folder):
         all_passed &= report(result.completed_step_count == step_count,
                              f"{problem_name}: {method} completed {result.completed_step_count} of {step_count} "
                              "load steps")
-    if config.inclusion_shape in interface_normal_components_by_shape:
+    if cell.get_geometry()["shape"] in interface_normal_components_by_shape:
         all_passed &= check_laminate(problem_name, results)
-    if config.include_reference:
+    if config.reference is not None:
         all_passed &= check_reference(problem_name, results["Spectral LS"])
     mesh, clusters = run.get_partition_clusters(config.fft_tfa[0])
     interaction_error = get_interaction_error(mesh, clusters)

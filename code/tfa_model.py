@@ -200,7 +200,7 @@ def get_E_and_P(mesh, clusters):
                   # cache.
                   "element_cluster": clusters.element_cluster}
     description = (f"E and P on {clusters.cluster_count} clusters, {discretization.elements_per_side} elements per "
-                   f"side, {discretization.partitions_per_side} partitions per side, {config.inclusion_shape}, "
+                   f"side, {discretization.partitions_per_side} partitions per side, {config.geometry}, "
                    f"{config.materials}")
     arrays = get_cached("E_and_P", parameters, description, lambda: compute_E_and_P(mesh, clusters))
     # Column-major, so the columns of a run of consecutive clusters are contiguous and P products can read just the

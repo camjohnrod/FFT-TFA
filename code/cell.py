@@ -23,12 +23,17 @@ import config
 # axes.
 shapes_constant_along_z = ("fiber", "laminate", "random fibers")
 
+def get_geometry():
+    # The geometry config.py names: its shape and the shape's own settings.
+    return config.all_geometries[config.geometry]
+
 def is_shape_constant_along_z():
-    return config.inclusion_shape in shapes_constant_along_z
+    return get_geometry()["shape"] in shapes_constant_along_z
 
 def get_fiber_radius():
-    # Of each of config.fiber_count equal fibers filling config.fiber_volume_fraction of the cell's cross-section.
-    return config.domain_side_length * np.sqrt(config.fiber_volume_fraction / (np.pi * config.fiber_count))
+    # Of each of the "random fibers", equal fibers that together fill their volume_fraction of the cell's cross-section.
+    geometry = get_geometry()
+    return config.domain_side_length * np.sqrt(geometry["volume_fraction"] / (np.pi * geometry["count"]))
 
 def get_periodic_offsets(points, centre):
     # Each (x, y) point's offset from centre, to the nearest of the centre's periodic images.
@@ -38,17 +43,19 @@ def get_periodic_offsets(points, centre):
 def get_fiber_centres():
     # The (x, y) centres of the "random fibers", one row each (config.py): by random sequential addition, and if that
     # jams, the rest at random and every overlap pushed apart.
-    minimum_distance = 2 * get_fiber_radius() + config.fiber_gap * config.domain_side_length
-    random_generator = np.random.default_rng(config.fiber_seed)
+    geometry = get_geometry()
+    fiber_count = geometry["count"]
+    minimum_distance = 2 * get_fiber_radius() + geometry["gap"] * config.domain_side_length
+    random_generator = np.random.default_rng(geometry["seed"])
     fiber_centres = np.empty((0, 2))
     for _ in range(config.fiber_placement_attempts):
         candidate = random_generator.uniform(0, config.domain_side_length, 2)
         if np.all(np.sum(get_periodic_offsets(fiber_centres, candidate)**2, axis=1) >= minimum_distance**2):
             fiber_centres = np.vstack([fiber_centres, candidate])
-            if len(fiber_centres) == config.fiber_count:
+            if len(fiber_centres) == fiber_count:
                 return fiber_centres
     fiber_centres = np.vstack([fiber_centres, random_generator.uniform(0, config.domain_side_length,
-                                                                       (config.fiber_count - len(fiber_centres), 2))])
+                                                                       (fiber_count - len(fiber_centres), 2))])
     # Each pass moves both fibers of every pair closer than minimum_distance apart by half the shortfall from
     # (1 + fiber_push_margin) × minimum_distance, all pairs at once: pushing to minimum_distance itself would only
     # approach it.
@@ -61,26 +68,27 @@ def get_fiber_centres():
         shortfalls = np.maximum((1 + config.fiber_push_margin) * minimum_distance - distances, 0)
         fiber_centres = ((fiber_centres - np.sum((shortfalls / (2 * distances))[:, :, None] * offsets, axis=1))
                          % config.domain_side_length)
-    padded_fraction = config.fiber_count * np.pi * (minimum_distance / 2)**2 / config.domain_side_length**2
+    padded_fraction = fiber_count * np.pi * (minimum_distance / 2)**2 / config.domain_side_length**2
     raise ValueError(f"Pushing the fibers apart left some overlapping after {config.fiber_push_passes} passes. The "
                      f"fibers with half the gap around each would fill {padded_fraction:.3g} of the cell (at most "
-                     "0.907, hexagonal packing): lower fiber_volume_fraction or fiber_gap, or raise "
+                     "0.907, hexagonal packing): lower volume_fraction or gap, or raise "
                      "fiber_push_passes.")
 
 def is_inside_inclusion(centres):
     # Whether each point, one (x, y, z) row each, lies inside the inclusion.
-    if config.inclusion_shape == "random fibers":
+    geometry = get_geometry()
+    if geometry["shape"] == "random fibers":
         radius = get_fiber_radius()
         return np.any([np.sum(get_periodic_offsets(centres[:, :2], fiber_centre)**2, axis=1) < radius**2
                        for fiber_centre in get_fiber_centres()], axis=0)
     offsets_from_centre = centres - config.domain_side_length / 2
-    if config.inclusion_shape == "laminate":
-        return np.abs(offsets_from_centre[:, 0]) < config.layer_thickness / 2
-    if config.inclusion_shape == "laminate_z":
-        return np.abs(offsets_from_centre[:, 2]) < config.layer_thickness / 2
-    if config.inclusion_shape == "sphere":
-        return np.sum(offsets_from_centre**2, axis=1) < config.inclusion_radius**2
-    return np.sum(offsets_from_centre[:, :2]**2, axis=1) < config.inclusion_radius**2
+    if geometry["shape"] == "laminate":
+        return np.abs(offsets_from_centre[:, 0]) < geometry["thickness"] / 2
+    if geometry["shape"] == "laminate_z":
+        return np.abs(offsets_from_centre[:, 2]) < geometry["thickness"] / 2
+    if geometry["shape"] == "sphere":
+        return np.sum(offsets_from_centre**2, axis=1) < geometry["radius"]**2
+    return np.sum(offsets_from_centre[:, :2]**2, axis=1) < geometry["radius"]**2
 
 ## ------- Discretization ------- ##
 
@@ -184,7 +192,7 @@ def get_L(elastic_modulus, poisson_ratio):
 
 def get_phase(name):
     # A phase's properties ("matrix" or "inclusion") in the material set config.py names.
-    return config.material_sets[config.materials][name]
+    return config.all_materials[config.materials][name]
 
 def get_matrix_L():
     return get_L(get_phase("matrix")["E"], get_phase("matrix")["poisson"])
@@ -322,13 +330,14 @@ def get_cache_entries():
 
 def get_geometry_parameters():
     # Every input that sets the geometry, for a cache key: the cell, the shape and the shape's own inputs.
-    parameters = {"domain_side_length": config.domain_side_length, "inclusion_shape": config.inclusion_shape}
-    if config.inclusion_shape in ("laminate", "laminate_z"):
-        parameters["layer_thickness"] = config.layer_thickness
-    elif config.inclusion_shape == "random fibers":
+    geometry = get_geometry()
+    parameters = {"domain_side_length": config.domain_side_length, "inclusion_shape": geometry["shape"]}
+    if geometry["shape"] in ("laminate", "laminate_z"):
+        parameters["layer_thickness"] = geometry["thickness"]
+    elif geometry["shape"] == "random fibers":
         # The centres stand for the count, volume fraction, gap and seed that placed them.
         parameters["fiber_radius"] = get_fiber_radius()
         parameters["fiber_centres"] = get_fiber_centres()
     else:
-        parameters["inclusion_radius"] = config.inclusion_radius
+        parameters["inclusion_radius"] = geometry["radius"]
     return parameters

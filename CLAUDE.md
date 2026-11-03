@@ -23,8 +23,8 @@ comments cite. Comments cite equations and papers, never the history of a decisi
 
 - **All knobs live in `code/config.py`, and only there**: a new knob goes there with a comment, never as a literal
   elsewhere, solver internals and check tolerances included. Exceptions: plot appearance in `plots.py`, check problems
-  in `check.py`. config.py runs from the settings changed most to those changed least (what to run, problem, figures,
-  solver details, checks), after a table of what each grid means to each method. config.py is often left at a local study
+  in `check.py`. config.py is meant to be understood at a glance: its first screen is the problem (one name from each list in section 4)
+  and what to compare; then results, the lists, solver details, checks. config.py is often left at a local study
   configuration; "default" means `git show HEAD:code/config.py`. The user edits it while you work: change it by targeted
   edits, never by rewriting it from an earlier read.
 - **What runs is a list of entries per method** (`fft_tfa`, `spectral_ls`, `tfa`), empty to switch a method off. Each
@@ -89,7 +89,7 @@ A renamed config input must be renamed in `pinned_inputs` too.
 
 `python` is the base miniforge environment's (Python 3.12, with `numpy`, `scipy`, `matplotlib` and `tqdm`); the
 `fenics-env`/`fenicsx-env` conda envs are unrelated. Entry points import `config` before numpy, since config.py sets the
-thread environment variables; online FFTs use `scipy.fft` with `workers=config.thread_count`. Linux only (`/proc` for
+thread environment variables (and so never imports numpy itself); online FFTs use `scipy.fft` with `workers=config.thread_count`. Linux only (`/proc` for
 peak memory, `fork` for the entries' processes).
 
 TFA's offline step builds a dense P of (6 × TFA's clusters)² doubles, cached in `code/cache/` under a hash of its
@@ -143,7 +143,7 @@ why `replot` needs no solve.
 - **Clusters:** `cell.Clusters` holds the material states (`volume` as a share of the cluster's partition), ordered by
   partition. Clusters have unequal volumes: every cell average goes through `Clusters.average`. Every method reports stress
   and plastic state per cluster.
-- **A new shape** goes in `is_inside_inclusion`, `check_inputs`, the geometry cache parameters
+- **A new shape** goes in `is_inside_inclusion`, `check_geometry`, the geometry cache parameters
   (`cell.get_geometry_parameters`: every parameter of the shape, or a stale E, P or reference is reused silently) and, if
   constant along z, `shapes_constant_along_z`. `"random fibers"` keys its cache on the placed radius and centres
   (`get_fiber_centres`), which stand for the count, volume fraction, gap and seed.
