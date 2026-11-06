@@ -259,7 +259,9 @@ frame_style = {'color': '0.1', 'linewidth': 0.8}
 
 def get_runs(rows, columns):
     """Element edges, by the row they lie on and their column (sorted by row, then column), merged into straight runs:
-    each run's row, first column and stop column."""
+    each run's row, first column and stop column. No edges (one partition has no partition lines) give no runs."""
+    if len(rows) == 0:
+        return rows, columns, columns
     breaks = np.flatnonzero((np.diff(rows) != 0) | (np.diff(columns) != 1)) + 1
     firsts = np.concatenate(([0], breaks))
     lasts = np.concatenate((breaks, [len(rows)])) - 1
