@@ -12,12 +12,15 @@ names, and so are "piece" and "region", since every cluster now lies in one part
 material model (clusters, eigenstrains, update at the average strain) and differ in how the clusters interact: FFT-TFA
 averages the LS operator over its clusters with the matrix as C0, exact in the matrix but with the inclusion's
 polarization uniform per cluster (TFA resolves it), truncates the interaction to nearby partitions, and uses the
-Moulinec–Suquet kernel instead of FE. At full reach FFT-TFA is SCA's clustered LS equation with C0 = L_m (LS note,
-section 5.4). Neither difference is a bug.
+Moulinec–Suquet kernel instead of FE. At full reach FFT-TFA is SCA's clustered LS equation with C0 = L_m
+(`notes/0_fft_tfa_lecture.md`, sections 6–7). Neither difference is a bug.
 
 Read the relevant note before changing solver math. Code names map onto the notes' symbols and numbered equations
-(FT-* in `notes/2_ls_model.md` section 5, LS-* in its sections 2–4, ER-* in `notes/3_tfa_baseline.md`), which code
-comments cite. Comments cite equations and papers, never the history of a decision.
+(FT-* in `notes/0_fft_tfa_lecture.md`, LS-* in `notes/2_ls_model.md` sections 2–4, ER-* in `notes/3_tfa_baseline.md`), which code
+comments cite. Comments cite equations and papers, never the history of a decision. The code is meant to read as an
+introduction for someone new to it: each module opens with a docstring saying what it does in plain words, functions and
+classes carry docstrings, and names are short but say what a thing is (the user's words: "tight and concise, but it
+should communicate what it does").
 
 ## The user's standing decisions
 
@@ -29,11 +32,11 @@ comments cite. Comments cite equations and papers, never the history of a decisi
   edits, never by rewriting it from an earlier read.
 - **What runs is a list of entries per method** (`fft_tfa`, `spectral_ls`, `tfa`), empty to switch a method off. Each
   entry holds that method's own settings, so nothing downstream reads a global partition or cluster count.
-  `elements_per_side` is one fine mesh shared by FFT-TFA and TFA; Spectral LS's elements are its own.
+  `clustered_mesh` (elements per side) is one fine mesh shared by FFT-TFA and TFA; Spectral LS's elements are its own.
 - **FFT-TFA is separate from Spectral LS**: `fft_tfa_model.py` uses only `ls_model`'s shared kernel code
   (`apply_on_lattice`, the Moulinec–Suquet kernel, `get_P0_transformed`, the block helpers). Its reference medium is
-  always the matrix (no setting), and its truncated interaction is FT-2/FT-3 as approved; the consistent variant of LS
-  note section 5.5 is measured, not adopted. `reach` is per entry.
+  always the matrix (no setting), and its truncated interaction is FT-2/FT-3 as approved; the consistent variant (lecture,
+  section 10) is measured, not adopted. `reach` is per entry.
 - **Clusters lie inside partitions**: k-means inside each partition's part in each phase, or those parts themselves. No
   smoothing of the features. Cell-wide k-means was removed: it breaks the memory advantage that is FFT-TFA's selling
   point, by fragmenting into many parts per partition.
@@ -59,8 +62,9 @@ python code/run.py                # solve config.py's entries; a new folder in c
 python code/run.py preview        # what that would need, and the cross-section; solves nothing
 python code/run.py replot latest  # redraw a saved run with config.py's Figures settings
 python code/run.py cache          # list code/cache/
-python code/check.py              # the test, about a minute
+python code/check.py              # the test, under a minute
 python code/check.py save         # the same, then save the results
+python notes/figures/make_figures.py  # redraw the lecture's figures from the code
 ```
 
 There is no pytest suite and no way to run one check problem alone. `check.py` solves `"laminate"`, `"cut laminate"`,
@@ -71,7 +75,7 @@ as INFO); FFT-TFA at full reach must match it on every laminate, and with TFA al
 matrix part cut into two clusters (`get_split_clusters`). On every problem FFT-TFA's interaction at full reach must equal
 the element-level LS operator averaged over its clusters (`get_interaction_error`, to `interaction_check_tolerance`): that
 catches a wrong offset, pair count, correction block or average. On the fiber and the sphere every method must stop
-within `stopping_accuracy_tolerance` of its own solution at `stopping_check_tolerance` (not with k-means clusters of a few
+within `stopping_accuracy_tolerance` of its own solution at `tight_convergence_tolerance` (not with k-means clusters of a few
 elements, whose clustered problem can have several solutions, for TFA too). On the fiber the reference is on at the
 working resolution and must equal Spectral LS bit for bit and reload from its cache unchanged (`check_reference`). Every
 method must complete every step and reproduce `code/check_saved_results.npz` (untracked) bit for bit, at the
@@ -107,13 +111,13 @@ Imports go one way: `config` → `material` → `newton` → `cell` → `ls_mode
 | Module | Contents |
 |---|---|
 | `config.py` | every input, `strain`, `check_inputs()`, folders |
-| `run.py` | `Entry`, `get_entries`, the builders, `get_load_path`, `run_load_path`, `run_in_own_process`, `solve_all`, the cached reference (`Reference`, `get_reference`), `save_run`, `get_saved_run`, `runs.csv`, tables, macroscopic stress errors, `draw_run`, and the commands (`run`, `preview`, `replot`, `list_cache`) |
-| `fft_tfa_model.py` | FFT-TFA: `Interaction`, correction blocks (`get_correction_blocks`, FT-3; stored as 6 × 6 BSR blocks), `get_interaction`, `get_strain_change` (FT-2 with FT-4), the block-Jacobi preconditioner's diagonal blocks (`get_own_strain_change`, FT-7), `FFTTFASolver` (FT-5, FT-6) |
-| `cell.py` | shapes (`is_inside_inclusion`, `shapes_constant_along_z`, `get_fiber_centres`), `Discretization`, `Mesh`, `Materials`, `Clusters`, `label_partition_phases`, `label_partition_k_means`, `get_clusters`, `get_memory_MB`, the cache (`get_cached`) |
+| `run.py` | the commands first (`run`, `preview`, `replot`, `list_cache`, `main`), then `Entry`, `get_entries`, the builders, `get_load_path`, `run_load_path`, `run_in_own_process`, `solve_all`, the cached reference (`Reference`, `get_reference`), `save_run`, `get_saved_run`, `runs.csv`, tables, macroscopic stress errors, `draw_run` |
+| `fft_tfa_model.py` | FFT-TFA: `Interaction`, correction blocks (`get_correction_blocks` on `PartitionSlots`, FT-3; stored as 6 × 6 BSR blocks), `get_interaction`, `get_strain_change` (FT-2 with FT-4), the block-Jacobi preconditioner's diagonal blocks (`get_own_strain_change`, FT-7), `FFTTFASolver` (FT-5, FT-6) |
+| `cell.py` | shapes (`is_inside_inclusion`, `shapes_constant_along_z`, `get_fiber_centres`), `Discretization`, `Mesh`, `Materials`, `Clusters`, `cluster_by_phase`, `cluster_by_k_means`, `get_clusters`, `get_memory_MB`, the cache (`get_cached`) |
 | `newton.py` | `Solver` (the one Newton loop and line search), `solve_by_gmres`, relative residual, `SolverDidNotConverge` |
-| `ls_model.py` | `apply_on_lattice` (FFT convolution), C0, P0 and its partition average (`get_P0_transformed`), LS-24, `Lattice`, `SpectralLSSolver` (its corrections by CG, LS-28), `get_elastic_strain_concentration` (k-means features) |
+| `ls_model.py` | `apply_on_lattice` (FFT convolution), C0, P0 and its partition average (`get_P0_transformed`), LS-24 (`get_matrix_units_operator`), `SpectralLSOperators`, `SpectralLSSolver` (its corrections by CG, LS-28), `get_elastic_strain_concentration` (k-means features) |
 | `tfa_model.py` | element matrices, `FEModel`, E and P (`compute_E_and_P`) and their cache (`get_E_and_P`), column-restricted P products, `TFASolver` with the elastic reset |
-| `material.py` | vectorized J2 radial return, its sensitivity H_μ and algorithmic stiffness L_t, `apply_blocks` |
+| `material.py` | vectorized J2 radial return (`radial_return`), its sensitivity H_μ and algorithmic stiffness L_t, `apply_blocks` |
 | `plots.py` | the figures: `method_styles` keyed by method name, `get_line_styles` (tints for a method's several entries); the cross-section's `boundary_styles` (voxel, cluster, partition lines) and k-means cluster colours |
 | `check.py` | the checks and the laminate's exact solution |
 
@@ -124,6 +128,14 @@ why `replot` needs no solve.
 
 ## Non-obvious points
 
+- **Naming:** an element is matrix or inclusion, its `phase` (0, 1), never "material id" or "fiber". Arrays named
+  `<owner>_<what>` hold the `<what>` of every `<owner>`: `element_phase`, `element_partition`, `element_cluster`,
+  `cluster_partition`. Cell averages are `macro_strain`, `macro_stress`. `Clusters.share` is each cluster's share of its
+  partition's volume (c_p). Entry labels write `m=` and `i=` for the matrix's and inclusion's clusters per partition.
+- **Cache keys and cached arrays keep old names:** the key strings in `cell.get_geometry_parameters`,
+  `run.get_reference_parameters` and `tfa_model.get_E_and_P` (`"domain_side_length"`, `"elements_per_side"`, ...) are
+  hashed into the cache file names, and the cached reference stores `material_ids` and `macroscopic_stress`. Renaming
+  any of them orphans every existing cache (a reference can take 30 min); rename only with a version bump, on purpose.
 - **Strain convention (ER-2):** engineering shear, `(ε11, ε22, ε33, 2ε12, 2ε23, 2ε13)`.
 - **Convergence (LS-24):** Spectral LS's residual is a strain of its reference medium, so convergence and the line search
   judge M_m⁻¹ r (the correction an all-matrix cell would need, `measure_residual`), while the Newton correction still solves
@@ -170,7 +182,7 @@ and the consistent variant again, against full reach (no better). Declined: pola
 concentration plus one polarization per cluster (needs offline fine-mesh solves, and a near/far split of the interaction
 to be fast); the user wants a richer polarization that needs neither (README, "Open").
 
-Known behaviour, model error rather than bugs (LS note, section 5.5):
+Known behaviour, model error rather than bugs (lecture, section 10):
 - **FFT-TFA's truncated interaction fails the patch test** where a partition holds several clusters (a uniform
   polarization gets a spurious strain, 16 % at reach 0 on the check fiber); the cut laminate is 25 % off in its worst
   cluster. The consistent variant passes the patch test but is less accurate with neighbours on the 126-fiber cell and the

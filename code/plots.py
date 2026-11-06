@@ -1,7 +1,9 @@
-# Every figure run.py saves: the macroscopic stress-strain curves and stress errors, error against time, each entry's
-# discretization of the cross-section, and maps and a profile of the von Mises stress and the accumulated plastic
-# strain. Every method is drawn the same way in every figure (method_styles). Plot appearance is set here; no solver
-# logic.
+"""Every figure run.py saves: the macroscopic stress-strain curves and stress errors, error against time, each entry's
+discretization of the cross-section, and maps and a profile of the von Mises stress and the accumulated plastic strain.
+
+Every method is drawn the same way in every figure (method_styles). Only plot appearance is set here: this file imports
+no other file of the project, and run.py hands it plain arrays.
+"""
 
 from typing import NamedTuple
 import numpy as np
@@ -38,15 +40,15 @@ first_entry_lightening = 0.55
 legend_columns = 4
 
 def get_method(label):
-    # The method (or the reference) of an entry's label.
+    """The method (or the reference) of an entry's label."""
     return next(method for method in method_styles if label.startswith(method))
 
 def get_display_label(label):
-    # An entry's label as figures show it: Computer Modern has no ² or ³ of its own.
+    """An entry's label as figures show it: Computer Modern has no ² or ³ of its own."""
     return label.replace("²", "$^2$").replace("³", "$^3$")
 
 def get_line_styles(labels):
-    # Each label's line: its method's style, a method's earlier entries in lighter tints when it has several.
+    """Each label's line: its method's style, a method's earlier entries in lighter tints when it has several."""
     styles = {}
     for method in method_styles:
         method_labels = [label for label in labels if get_method(label) == method]
@@ -59,8 +61,8 @@ def get_line_styles(labels):
     return styles
 
 def mark_method_failure(axis, x_values, values, completed_step_count, color):
-    # An x at the step the method gave up on, drawn level with the last value it produced so it reads as the
-    # curve stopping rather than as a data point.
+    """An x at the step the method gave up on, drawn level with the last value it produced so it reads as the curve
+    stopping rather than as a data point."""
     if completed_step_count >= len(x_values) or completed_step_count == 0:
         return
     axis.plot(x_values[completed_step_count], values[completed_step_count - 1], marker='x', markersize=9,
@@ -80,9 +82,9 @@ stress_strain_figure_width = 11
 stress_strain_row_height = 2.7
 
 def get_load_axis(applied_macro_strain):
-    # The stress-strain curves' x axis, from the unloaded state, and its label. On a path along one direction: the
-    # applied strain in % when one component is loaded, otherwise the load factor t of ε̄ = t ε̄max, labelled with
-    # ε̄max. On any other path, the load step.
+    """The stress-strain curves' x axis, from the unloaded state, and its label. On a path along one direction: the
+    applied strain in % when one component is loaded, otherwise the load factor t of ε̄ = t ε̄max, labelled with ε̄max.
+    On any other path, the load step."""
     strains = np.vstack([np.zeros(6), applied_macro_strain])
     if np.linalg.matrix_rank(applied_macro_strain) > 1:
         return np.arange(len(strains)), "Load step"
@@ -99,9 +101,9 @@ def get_load_axis(applied_macro_strain):
             + max_strain_description)
 
 def plot_stress_strain(stress_MPa_per_method, completed_step_count_per_method, applied_macro_strain, plot_path):
-    # Each entry's macroscopic stress (MPa, one row per step) against the applied strain, one panel per component,
-    # from the unloaded state to the last step it solved. A row whose components are zero for every entry is left
-    # out (uniaxial loading leaves every shear at zero), and a zero panel in a kept row shows only "0".
+    """Each entry's macroscopic stress (MPa, one row per step) against the applied strain, one panel per component, from
+    the unloaded state to the last step it solved. A row whose components are zero for every entry is left out (uniaxial
+    loading leaves every shear at zero), and a zero panel in a kept row shows only "0"."""
     load_axis, load_axis_label = get_load_axis(applied_macro_strain)
     line_styles = get_line_styles(stress_MPa_per_method)
     solved_stress_MPa = {method: np.vstack([np.zeros(6), stress[:completed_step_count_per_method[method]]])
@@ -147,10 +149,10 @@ stress_component_subscripts = ["11", "22", "33", "12", "23", "13"]
 error_zero_line_style = {'color': '0.6', 'linewidth': 0.8, 'zorder': 1}
 
 def plot_macro_stress_errors(error_percent_per_method, components, step_count, plot_path):
-    # Each method's signed macroscopic stress error (%, one row per step it solved, one column per component in
-    # components) against the load step, one panel per component, three to a row as in the stress-strain figure,
-    # from the unloaded state (step 0, no error) to the last step the method solved. The load step, not the applied
-    # strain, so that a cyclic path unrolls instead of folding back on itself.
+    """Each method's signed macroscopic stress error (%, one row per step it solved, one column per component in
+    components) against the load step, one panel per component, three to a row as in the stress-strain figure, from the
+    unloaded state (step 0, no error) to the last step the method solved. The load step, not the applied strain, so that
+    a cyclic path unrolls instead of folding back on itself."""
     load_steps = np.arange(step_count + 1)
     line_styles = get_line_styles(error_percent_per_method)
     row_count = -(-len(components) // 3)
@@ -183,9 +185,9 @@ def plot_macro_stress_errors(error_percent_per_method, components, step_count, p
 ## ------- Error Against Time ------- ##
 
 def plot_error_against_time(points_per_label, plot_path):
-    # Each entry's root-mean-square macroscopic stress error (%) against its online time, entries of a method joined in
-    # the order listed, each marked with what tells it from the others. points_per_label: label -> (method, seconds,
-    # error).
+    """Each entry's root-mean-square macroscopic stress error (%) against its online time, entries of a method joined in
+    the order listed, each marked with what tells it from the others. points_per_label: label -> (method, seconds,
+    error)."""
     with plt.rc_context(load_path_style):
         figure, axis = plt.subplots(figsize=(6, 4), layout='constrained')
         for method, style in method_styles.items():
@@ -220,11 +222,11 @@ cross_section_panel_size = 4.2
 cross_section_legend_row_height = 0.3    # inches of figure height per row of the legend
 
 # A method's clusters, when it colours them in, fill their elements: each matrix cluster in its own colour, lightened so
-# the boundaries stay visible, and the inclusion's clusters in greys, so the fiber still reads as the fiber. Elements
-# of one cluster share its colour wherever they lie, and methods with the same clusters colour them alike. The matrix
-# colours are tab20's dark colours, then its light ones (so consecutive clusters differ), then tab20b's and tab20c's,
-# without any grey (no colour whose channels lie within grey_tolerance of each other), so no matrix cluster looks like
-# the inclusion; they repeat past 53 matrix clusters, where the cluster boundaries still tell clusters apart.
+# the boundaries stay visible, and the inclusion's clusters in greys, so the inclusion still reads as the inclusion.
+# Elements of one cluster share its colour wherever they lie, and methods with the same clusters colour them alike. The
+# matrix colours are tab20's dark colours, then its light ones (so consecutive clusters differ), then tab20b's and
+# tab20c's, without any grey (no colour whose channels lie within grey_tolerance of each other), so no matrix cluster
+# looks like the inclusion; they repeat past 53 matrix clusters, where the cluster boundaries still tell clusters apart.
 grey_tolerance = 0.1
 matrix_cluster_colors = np.array([color for color in plt.cm.tab20.colors[::2] + plt.cm.tab20.colors[1::2]
                                   + plt.cm.tab20b.colors + plt.cm.tab20c.colors
@@ -233,14 +235,14 @@ cluster_color_lightening = 0.25
 inclusion_cluster_greys = (0.62, 0.48, 0.76)
 
 class CellMap(NamedTuple):
-    # One entry's discretization on its element grid, with a title and a line of its settings. boundaries maps each kind
-    # of line it draws ("voxel", "cluster", "partition", boundary_styles) to a map of ids on that grid, the line running
-    # along every element edge whose two sides have different ids. element_material_ids are the phases on that grid.
-    # fill_cluster_ids colours each element by its cluster (k-means clusters), or is None to show only the phases.
+    """One entry's discretization on its element grid, with a title and a line of its settings. boundaries maps each
+    kind of line it draws ("voxel", "cluster", "partition", boundary_styles) to a map of ids on that grid, the line
+    running along every element edge whose two sides have different ids. element_phase are the phases on that grid.
+    fill_cluster_ids colours each element by its cluster (k-means clusters), or is None to show only the phases."""
     title: str
     settings: str
     boundaries: dict
-    element_material_ids: np.ndarray
+    element_phase: np.ndarray
     fill_cluster_ids: np.ndarray = None
 
 # The kinds of line, drawn in this order, each named in the legend by what it bounds: hairline grey for Spectral LS's
@@ -256,16 +258,16 @@ boundary_styles = {
 frame_style = {'color': '0.1', 'linewidth': 0.8}
 
 def get_runs(rows, columns):
-    # Element edges, by the row they lie on and their column (sorted by row, then column), merged into straight runs:
-    # each run's row, first column and stop column.
+    """Element edges, by the row they lie on and their column (sorted by row, then column), merged into straight runs:
+    each run's row, first column and stop column."""
     breaks = np.flatnonzero((np.diff(rows) != 0) | (np.diff(columns) != 1)) + 1
     firsts = np.concatenate(([0], breaks))
     lasts = np.concatenate((breaks, [len(rows)])) - 1
     return rows[firsts], columns[firsts], columns[lasts] + 1
 
 def draw_boundaries(axis, ids, style):
-    # A line along every element edge inside the cross-section whose two sides have different ids, each straight run
-    # of edges drawn as one line. The edges on the cell's periodic boundary are left to the panel's frame.
+    """A line along every element edge inside the cross-section whose two sides have different ids, each straight run of
+    edges drawn as one line. The edges on the cell's periodic boundary are left to the panel's frame."""
     edge_length = 1 / ids.shape[0]
     line_style = {key: value for key, value in style.items() if key != 'label'}
     rows, firsts, stops = get_runs(*np.nonzero(ids[1:] != ids[:-1]))
@@ -273,11 +275,11 @@ def draw_boundaries(axis, ids, style):
     columns, firsts, stops = get_runs(*np.nonzero((ids[:, 1:] != ids[:, :-1]).T))
     axis.vlines((columns + 1) * edge_length, firsts * edge_length, stops * edge_length, **line_style)
 
-def get_cluster_image(cluster_ids, element_material_ids):
-    # An RGB image of the cross-section with every element in its cluster's colour.
+def get_cluster_image(cluster_ids, element_phase):
+    """An RGB image of the cross-section with every element in its cluster's colour."""
     colors = np.zeros((cluster_ids.max() + 1, 3))
-    matrix_clusters = np.unique(cluster_ids[element_material_ids == 0])
-    inclusion_clusters = np.unique(cluster_ids[element_material_ids == 1])
+    matrix_clusters = np.unique(cluster_ids[element_phase == 0])
+    inclusion_clusters = np.unique(cluster_ids[element_phase == 1])
     matrix_colors = matrix_cluster_colors[np.arange(len(matrix_clusters)) % len(matrix_cluster_colors)]
     colors[matrix_clusters] = matrix_colors + cluster_color_lightening * (1 - matrix_colors)
     colors[inclusion_clusters] = np.array(inclusion_cluster_greys)[np.arange(len(inclusion_clusters))
@@ -285,8 +287,8 @@ def get_cluster_image(cluster_ids, element_material_ids):
     return colors[cluster_ids]
 
 def plot_cross_section(cell_maps, plot_path):
-    # One panel per entry: the phase of every element (fiber dark), or its cluster's colour when the method's clusters
-    # are coloured in, with the method's boundaries on top; one legend below for the kinds of line the panels use.
+    """One panel per entry: the phase of every element (inclusion dark), or its cluster's colour when the method's
+    clusters are coloured in, with the method's boundaries on top; one legend below for the kinds of line used."""
     used_kinds = [kind for kind in boundary_styles if any(kind in cell_map.boundaries for cell_map in cell_maps)]
     # The legend lies side by side under several panels, stacked under one, which is too narrow for a row.
     legend_columns = len(used_kinds) if len(cell_maps) > 1 else 1
@@ -296,12 +298,12 @@ def plot_cross_section(cell_maps, plot_path):
         figure, axes = plt.subplots(1, len(cell_maps), squeeze=False, layout='constrained',
                                     figsize=(cross_section_panel_size * len(cell_maps), figure_height))
         for axis, cell_map in zip(axes[0], cell_maps):
-            material_ids = cell_map.element_material_ids
+            phase = cell_map.element_phase
             if cell_map.fill_cluster_ids is None:
-                axis.imshow(material_ids, cmap=matplotlib.colors.ListedColormap(['0.92', '0.62']), vmin=0,
+                axis.imshow(phase, cmap=matplotlib.colors.ListedColormap(['0.92', '0.62']), vmin=0,
                             vmax=1, origin='lower', extent=(0, 1, 0, 1))
             else:
-                axis.imshow(get_cluster_image(cell_map.fill_cluster_ids, material_ids), origin='lower',
+                axis.imshow(get_cluster_image(cell_map.fill_cluster_ids, phase), origin='lower',
                             extent=(0, 1, 0, 1))
             for kind in boundary_styles:
                 if kind in cell_map.boundaries:
@@ -326,14 +328,15 @@ field_map_colormap = 'jet'
 field_map_hidden_color = '0.8'    # elements a map leaves out (NaN), such as the inclusion in a matrix-only map
 
 class FieldMap(NamedTuple):
-    # One method's map on its element grid (each element showing its cluster's value); maps may differ in resolution.
+    """One method's map on its element grid (each element showing its cluster's value); maps may differ in resolution.
+    """
     title: str
     values: np.ndarray
 
 def plot_field_maps(field_maps, label, title, value_min, value_max, plot_path):
-    # One map per entry, side by side on one colour scale between the given limits; label names the field and its unit
-    # on the colour bar, whose ends point outwards where a map goes beyond them (those values take the end colour).
-    # Elements without a value (NaN) are drawn in field_map_hidden_color.
+    """One map per entry, side by side on one colour scale between the given limits; label names the field and its unit
+    on the colour bar, whose ends point outwards where a map goes beyond them (those values take the end colour).
+    Elements without a value (NaN) are drawn in field_map_hidden_color."""
     with plt.rc_context(field_map_style):
         figure, axes = plt.subplots(1, len(field_maps), squeeze=False, layout='constrained',
                                     figsize=(field_map_panel_size * len(field_maps) + 1.2, field_map_panel_size))
@@ -357,9 +360,9 @@ profile_inclusion_color = '0.93'    # the inclusion's stretches along the profil
 profile_figure_size = (11, 3.6)
 
 def plot_field_profiles(field_maps, profile_height, inclusion_map, label, title, side_length_mm, plot_path):
-    # Each map's values along the horizontal line at profile_height (a fraction of the side), left to right as on the
-    # maps, as steps (one value per element or voxel), in the style of the stress-strain figure. The inclusion's
-    # stretches along the line, read from inclusion_map (True inside, the finest available grid), are shaded.
+    """Each map's values along the horizontal line at profile_height (a fraction of the side), left to right as on the
+    maps, as steps (one value per element or voxel), in the style of the stress-strain figure. The inclusion's stretches
+    along the line, read from inclusion_map (True inside, the finest available grid), are shaded."""
     def get_row(values):
         return values[int(profile_height * len(values))]
 

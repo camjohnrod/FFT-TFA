@@ -1,20 +1,30 @@
-# The entry point (config.py lists the commands). A run solves every entry config.py lists, one after the other along
-# the load path, then saves them in a new folder of code/output/ and draws them from what it saved:
-#   config.py, code_version.txt  the settings, and the code's commit and uncommitted changes
-#   run.json, results.npz        what each entry did, and its results (read them with get_saved_run)
-#   timing.txt                   each entry's clusters, times, Newton and Krylov iterations, peak memory
-#   stress_strain.png            macroscopic stress against applied strain, every entry and the reference
-#   macro_stress_error.png       with the reference on: each entry's macroscopic stress error in every loaded component
-#                                along the load path, and errors.txt, its largest and root-mean-square value
-#   error_against_time.png       with the reference on and several entries of a method: root-mean-square error against
-#                                online time
-#   cross_section.png            the cell on the element grid, with each entry's partitions, elements or clusters,
-#                                k-means clusters coloured in
-#   von_mises_stress.png         von Mises stress at a turning point (config.map_turning_point), one map per entry
-#   plastic_strain.png           accumulated plastic strain there, one map per entry
-#   plastic_strain_profile.png   the same along the middle element row, left to right, every entry on one plot
-# The maps show the element layer at mid-thickness. code/output/runs.csv gets one row per entry of every run, and
-# code/output/latest points at the last run.
+"""The entry point: python code/run.py [command], with every setting in code/config.py.
+
+Commands (defined first below):
+  (none)          solve every entry config.py lists along the load path, save them in a new folder of code/output/,
+                  and draw the tables and figures from what was saved
+  preview         what the entries would need and store, and a drawing of the cross-section; solves nothing
+  replot [folder] redraw a saved run (default: the latest) with config.py's figure settings
+  cache           list what is cached in code/cache/
+
+A run, in order: the load path (get_load_path), the reference (get_reference, cached), each entry built and solved in a
+process of its own (solve_all), then saved (save_run) and drawn (draw_run). Its folder holds:
+  config.py, code_version.txt  the settings, and the code's commit and uncommitted changes
+  run.json, results.npz        what each entry did, and its results (read them with get_saved_run)
+  timing.txt                   each entry's clusters, times, Newton and Krylov iterations, peak memory
+  stress_strain.png            macroscopic stress against applied strain, every entry and the reference
+  macro_stress_error.png       with the reference on: each entry's macroscopic stress error in every loaded component
+                               along the load path, and errors.txt, its largest and root-mean-square value
+  error_against_time.png       with the reference on and several entries of a method: root-mean-square error against
+                               online time
+  cross_section.png            the cell on the element grid, with each entry's partitions, elements or clusters,
+                               k-means clusters coloured in
+  von_mises_stress.png         von Mises stress at a turning point (config.map_turning_point), one map per entry
+  plastic_strain.png           accumulated plastic strain there, one map per entry
+  plastic_strain_profile.png   the same along the middle element row, left to right, every entry on one plot
+The maps show the element layer at mid-thickness. code/output/runs.csv gets one row per entry of every run, and
+code/output/latest points at the last run.
+"""
 
 import csv
 import datetime
@@ -35,32 +45,129 @@ import numpy as np
 import tqdm
 
 import plots
-from cell import (get_cache_entries, get_cache_path, get_cached, get_clusters, get_discretization, get_fiber_radius,
-                  get_geometry, get_geometry_parameters, get_inclusion_L, get_matrix_L, get_memory_MB,
-                  get_periodic_mesh, is_shape_constant_along_z, label_partition_k_means, label_partition_phases)
+from cell import (Clusters, cluster_by_k_means, cluster_by_phase, get_cache_entries, get_cache_path, get_cached,
+                  get_clusters, get_discretization, get_fiber_radius, get_geometry, get_geometry_parameters,
+                  get_inclusion_L, get_matrix_L, get_memory_MB, get_periodic_mesh, is_shape_constant_along_z)
 from fft_tfa_model import FFTTFASolver, get_interaction, get_neighbour_offsets, resolve_reach
-from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_spectral_clusters, get_spectral_lattice
+from ls_model import (SpectralLSSolver, get_elastic_strain_concentration, get_spectral_clusters,
+                      get_spectral_ls_operators)
 from material import get_unloaded_plastic_state, get_von_mises_stress
 from newton import SolverDidNotConverge
 from tfa_model import TFASolver, get_E_and_P
 
+## ------- Commands ------- ##
+
+def run():
+    """Solves every entry config.py lists, saves the run in a new folder of code/output/ and draws it."""
+    load_path = get_load_path()
+    reference = None
+    if config.reference is not None:
+        reference, failure_reason = run_in_own_process(get_reference, load_path)
+        if reference is None:
+            sys.exit(f"The reference failed: {failure_reason}")
+    results = solve_all(load_path)
+    folder = save_run(load_path, results, reference)
+    info, errors = draw_run(folder)
+    append_to_runs_csv(folder, info, errors)
+    print(f"Saved to {folder}")
+
+def replot(name):
+    """Redraws a saved run (a folder name in code/output/, or "latest") with config.py's figure settings."""
+    folder = config.output_folder / name
+    if not (folder / "results.npz").exists():
+        sys.exit(f"No saved run at {folder}")
+    draw_run(folder.resolve())
+    print(f"Redrawn in {folder.resolve()}")
+
+def preview():
+    """Prints what config.py asks for and what each entry would store, and draws the cross-section, solving nothing but
+    the elastic k-means features."""
+    load_path = get_load_path()
+    if get_geometry()["shape"] == "random fibers":
+        diameter = 2 * get_fiber_radius() * config.clustered_mesh / config.cell_side
+        print(f"Geometry {config.geometry!r}: {diameter:.3g} elements per fiber diameter")
+    phases = config.all_materials[config.materials]
+    print(f"Materials {config.materials!r}: contrast {phases['inclusion']['E'] / phases['matrix']['E']:.3g}")
+    print(f"Load path {config.load_path!r}: {len(load_path.applied_macro_strain)} steps, turning points at steps "
+          f"{', '.join(str(step + 1) for step in load_path.turning_steps)}")
+    info_entries, arrays = [], {}
+    for entry in get_entries():
+        clusters = (get_spectral_clusters(entry.settings["elements"]) if entry.method == "Spectral LS"
+                    else get_mesh_and_clusters(entry.settings)[1])
+        print(f"{entry.label}: {clusters.cluster_count} clusters, {describe_storage(entry, clusters)}")
+        arrays |= get_entry_arrays(entry, clusters)
+        info_entries.append({"label": entry.label, "method": entry.method, "settings": entry.settings,
+                             "cluster_count": clusters.cluster_count})
+    if config.reference is not None:
+        is_cached = get_cache_path("reference", get_reference_parameters(load_path)).exists()
+        print(f"Reference {config.reference['elements']} per side: "
+              f"{'cached' if is_cached else 'NOT cached, a run would solve it first'}")
+    config.output_folder.mkdir(parents=True, exist_ok=True)
+    path = config.output_folder / "preview_cross_section.png"
+    plots.plot_cross_section([get_cell_map(entry, arrays) for entry in info_entries], path)
+    print(f"Cross-section drawn in {path}")
+
+def describe_storage(entry, clusters):
+    """What an entry stores, in MB: FFT-TFA's kernel and one 6 × 6 block per pair of clusters in partitions within reach
+    (FT-3), TFA's dense P, Spectral LS's kernel and LS-24's operator."""
+    discretization = get_entry_discretization(entry)
+    partition_shape = discretization.partition_lattice_shape
+    kernel_MB = 36 * 16 * partition_shape[0] * partition_shape[1] * (partition_shape[2] // 2 + 1) / 1024**2
+    if entry.method == "Spectral LS":
+        return f"kernels {2 * kernel_MB:.0f} MB"
+    if entry.method == "TFA":
+        return f"P {(6 * clusters.cluster_count)**2 * 8 / 1024**2:.0f} MB"
+    counts = np.bincount(clusters.cluster_partition, minlength=clusters.partition_count).reshape(partition_shape)
+    offsets = get_neighbour_offsets(partition_shape, resolve_reach(entry.settings["reach"], partition_shape))
+    block_count = sum(np.sum(counts * np.roll(counts, tuple(offset), axis=(0, 1, 2))) for offset in offsets)
+    # The largest array of get_correction_blocks: pair counts over twice a partition, for every pair of slots in every
+    # partition.
+    pair_counts_MB = (clusters.partition_count * counts.max()**2 * 8 / 1024**2
+                      * np.prod(2 * np.array(discretization.element_lattice_shape) // np.array(partition_shape)))
+    return (f"kernel {kernel_MB:.0f} MB, corrections {block_count * 36 * 8 / 1024**2:.0f} MB; offline needs more than "
+            f"{2 * pair_counts_MB:.0f} MB")
+
+def list_cache():
+    """Lists the files in code/cache/: E and P, references."""
+    rows = [("File", "MB", "Saved", "What")]
+    for path, description in get_cache_entries():
+        rows.append((path.name, f"{path.stat().st_size / 1024**2:.1f}",
+                     datetime.datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M"), description))
+    print("\n".join(format_table(rows)))
+    print(f"In {config.cache_folder}; delete what you no longer need, it is solved again when asked for.")
+
+def main():
+    """Runs the command given on the command line (none: run)."""
+    command = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if command == "run":
+        run()
+    elif command == "preview":
+        preview()
+    elif command == "replot":
+        replot(sys.argv[2] if len(sys.argv) > 2 else "latest")
+    elif command == "cache":
+        list_cache()
+    else:
+        sys.exit(f"Unknown command {command!r}: use none, preview, replot [folder] or cache.")
+
 ## ------- Entries ------- ##
 
 class Entry(NamedTuple):
-    # One line of the comparison: a method, what it is called, and its settings (config.fft_tfa and the others).
+    """One line of the comparison: a method, what it is called, and its settings (config.fft_tfa and the others)."""
     method: str
     label: str
     settings: dict
 
 def format_setting(name, value):
+    """How a setting shows in an entry's label: partitions and elements per side as 8² or 8³, then m=, i=, reach, C0."""
     if name in ("partitions", "elements"):
         return f"{value}{'²' if is_shape_constant_along_z() else '³'}"
-    return {"matrix_clusters": f"m={value}", "inclusion_clusters": f"f={value}", "reach": f"reach {value}",
+    return {"matrix_clusters": f"m={value}", "inclusion_clusters": f"i={value}", "reach": f"reach {value}",
             "C0": f"C0 {value}"}[name]
 
 def get_entries():
-    # Every entry config.py lists, in the order of the table and the figures. A lone entry is called by its method;
-    # several are told apart by the settings that differ among them.
+    """Every entry config.py lists, in the order of the table and the figures. A lone entry is called by its method;
+    several are told apart by the settings that differ among them."""
     entries = []
     for method, listed in (("FFT-TFA", config.fft_tfa), ("Spectral LS", config.spectral_ls), ("TFA", config.tfa)):
         for settings in listed:
@@ -69,38 +176,38 @@ def get_entries():
             entries.append(Entry(method, " ".join([method, *differing]), settings))
     return entries
 
-def get_cluster_labels(mesh, settings):
-    # Every element's cluster: k-means on each element's elastic strain concentration (36 numbers), from Spectral LS on
-    # the same elements. One cluster per part needs no features.
+def get_element_cluster(mesh, settings):
+    """Every element's cluster for an FFT-TFA or TFA entry: k-means on each element's elastic strain concentration (36
+    numbers, from elastic Spectral LS on the same elements), or with one cluster per part, the parts themselves."""
     if settings["matrix_clusters"] == settings["inclusion_clusters"] == 1:
-        return label_partition_phases(mesh)
-    lattice = get_spectral_lattice(mesh.discretization.elements_per_side, config.k_means_features_C0)
-    return label_partition_k_means(mesh, get_elastic_strain_concentration(lattice).reshape(-1, 36),
-                                   settings["matrix_clusters"], settings["inclusion_clusters"])
+        return cluster_by_phase(mesh)
+    operators = get_spectral_ls_operators(mesh.discretization.elements_per_side, config.k_means_features_C0)
+    return cluster_by_k_means(mesh, get_elastic_strain_concentration(operators).reshape(-1, 36),
+                              settings["matrix_clusters"], settings["inclusion_clusters"])
 
-def get_partition_clusters(settings):
-    # The mesh and clusters of an FFT-TFA or TFA entry.
-    mesh = get_periodic_mesh(get_discretization(config.elements_per_side, settings["partitions"]))
-    return mesh, get_clusters(mesh, get_cluster_labels(mesh, settings))
+def get_mesh_and_clusters(settings):
+    """The mesh and clusters of an FFT-TFA or TFA entry."""
+    mesh = get_periodic_mesh(get_discretization(config.clustered_mesh, settings["partitions"]))
+    return mesh, get_clusters(mesh, get_element_cluster(mesh, settings))
 
 # Each builder returns the entry's solver, its offline seconds and any offline memory (MB) spent earlier, in a cached
 # build.
 
 def build_fft_tfa(settings):
     start_time = time.perf_counter()
-    mesh, clusters = get_partition_clusters(settings)
+    mesh, clusters = get_mesh_and_clusters(settings)
     solver = FFTTFASolver(get_interaction(mesh, clusters, settings["reach"]))
     return solver, time.perf_counter() - start_time, 0.0
 
 def build_spectral_ls(settings):
     start_time = time.perf_counter()
-    solver = SpectralLSSolver(get_spectral_lattice(settings["elements"], settings["C0"]))
+    solver = SpectralLSSolver(get_spectral_ls_operators(settings["elements"], settings["C0"]))
     return solver, time.perf_counter() - start_time, 0.0
 
 def build_tfa(settings):
-    # Its offline costs count E and P as they were when computed, even when they come from the cache.
+    """Its offline costs count E and P as they were when computed, even when they come from the cache."""
     start_time = time.perf_counter()
-    mesh, clusters = get_partition_clusters(settings)
+    mesh, clusters = get_mesh_and_clusters(settings)
     clusters_seconds = time.perf_counter() - start_time
     E, P, build_seconds, build_peak_MB = get_E_and_P(mesh, clusters)
     return TFASolver(E, P, clusters), clusters_seconds + build_seconds, build_peak_MB
@@ -114,8 +221,8 @@ class LoadPath(NamedTuple):
     turning_steps: np.ndarray          # the load step of each turning point
 
 def get_load_path():
-    # Straight lines through config.load_path's turning points, config.steps_to_first_turning_point steps to the first
-    # and the same step length on the others.
+    """Straight lines through config.load_path's turning points, config.steps_to_first_turning_point steps to the first
+    and the same step length on the others."""
     turning_points = np.array(config.all_load_paths[config.load_path], dtype=float)
     step_length = np.linalg.norm(turning_points[0]) / config.steps_to_first_turning_point
     lines, start = [], np.zeros(6)
@@ -126,11 +233,11 @@ def get_load_path():
     return LoadPath(np.vstack(lines), np.cumsum([len(line) for line in lines]) - 1)
 
 class LoadPathResult(NamedTuple):
-    # One solver's results at every load step: the stress's volume average over the cell and each step's iterations and
-    # time; at field_steps only, the stress and accumulated plastic strain per cluster (cell.Clusters), a fine lattice's
-    # fields at every step not fitting in memory. Steps past completed_step_count were not solved and hold zeros.
-    clusters: tuple
-    macroscopic_stress: np.ndarray
+    """One solver's results at every load step: the stress's volume average over the cell and each step's iterations and
+    time; at field_steps only, the stress and accumulated plastic strain per cluster (cell.Clusters), a fine lattice's
+    fields at every step not fitting in memory. Steps past completed_step_count were not solved and hold zeros."""
+    clusters: Clusters
+    macro_stress: np.ndarray
     field_steps: np.ndarray
     cluster_stress: np.ndarray
     accumulated_plastic_strain: np.ndarray
@@ -141,12 +248,12 @@ class LoadPathResult(NamedTuple):
     failure_reason: str
 
 def run_load_path(label, solver, applied_macro_strain, field_steps):
-    # Solves every load step in turn, each from the plastic history the previous one accepted. A step the solver cannot
-    # solve ends its load path there.
+    """Solves every load step in turn, each from the plastic history the previous one accepted. A step the solver cannot
+    solve ends its load path there."""
     clusters = solver.clusters
     plastic_history = get_unloaded_plastic_state(clusters.cluster_count)
     step_count = len(applied_macro_strain)
-    macroscopic_stress = np.zeros((step_count, 6))
+    macro_stress = np.zeros((step_count, 6))
     cluster_stress = np.zeros((len(field_steps), clusters.cluster_count, 6))
     accumulated_plastic_strain = np.zeros((len(field_steps), clusters.cluster_count))
     newton_iterations_per_step = np.zeros(step_count, dtype=int)
@@ -167,13 +274,13 @@ def run_load_path(label, solver, applied_macro_strain, field_steps):
         solve_time_per_step[step] = time.perf_counter() - start_time
         newton_iterations_per_step[step] = step_result.newton_iteration_count
         krylov_iterations_per_step[step] = step_result.krylov_iteration_count
-        macroscopic_stress[step] = clusters.average(step_result.stress)
+        macro_stress[step] = clusters.average(step_result.stress)
         for position in np.flatnonzero(field_steps == step):
             cluster_stress[position] = step_result.stress
             accumulated_plastic_strain[position] = step_result.plastic_state.accumulated_plastic_strain
         plastic_history = step_result.plastic_state
     load_steps.close()
-    return LoadPathResult(clusters, macroscopic_stress, field_steps, cluster_stress, accumulated_plastic_strain,
+    return LoadPathResult(clusters, macro_stress, field_steps, cluster_stress, accumulated_plastic_strain,
                           newton_iterations_per_step, krylov_iterations_per_step, solve_time_per_step,
                           completed_step_count, failure_reason)
 
@@ -184,10 +291,10 @@ def reset_peak_memory():
         clear_refs.write("5")
 
 class EntryResult(NamedTuple):
-    # An entry's load path (None if it could not be built) and its costs. The peaks are above the process's start, so
-    # they leave out Python and its modules, about 100 MB.
+    """An entry's load path (None if it could not be built) and its costs. The peaks are above the process's start, so
+    they leave out Python and its modules, about 100 MB."""
     entry: Entry
-    result: LoadPathResult
+    load_path_result: LoadPathResult
     offline_seconds: float
     online_seconds: float
     peak_offline_MB: float
@@ -200,13 +307,13 @@ def solve_entry(entry, applied_macro_strain, field_steps):
     solver, offline_seconds, earlier_peak_MB = builders[entry.method](entry.settings)
     peak_offline_MB = max(get_memory_MB("VmHWM") - start_memory, earlier_peak_MB)
     reset_peak_memory()
-    result = run_load_path(entry.label, solver, applied_macro_strain, field_steps)
-    return EntryResult(entry, result, offline_seconds, result.solve_time_per_step.sum(), peak_offline_MB,
-                       get_memory_MB("VmHWM") - start_memory, result.failure_reason)
+    load_path_result = run_load_path(entry.label, solver, applied_macro_strain, field_steps)
+    return EntryResult(entry, load_path_result, offline_seconds, load_path_result.solve_time_per_step.sum(),
+                       peak_offline_MB, get_memory_MB("VmHWM") - start_memory, load_path_result.failure_reason)
 
 def run_in_own_process(function, *arguments):
-    # The value of function(*arguments), computed in a process of its own, so that its peak memory is its own and
-    # running out of memory (config.memory_limit_GB) stops only it. Returns (value, ""), or (None, why it failed).
+    """The value of function(*arguments), computed in a process of its own, so that its peak memory is its own and
+    running out of memory (config.memory_limit_GB) stops only it. Returns (value, ""), or (None, why it failed)."""
     context = multiprocessing.get_context("fork")
     receiver, sender = context.Pipe(duplex=False)
 
@@ -234,8 +341,8 @@ def run_in_own_process(function, *arguments):
     return value, failure_reason
 
 def solve_all(load_path, field_steps=None):
-    # Every entry's EntryResult, by label: each from timing_repeats runs, in turn, with its fastest times. Fields are
-    # kept at the given load steps, by default the turning points.
+    """Every entry's EntryResult, by label: each from timing_repeats runs, in turn, with its fastest times; a repeat
+    that fails does not replace one that ran. Fields are kept at the given load steps, by default the turning points."""
     field_steps = load_path.turning_steps if field_steps is None else field_steps
     results = {}
     for _ in range(config.timing_repeats):
@@ -245,7 +352,9 @@ def solve_all(load_path, field_steps=None):
                 print(f"{entry.label} failed: {failure_reason}")
                 result = EntryResult(entry, None, 0.0, 0.0, 0.0, 0.0, failure_reason)
             previous = results.get(entry.label)
-            if previous is not None and previous.result is not None:
+            if previous is not None and previous.load_path_result is not None:
+                if result.load_path_result is None:
+                    continue
                 result = result._replace(offline_seconds=min(result.offline_seconds, previous.offline_seconds),
                                          online_seconds=min(result.online_seconds, previous.online_seconds))
             results[entry.label] = result
@@ -260,14 +369,17 @@ def solve_all(load_path, field_steps=None):
 reference_cache_version = 3
 
 class Reference(NamedTuple):
+    """The reference solution: Spectral LS on its own fine voxels, solved once and cached."""
     lattice_shape: tuple                  # its voxels, [z, y, x]
-    material_ids: np.ndarray              # every voxel's phase
-    macroscopic_stress: np.ndarray        # at every load step
+    phase: np.ndarray                     # every voxel's phase
+    macro_stress: np.ndarray              # at every load step
     stress: np.ndarray                    # every voxel's, at every turning point
     accumulated_plastic_strain: np.ndarray
     build_seconds: float
 
 def get_reference_parameters(load_path):
+    """Every input that changes the reference's answer, its cache key. The keys' names are hashed into the cache file's
+    name, so they keep their names even where the inputs were renamed."""
     elements = config.reference["elements"]
     return {"cache_version": reference_cache_version, "discretization": "Moulinec-Suquet",
             **get_geometry_parameters(), "elements_per_side": elements, "constant_along_z": is_shape_constant_along_z(),
@@ -284,7 +396,8 @@ def get_reference_parameters(load_path):
             "reference_C0": config.reference["C0"]}
 
 def get_reference(load_path):
-    # The reference from the cache when it matches, otherwise solved now and cached, with the seconds it took to build.
+    """The reference from the cache when it matches, otherwise solved now and cached, with the seconds it took to
+    build."""
     elements = config.reference["elements"]
     discretization = get_discretization(elements, elements)
 
@@ -293,14 +406,15 @@ def get_reference(load_path):
         print(f"Solving the reference: Spectral LS on {voxel_label} voxels, {len(load_path.applied_macro_strain)} load "
               "steps")
         start_time = time.perf_counter()
-        lattice = get_spectral_lattice(elements, config.reference["C0"])
-        result = run_load_path("Reference", SpectralLSSolver(lattice), load_path.applied_macro_strain,
+        operators = get_spectral_ls_operators(elements, config.reference["C0"])
+        result = run_load_path("Reference", SpectralLSSolver(operators), load_path.applied_macro_strain,
                                load_path.turning_steps)
         if result.completed_step_count < len(load_path.applied_macro_strain):
             raise RuntimeError(f"The reference stopped at load step {result.completed_step_count + 1}: "
                                f"{result.failure_reason}")
-        return {"material_ids": lattice.clusters.materials.material_ids,
-                "macroscopic_stress": result.macroscopic_stress, "stress": result.cluster_stress,
+        # The arrays keep the names older caches were saved with, so those still load.
+        return {"material_ids": operators.clusters.materials.phase,
+                "macroscopic_stress": result.macro_stress, "stress": result.cluster_stress,
                 "accumulated_plastic_strain": result.accumulated_plastic_strain,
                 "build_seconds": time.perf_counter() - start_time}
 
@@ -313,36 +427,37 @@ def get_reference(load_path):
 ## ------- Saving a Run ------- ##
 
 def get_lattice_label(lattice_shape):
-    # A lattice of shape [z, y, x] as "N×N" when its cells are columns through the thickness, "N×N×N_z" otherwise.
+    """A lattice of shape [z, y, x] as "N×N" when its cells are columns through the thickness, "N×N×N_z" otherwise."""
     counts = [lattice_shape[2], lattice_shape[1]] + ([lattice_shape[0]] if lattice_shape[0] > 1 else [])
     return "×".join(map(str, counts))
 
 def get_entry_discretization(entry):
     if entry.method == "Spectral LS":
         return get_discretization(entry.settings["elements"], entry.settings["elements"])
-    return get_discretization(config.elements_per_side, entry.settings["partitions"])
+    return get_discretization(config.clustered_mesh, entry.settings["partitions"])
 
 def get_entry_arrays(entry, clusters):
-    # What the cross-section of an entry needs.
+    """What the cross-section of an entry needs."""
     return {f"{entry.label}/element_cluster": clusters.element_cluster.reshape(
                 get_entry_discretization(entry).element_lattice_shape),
             f"{entry.label}/cluster_partition": clusters.cluster_partition,
-            f"{entry.label}/cluster_material_ids": clusters.materials.material_ids}
+            f"{entry.label}/cluster_phase": clusters.materials.phase}
 
 def get_reference_layer(reference, voxel_values):
-    # One value per reference voxel on its voxel layer at mid-thickness, which lies in the entries' mid-thickness layer,
-    # since the reference's elements subdivide theirs.
+    """One value per reference voxel on its voxel layer at mid-thickness, which lies in the entries' mid-thickness
+    layer, since the reference's elements subdivide theirs."""
     return voxel_values.reshape(reference.lattice_shape)[reference.lattice_shape[0] // 2]
 
 def get_code_version():
-    # The commit this code stands on, and its uncommitted changes, to reproduce a saved run.
+    """The commit this code stands on, and its uncommitted changes, to reproduce a saved run."""
     def git(*arguments):
         return subprocess.run(["git", *arguments], capture_output=True, text=True,
                               cwd=pathlib.Path(__file__).parent).stdout
     return f"commit {git('rev-parse', 'HEAD')}\nuncommitted changes:\n{git('status', '--short')}\n{git('diff')}"
 
 def get_entry_info(entry_result):
-    result = entry_result.result
+    """An entry's line of run.json."""
+    result = entry_result.load_path_result
     return {"label": entry_result.entry.label, "method": entry_result.entry.method,
             "settings": entry_result.entry.settings, "offline_seconds": entry_result.offline_seconds,
             "online_seconds": entry_result.online_seconds, "peak_offline_MB": entry_result.peak_offline_MB,
@@ -354,14 +469,14 @@ def get_entry_info(entry_result):
 def get_run_info(results, reference):
     return {"results_name": config.results_name, "date": datetime.datetime.now().isoformat(timespec="seconds"),
             "geometry": config.geometry, "materials": config.materials, "load_path": config.load_path,
-            "elements_per_side": config.elements_per_side, "side_length_mm": 1e3 * config.domain_side_length,
+            "clustered_mesh": config.clustered_mesh, "side_length_mm": 1e3 * config.cell_side,
             "reference": None if reference is None else {"voxels": get_lattice_label(reference.lattice_shape),
                                                          "build_seconds": reference.build_seconds},
             "entries": [get_entry_info(entry_result) for entry_result in results.values()]}
 
 def save_run(load_path, results, reference):
-    # A new folder in config.output_folder with the settings, the code's version and the results, and code/output/latest
-    # pointing at it.
+    """A new folder in config.output_folder with the settings, the code's version and the results, and
+    code/output/latest pointing at it."""
     date = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     folder = config.output_folder / f"{date}_{re.sub(r'[^A-Za-z0-9.-]+', '-', config.results_name)}"
     folder.mkdir(parents=True)
@@ -371,18 +486,18 @@ def save_run(load_path, results, reference):
 
     arrays = {"applied_macro_strain": load_path.applied_macro_strain, "turning_steps": load_path.turning_steps}
     for label, entry_result in results.items():
-        result = entry_result.result
+        result = entry_result.load_path_result
         if result is None:
             continue
         arrays |= get_entry_arrays(entry_result.entry, result.clusters)
-        arrays |= {f"{label}/macroscopic_stress": result.macroscopic_stress,
+        arrays |= {f"{label}/macro_stress": result.macro_stress,
                    f"{label}/cluster_stress": result.cluster_stress,
                    f"{label}/accumulated_plastic_strain": result.accumulated_plastic_strain,
                    f"{label}/newton_iterations_per_step": result.newton_iterations_per_step,
                    f"{label}/krylov_iterations_per_step": result.krylov_iterations_per_step}
     if reference is not None:
-        arrays |= {"Reference/macroscopic_stress": reference.macroscopic_stress,
-                   "Reference/material_ids": get_reference_layer(reference, reference.material_ids),
+        arrays |= {"Reference/macro_stress": reference.macro_stress,
+                   "Reference/phase": get_reference_layer(reference, reference.phase),
                    "Reference/von_mises_stress": np.array([get_reference_layer(reference, get_von_mises_stress(stress))
                                                            for stress in reference.stress], dtype=np.float32),
                    "Reference/accumulated_plastic_strain": np.array(
@@ -396,12 +511,12 @@ def save_run(load_path, results, reference):
     return folder
 
 def get_saved_run(folder):
-    # A saved run's run.json, and its results.npz as a dict of arrays.
+    """A saved run's run.json, and its results.npz as a dict of arrays."""
     with np.load(folder / "results.npz") as saved:
         return json.loads((folder / "run.json").read_text()), {name: saved[name] for name in saved.files}
 
 def append_to_runs_csv(folder, info, errors):
-    # One row per entry of the run in code/output/runs.csv, to compare runs at a glance.
+    """One row per entry of the run in code/output/runs.csv, to compare runs at a glance."""
     path = config.output_folder / "runs.csv"
     is_new = not path.exists()
     with open(path, "a", newline="") as runs:
@@ -409,7 +524,7 @@ def append_to_runs_csv(folder, info, errors):
             rms, largest = errors.get(entry["label"], ("", ""))
             row = {"folder": folder.name, "date": info["date"], "results_name": info["results_name"],
                    "geometry": info["geometry"], "materials": info["materials"], "load_path": info["load_path"],
-                   "elements_per_side": info["elements_per_side"], "label": entry["label"],
+                   "clustered_mesh": info["clustered_mesh"], "label": entry["label"],
                    "settings": json.dumps(entry["settings"]), "clusters": entry["cluster_count"],
                    "offline_s": f"{entry['offline_seconds']:.2f}", "online_s": f"{entry['online_seconds']:.2f}",
                    "peak_offline_MB": f"{entry['peak_offline_MB']:.0f}",
@@ -424,15 +539,15 @@ def append_to_runs_csv(folder, info, errors):
 ## ------- Tables ------- ##
 
 def format_table(rows):
-    # Rows of cells as aligned text lines: the first column left-aligned, the others right-aligned.
+    """Rows of cells as aligned text lines: the first column left-aligned, the others right-aligned."""
     widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
     return ["   ".join(cell.ljust(width) if column == 0 else cell.rjust(width)
                        for column, (cell, width) in enumerate(zip(row, widths))) for row in rows]
 
 def get_timing_table(info, arrays):
-    # Offline: building the entry's operators. Online: solving the load steps it completed, with its Newton and Krylov
-    # (GMRES, or CG for Spectral LS) iterations over them. Peaks: the largest memory it held in each. Then why an entry
-    # stopped early.
+    """Offline: building the entry's operators. Online: solving the load steps it completed, with its Newton and Krylov
+    (GMRES, or CG for Spectral LS) iterations over them. Peaks: the largest memory it held in each. Then why an entry
+    stopped early."""
     step_count = len(arrays["applied_macro_strain"])
     rows = [("Entry", "Clusters", "Offline (s)", "Online (s)", "Newton its", "Krylov its", "Steps", "Offline peak (MB)",
              "Online peak (MB)")]
@@ -453,31 +568,31 @@ def get_timing_table(info, arrays):
     return "\n".join(lines)
 
 def get_loaded_components(reference_stress):
-    # The stress components the load path produces: those whose reference value reaches config.loaded_stress_fraction
-    # of the largest reference component somewhere along the path.
+    """The stress components the load path produces: those whose reference value reaches config.loaded_stress_fraction
+    of the largest reference component somewhere along the path."""
     largest_per_component = np.abs(reference_stress).max(axis=0)
     return np.flatnonzero(largest_per_component >= config.loaded_stress_fraction * largest_per_component.max())
 
 def get_macro_stress_errors(info, arrays, components):
-    # Each entry's signed macroscopic stress error in the given components at every step it solved, in % of each
-    # component's largest reference value along the path, so a smaller component is read on its own scale.
-    reference_stress = arrays["Reference/macroscopic_stress"][:, components]
+    """Each entry's signed macroscopic stress error in the given components at every step it solved, in % of each
+    component's largest reference value along the path, so a smaller component is read on its own scale."""
+    reference_stress = arrays["Reference/macro_stress"][:, components]
     scale = np.abs(reference_stress).max(axis=0)
     errors = {}
     for entry in info["entries"]:
         solved = entry["completed_step_count"]
         if solved > 0:
-            stress = arrays[f"{entry['label']}/macroscopic_stress"][:solved, components]
+            stress = arrays[f"{entry['label']}/macro_stress"][:solved, components]
             errors[entry["label"]] = 100 * (stress - reference_stress[:solved]) / scale
     return errors
 
 def get_root_mean_square_error(error):
-    # An entry's one number: the root mean square over the path of each component's error, then over the components.
+    """An entry's one number: the root mean square over the path of each component's error, then over the components."""
     return np.sqrt(np.mean(np.mean(error**2, axis=0)))
 
 def get_error_table(info, macro_stress_errors, components, step_count):
-    # The errors of get_macro_stress_errors summarized per component: the largest magnitude over the steps an entry
-    # solved, and their root mean square.
+    """The errors of get_macro_stress_errors summarized per component: the largest magnitude over the steps an entry
+    solved, and their root mean square."""
     rows = [("Entry", *(f"σ{plots.stress_component_subscripts[component]} max / rms (%)" for component in components),
              "Steps")]
     for label, error in macro_stress_errors.items():
@@ -490,32 +605,33 @@ def get_error_table(info, macro_stress_errors, components, step_count):
 ## ------- Figures ------- ##
 
 def get_mid_layer(lattice_values):
-    # The element layer at mid-thickness of values on a lattice [z, y, x].
+    """The element layer at mid-thickness of values on a lattice [z, y, x]."""
     return lattice_values[len(lattice_values) // 2]
 
 def get_cell_map(entry, arrays):
-    # An entry's discretization on its element grid at mid-thickness, with its settings: k-means clusters coloured in.
+    """An entry's discretization on its element grid at mid-thickness, with its settings: k-means clusters coloured in.
+    """
     label, settings = entry["label"], entry["settings"]
     cluster_ids = get_mid_layer(arrays[f"{label}/element_cluster"])
-    material_ids = arrays[f"{label}/cluster_material_ids"][cluster_ids]
+    element_phase = arrays[f"{label}/cluster_phase"][cluster_ids]
     is_k_means = max(settings.get("matrix_clusters", 1), settings.get("inclusion_clusters", 1)) > 1
     fill = cluster_ids if is_k_means else None
     clusters_line = f"{entry['cluster_count']} {'k-means' if is_k_means else 'partition phase'} clusters"
     if entry["method"] == "Spectral LS":
         return plots.CellMap(label, f"{settings['elements']} voxels per side, C0: {settings['C0']}",
-                             {"voxel": cluster_ids}, material_ids)
+                             {"voxel": cluster_ids}, element_phase)
     partition_ids = arrays[f"{label}/cluster_partition"][cluster_ids]
     if entry["method"] == "TFA":
         return plots.CellMap(label, f"{settings['partitions']} partitions per side\n{clusters_line}",
-                             {"cluster": cluster_ids}, material_ids, fill)
+                             {"cluster": cluster_ids}, element_phase, fill)
     return plots.CellMap(label, f"{settings['partitions']} partitions per side, reach {settings['reach']}\n"
                                 f"{clusters_line}",
-                         {"cluster": cluster_ids, "partition": partition_ids}, material_ids, fill)
+                         {"cluster": cluster_ids, "partition": partition_ids}, element_phase, fill)
 
 def get_color_limits(field_maps, value_min, value_max):
-    # A map figure's colour limits: the given ones, and those left at None from the finest field's map, the reference's
-    # or else Spectral LS's when no map is finer, so the others are read against it (values beyond it are clipped);
-    # otherwise from every map. Elements without a value (NaN, the inclusion in a matrix-only map) are left out.
+    """A map figure's colour limits: the given ones, and those left at None from the finest field's map, the reference's
+    or else Spectral LS's when no map is finer, so the others are read against it (values beyond it are clipped);
+    otherwise from every map. Elements without a value (NaN, the inclusion in a matrix-only map) are left out."""
     finest_side = max(len(field_map.values) for field_map in field_maps)
     scale_maps = ([field_map.values for field_map in field_maps if field_map.title == "Reference"]
                   or [field_map.values for field_map in field_maps
@@ -525,36 +641,37 @@ def get_color_limits(field_maps, value_min, value_max):
             max(map(np.nanmax, scale_maps)) if value_max is None else value_max)
 
 def get_field_maps(info, arrays, turning_point, get_cluster_values, reference_name, scale):
-    # One plots.FieldMap per entry that reached the turning point, the reference's first, each on its own elements, and
-    # each one's map of its inclusion, by title.
+    """One plots.FieldMap per entry that reached the turning point, the reference's first, each on its own elements, and
+    each one's map of its inclusion, by title."""
     field_maps, inclusion_maps = [], {}
     if info["reference"] is not None:
         field_maps.append(plots.FieldMap("Reference", scale * arrays[f"Reference/{reference_name}"][turning_point]))
-        inclusion_maps["Reference"] = arrays["Reference/material_ids"] == 1
+        inclusion_maps["Reference"] = arrays["Reference/phase"] == 1
     for entry in info["entries"]:
         label = entry["label"]
         if entry["completed_step_count"] > arrays["turning_steps"][turning_point]:
             cluster_ids = get_mid_layer(arrays[f"{label}/element_cluster"])
             field_maps.append(plots.FieldMap(label, scale * get_cluster_values(label, turning_point)[cluster_ids]))
-            inclusion_maps[label] = arrays[f"{label}/cluster_material_ids"][cluster_ids] == 1
+            inclusion_maps[label] = arrays[f"{label}/cluster_phase"][cluster_ids] == 1
     return field_maps, inclusion_maps
 
 def get_matrix_only(field_maps, inclusion_maps):
-    # The maps with their inclusion elements hidden (NaN) when config.field_maps_matrix_only is on.
+    """The maps with their inclusion elements hidden (NaN) when config.field_maps_matrix_only is on."""
     if not config.field_maps_matrix_only:
         return field_maps
     return [plots.FieldMap(field_map.title, np.where(inclusion_maps[field_map.title], np.nan, field_map.values))
             for field_map in field_maps]
 
 def draw_load_path_figures(folder, info, arrays, drawn):
-    # The tables and figures along the load path. Returns each entry's root-mean-square and largest error for runs.csv.
+    """The tables and figures along the load path. Returns each entry's root-mean-square and largest error for runs.csv.
+    """
     applied_macro_strain = arrays["applied_macro_strain"]
     step_count = len(applied_macro_strain)
-    stress_MPa = {entry["label"]: arrays[f"{entry['label']}/macroscopic_stress"] / 1e6 for entry in drawn}
+    stress_MPa = {entry["label"]: arrays[f"{entry['label']}/macro_stress"] / 1e6 for entry in drawn}
     completed_step_counts = {entry["label"]: entry["completed_step_count"] for entry in drawn}
     summary = {}
     if info["reference"] is not None:
-        reference_stress = arrays["Reference/macroscopic_stress"]
+        reference_stress = arrays["Reference/macro_stress"]
         stress_MPa = {"Reference": reference_stress / 1e6, **stress_MPa}
         completed_step_counts["Reference"] = step_count
         components = get_loaded_components(reference_stress)
@@ -576,8 +693,8 @@ def draw_load_path_figures(folder, info, arrays, drawn):
     return summary
 
 def draw_field_figures(folder, info, arrays):
-    # The maps and the profile at config.map_turning_point. A saved run may have fewer turning points than config.py's
-    # load path.
+    """The maps and the profile at config.map_turning_point. A saved run may have fewer turning points than config.py's
+    load path."""
     turning_steps = arrays["turning_steps"]
     turning_point = (len(turning_steps) if config.map_turning_point == "last"
                      else min(config.map_turning_point, len(turning_steps))) - 1
@@ -608,14 +725,14 @@ def draw_field_figures(folder, info, arrays):
                           folder / "plastic_strain.png")
     # The profile follows the middle row of the mesh's elements, which the reference's subdivide; a map on other
     # elements (Spectral LS's) shows its row at that height. The inclusion's stretches come from the finest map.
-    profile_height = (info["elements_per_side"] // 2 + 0.5) / info["elements_per_side"]
+    profile_height = (info["clustered_mesh"] // 2 + 0.5) / info["clustered_mesh"]
     plots.plot_field_profiles(plastic_strain_maps, profile_height, max(inclusion_maps.values(), key=len),
                               "Accumulated plastic strain (%)", title, info["side_length_mm"],
                               folder / "plastic_strain_profile.png")
 
 def draw_run(folder):
-    # Every table and figure of a saved run, from what it saved, with config.py's Figures settings. Returns its run.json
-    # and each entry's errors for runs.csv.
+    """Every table and figure of a saved run, from what it saved, with config.py's Figures settings. Returns its
+    run.json and each entry's errors for runs.csv."""
     info, arrays = get_saved_run(folder)
     table = get_timing_table(info, arrays)
     print(f"\n{table}\n")
@@ -627,96 +744,6 @@ def draw_run(folder):
     plots.plot_cross_section([get_cell_map(entry, arrays) for entry in drawn], folder / "cross_section.png")
     draw_field_figures(folder, info, arrays)
     return info, summary
-
-## ------- Commands ------- ##
-
-def run():
-    load_path = get_load_path()
-    reference = None
-    if config.reference is not None:
-        reference, failure_reason = run_in_own_process(get_reference, load_path)
-        if reference is None:
-            sys.exit(f"The reference failed: {failure_reason}")
-    results = solve_all(load_path)
-    folder = save_run(load_path, results, reference)
-    info, errors = draw_run(folder)
-    append_to_runs_csv(folder, info, errors)
-    print(f"Saved to {folder}")
-
-def replot(name):
-    folder = config.output_folder / name
-    if not (folder / "results.npz").exists():
-        sys.exit(f"No saved run at {folder}")
-    draw_run(folder.resolve())
-    print(f"Redrawn in {folder.resolve()}")
-
-def get_stored_description(entry, clusters):
-    # What an entry stores, in MB: FFT-TFA's kernel and one 6 × 6 block per pair of clusters in partitions within reach
-    # (FT-3), TFA's dense P, Spectral LS's kernel and LS-24's operator.
-    discretization = get_entry_discretization(entry)
-    partition_shape = discretization.partition_lattice_shape
-    kernel_MB = 36 * 16 * partition_shape[0] * partition_shape[1] * (partition_shape[2] // 2 + 1) / 1024**2
-    if entry.method == "Spectral LS":
-        return f"kernels {2 * kernel_MB:.0f} MB"
-    if entry.method == "TFA":
-        return f"P {(6 * clusters.cluster_count)**2 * 8 / 1024**2:.0f} MB"
-    counts = np.bincount(clusters.cluster_partition, minlength=clusters.partition_count).reshape(partition_shape)
-    offsets = get_neighbour_offsets(partition_shape, resolve_reach(entry.settings["reach"], partition_shape))
-    block_count = sum(np.sum(counts * np.roll(counts, tuple(offset), axis=(0, 1, 2))) for offset in offsets)
-    # The largest array of get_correction_blocks: pair counts over twice a partition, every pair of ranks and
-    # partitions.
-    pair_counts_MB = (clusters.partition_count * counts.max()**2 * 8 / 1024**2
-                      * np.prod(2 * np.array(discretization.element_lattice_shape) // np.array(partition_shape)))
-    return (f"kernel {kernel_MB:.0f} MB, corrections {block_count * 36 * 8 / 1024**2:.0f} MB; offline needs more than "
-            f"{2 * pair_counts_MB:.0f} MB")
-
-def preview():
-    # What config.py asks for, and what it would store, solving nothing but the elastic k-means features.
-    load_path = get_load_path()
-    if get_geometry()["shape"] == "random fibers":
-        diameter = 2 * get_fiber_radius() * config.elements_per_side / config.domain_side_length
-        print(f"Geometry {config.geometry!r}: {diameter:.3g} elements per fiber diameter")
-    phases = config.all_materials[config.materials]
-    print(f"Materials {config.materials!r}: contrast {phases['inclusion']['E'] / phases['matrix']['E']:.3g}")
-    print(f"Load path {config.load_path!r}: {len(load_path.applied_macro_strain)} steps, turning points at steps "
-          f"{', '.join(str(step + 1) for step in load_path.turning_steps)}")
-    info_entries, arrays = [], {}
-    for entry in get_entries():
-        clusters = (get_spectral_clusters(entry.settings["elements"]) if entry.method == "Spectral LS"
-                    else get_partition_clusters(entry.settings)[1])
-        print(f"{entry.label}: {clusters.cluster_count} clusters, {get_stored_description(entry, clusters)}")
-        arrays |= get_entry_arrays(entry, clusters)
-        info_entries.append({"label": entry.label, "method": entry.method, "settings": entry.settings,
-                             "cluster_count": clusters.cluster_count})
-    if config.reference is not None:
-        is_cached = get_cache_path("reference", get_reference_parameters(load_path)).exists()
-        print(f"Reference {config.reference['elements']} per side: "
-              f"{'cached' if is_cached else 'NOT cached, a run would solve it first'}")
-    config.output_folder.mkdir(parents=True, exist_ok=True)
-    path = config.output_folder / "preview_cross_section.png"
-    plots.plot_cross_section([get_cell_map(entry, arrays) for entry in info_entries], path)
-    print(f"Cross-section drawn in {path}")
-
-def list_cache():
-    rows = [("File", "MB", "Saved", "What")]
-    for path, description in get_cache_entries():
-        rows.append((path.name, f"{path.stat().st_size / 1024**2:.1f}",
-                     datetime.datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M"), description))
-    print("\n".join(format_table(rows)))
-    print(f"In {config.cache_folder}; delete what you no longer need, it is solved again when asked for.")
-
-def main():
-    command = sys.argv[1] if len(sys.argv) > 1 else "run"
-    if command == "run":
-        run()
-    elif command == "preview":
-        preview()
-    elif command == "replot":
-        replot(sys.argv[2] if len(sys.argv) > 2 else "latest")
-    elif command == "cache":
-        list_cache()
-    else:
-        sys.exit(f"Unknown command {command!r}: use none, preview, replot [folder] or cache.")
 
 if __name__ == "__main__":
     main()
