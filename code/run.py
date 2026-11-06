@@ -48,7 +48,7 @@ import plots
 from cell import (Clusters, cluster_by_k_means, cluster_by_phase, get_cache_entries, get_cache_path, get_cached,
                   get_clusters, get_discretization, get_fiber_radius, get_geometry, get_geometry_parameters,
                   get_inclusion_L, get_matrix_L, get_memory_MB, get_periodic_mesh, is_shape_constant_along_z)
-from fft_tfa_model import FFTTFASolver, get_interaction, get_neighbour_offsets, resolve_reach
+from fft_tfa_model import FFTTFASolver, get_interaction, get_polynomial_basis, resolve_degree
 from ls_model import (SpectralLSSolver, get_elastic_strain_concentration, get_spectral_clusters,
                       get_spectral_ls_operators)
 from material import get_unloaded_plastic_state, get_von_mises_stress
@@ -108,24 +108,27 @@ def preview():
     print(f"Cross-section drawn in {path}")
 
 def describe_storage(entry, clusters):
-    """What an entry stores, in MB: FFT-TFA's kernel and one 6 × 6 block per pair of clusters in partitions within reach
-    (FT-3), TFA's dense P, Spectral LS's kernel and LS-24's operator."""
+    """What an entry stores, in MB: FFT-TFA's moment kernels (one 6p × 6p block per frequency, p the polynomials of its
+    degree) and one 6 × 6 block per pair of clusters in the same partition (FT-3), TFA's dense P, Spectral LS's kernel
+    and LS-24's operator."""
     discretization = get_entry_discretization(entry)
     partition_shape = discretization.partition_lattice_shape
-    kernel_MB = 36 * 16 * partition_shape[0] * partition_shape[1] * (partition_shape[2] // 2 + 1) / 1024**2
+    frequencies = partition_shape[0] * partition_shape[1] * (partition_shape[2] // 2 + 1)     # rfftn's half
+    kernel_MB = 36 * 16 * frequencies / 1024**2                     # one complex 6 × 6 block per frequency
     if entry.method == "Spectral LS":
         return f"kernels {2 * kernel_MB:.0f} MB"
     if entry.method == "TFA":
         return f"P {(6 * clusters.cluster_count)**2 * 8 / 1024**2:.0f} MB"
-    counts = np.bincount(clusters.cluster_partition, minlength=clusters.partition_count).reshape(partition_shape)
-    offsets = get_neighbour_offsets(partition_shape, resolve_reach(entry.settings["reach"], partition_shape))
-    block_count = sum(np.sum(counts * np.roll(counts, tuple(offset), axis=(0, 1, 2))) for offset in offsets)
-    # The largest array of get_correction_blocks: pair counts over twice a partition, for every pair of slots in every
-    # partition.
-    pair_counts_MB = (clusters.partition_count * counts.max()**2 * 8 / 1024**2
-                      * np.prod(2 * np.array(discretization.element_lattice_shape) // np.array(partition_shape)))
-    return (f"kernel {kernel_MB:.0f} MB, corrections {block_count * 36 * 8 / 1024**2:.0f} MB; offline needs more than "
-            f"{2 * pair_counts_MB:.0f} MB")
+    block = discretization.partition_shape_in_elements
+    polynomials = get_polynomial_basis(block, resolve_degree(entry.settings["degree"], discretization)).shape[-1]
+    counts = np.bincount(clusters.cluster_partition, minlength=clusters.partition_count)
+    # Offline, the largest arrays: the kernels in real space before their transform, and get_correction_blocks' pair
+    # counts over twice a partition, for every pair of slots in every partition.
+    kernels_built_MB = polynomials**2 * 36 * 8 * clusters.partition_count / 1024**2
+    pair_counts_MB = clusters.partition_count * counts.max()**2 * 8 * np.prod(2 * block) / 1024**2
+    return (f"kernels {polynomials**2 * kernel_MB:.0f} MB ({polynomials} polynomials), corrections "
+            f"{np.sum(counts**2) * 36 * 8 / 1024**2:.0f} MB; offline needs more than "
+            f"{max(kernels_built_MB, 2 * pair_counts_MB):.0f} MB")
 
 def list_cache():
     """Lists the files in code/cache/: E and P, references."""
@@ -159,10 +162,10 @@ class Entry(NamedTuple):
     settings: dict
 
 def format_setting(name, value):
-    """How a setting shows in an entry's label: partitions and elements per side as 8² or 8³, then m=, i=, reach, C0."""
+    """How a setting shows in an entry's label: partitions or elements per side as 8² or 8³, m=, i=, degree, C0."""
     if name in ("partitions", "elements"):
         return f"{value}{'²' if is_shape_constant_along_z() else '³'}"
-    return {"matrix_clusters": f"m={value}", "inclusion_clusters": f"i={value}", "reach": f"reach {value}",
+    return {"matrix_clusters": f"m={value}", "inclusion_clusters": f"i={value}", "degree": f"degree {value}",
             "C0": f"C0 {value}"}[name]
 
 def get_entries():
@@ -196,7 +199,7 @@ def get_mesh_and_clusters(settings):
 def build_fft_tfa(settings):
     start_time = time.perf_counter()
     mesh, clusters = get_mesh_and_clusters(settings)
-    solver = FFTTFASolver(get_interaction(mesh, clusters, settings["reach"]))
+    solver = FFTTFASolver(get_interaction(mesh, clusters, settings["degree"]))
     return solver, time.perf_counter() - start_time, 0.0
 
 def build_spectral_ls(settings):
@@ -624,7 +627,7 @@ def get_cell_map(entry, arrays):
     if entry["method"] == "TFA":
         return plots.CellMap(label, f"{settings['partitions']} partitions per side\n{clusters_line}",
                              {"cluster": cluster_ids}, element_phase, fill)
-    return plots.CellMap(label, f"{settings['partitions']} partitions per side, reach {settings['reach']}\n"
+    return plots.CellMap(label, f"{settings['partitions']} partitions per side, degree {settings['degree']}\n"
                                 f"{clusters_line}",
                          {"cluster": cluster_ids, "partition": partition_ids}, element_phase, fill)
 

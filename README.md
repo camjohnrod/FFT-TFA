@@ -14,7 +14,7 @@ Every method keeps one material state per cluster. They differ only in how those
 
 | Method | How clusters interact |
 |---|---|
-| **FFT-TFA** | The method under development. TFA's clusters, interacting through the Lippmann–Schwinger (LS) equation of a homogeneous medium of the matrix's stiffness: exact for the matrix's polarization, uniform per cluster in the inclusion. The interaction is one FFT on the partitions, on each partition's mean polarization, plus exact corrections between the clusters of each partition (and, optionally, of its neighbours). (`notes/0_fft_tfa_lecture.md`) |
+| **FFT-TFA** | The method under development. TFA's clusters, interacting through the Lippmann–Schwinger (LS) equation of a homogeneous medium of the matrix's stiffness: exact for the matrix's polarization, uniform per cluster in the inclusion. Inside each partition the clusters interact exactly; beyond it, each partition's polarization is summarized by its polynomial moments up to a `degree` and every partition acts on every other through one FFT on the partitions. The degree converges to the exact clustered equation. (`notes/0_fft_tfa_lecture.md`) |
 | **Spectral LS** | The LS equation on the elements, each its own cluster: the standard Moulinec–Suquet spectral method, as a comparison. (`notes/2_ls_model.md`, section 4) |
 | **TFA** | The baseline. Clusters interact through the composite's exact FE influence functions E and P: exact in elasticity, but P is dense. (`notes/3_tfa_baseline.md`) |
 
@@ -23,10 +23,10 @@ gradients for Spectral LS, whose Newton system is symmetric) and a backtracking 
 
 **Research question.** With the same material states, how does the interaction operator decide accuracy and cost?
 FFT-TFA and TFA share their material model, so their difference is how the clusters interact: FFT-TFA takes the
-inclusion's polarization uniform per cluster (exact in the matrix, with the matrix as reference medium), truncates the
-interaction to nearby partitions, and uses the Moulinec–Suquet kernel where TFA uses FE. With the truncation removed,
-FFT-TFA is SCA's clustered equation with the matrix as reference medium. (`notes/0_fft_tfa_lecture.md`
-sections 6 and 9, `notes/1_research_context.md`)
+inclusion's polarization uniform per cluster (exact in the matrix, with the matrix as reference medium), summarizes
+other partitions by polynomial moments, and uses the Moulinec–Suquet kernel where TFA uses FE. At full degree, FFT-TFA
+is SCA's clustered equation with the matrix as reference medium. (`notes/0_fft_tfa_lecture.md`
+sections 6 and 7, `notes/1_research_context.md`)
 
 ## Quick start
 
@@ -52,10 +52,10 @@ load_path                    = "tension, then shear"
 steps_to_first_turning_point = 25
 
 clustered_mesh               = 128
-fft_tfa     = [dict(partitions=4,  matrix_clusters=8, inclusion_clusters=1, reach=1),
-               dict(partitions=8,  matrix_clusters=8, inclusion_clusters=1, reach=1),
-               dict(partitions=16, matrix_clusters=8, inclusion_clusters=1, reach=1),
-               dict(partitions=32, matrix_clusters=8, inclusion_clusters=1, reach=1)]
+fft_tfa     = [dict(partitions=4,  matrix_clusters=8, inclusion_clusters=1, degree=3),
+               dict(partitions=8,  matrix_clusters=8, inclusion_clusters=1, degree=3),
+               dict(partitions=16, matrix_clusters=8, inclusion_clusters=1, degree=3),
+               dict(partitions=32, matrix_clusters=8, inclusion_clusters=1, degree=3)]
 spectral_ls = [dict(elements=64, C0="midpoint"), dict(elements=128, C0="midpoint"), dict(elements=256, C0="midpoint")]
 tfa         = []
 reference   = dict(elements=512, C0="midpoint")
@@ -64,8 +64,10 @@ reference   = dict(elements=512, C0="midpoint")
 - **Methods:** any method may have several entries, drawn in tints of its colour, so list them coarse to fine; an empty list
   switches it off. FFT-TFA and TFA group one fine mesh into clusters, `clustered_mesh` elements per side, which
   `partitions` must divide.
-  `reach` is how far FFT-TFA's exact corrections go: 0 each partition's own clusters, 1 its neighbours too, `"full"`
-  every partition. Spectral LS's `elements` are its own, coarser or finer than the mesh; its `C0` does not change its
+  `degree` is how finely FFT-TFA summarizes each partition for the others: 0 its mean polarization only, higher degrees
+  converge to the exact interaction, `"full"` is exact. Partitions work best at most about half an inclusion across,
+  with degree 2–4 in 2D and 2 in 3D, where the kernels grow fastest (`preview` reports their memory). Spectral LS's
+  `elements` are its own, coarser or finer than the mesh; its `C0` does not change its
   answer, only how fast it gets there.
 - **Geometry:** each entry of `all_geometries` has a `shape`: `"random fibers"`, `"fiber"`, `"sphere"`, `"laminate"`
   (interfaces normal to x) or `"laminate_z"` (normal to z).
@@ -150,8 +152,8 @@ partitions, and the checks.
    another method. Spectral LS on a fine voxel mesh, the reference until then, shares every method's staircase geometry.
 2. **TFA–LS study.** Derive the exact relation between TFA's P and the LS operator, and compare FFT-TFA with TFA on the
    same clusters: their difference splits into the inclusion's polarization taken uniform per cluster (FFT-TFA at full
-   reach against TFA), the truncation (FFT-TFA against itself at full reach) and the Moulinec–Suquet kernel against TFA's
-   FE. Against the reference, each method adds the error of one eigenstrain per cluster, which FFT-TFA and TFA share; the
+   degree against TFA), the far-field summary (FFT-TFA against itself at full degree) and the Moulinec–Suquet kernel
+   against TFA's FE. Against the reference, each method adds the error of one eigenstrain per cluster, which FFT-TFA and TFA share; the
    two errors can have opposite signs and cancel, so a method measured only against the reference can look better than
    its interaction is.
 3. **Cost at equal accuracy.** Time and memory against resolution for each method, at the same error, in 2D and 3D. An FFT
@@ -164,31 +166,23 @@ partitions, and the checks.
 
 Open for FFT-TFA (`notes/0_fft_tfa_lecture.md`, section 10):
 
-- **Truncated interaction:** it does not leave a uniform polarization alone where a partition holds several clusters (the
-  patch test), and neighbour blocks can make that worse; a consistent variant that corrects only each partition's
-  deviation from its mean passes it, but is less accurate with neighbour blocks on the 126-fiber cell and the sphere (as
-  accurate without). Coherent structures that cut partitions (a laminate along its layers) keep a far-field error the
-  corrections do not reach. Against FFT-TFA at full reach (the truncation alone), neighbour blocks help the matrix
-  clusters in 2D and 3D, and face neighbours alone fall well short of all neighbours; in 3D the inclusion's error can grow
-  with more neighbours (the sphere under shear). Applying the corrections to the polarization's deviation from its cell
-  mean passes the patch test exactly and makes the interaction symmetric, but leaves the accuracy unchanged: the
-  truncation error comes almost entirely from the far partitions' non-uniform polarization.
-- **Next: replace reach by a polynomial far field.** Each partition's polarization is summarized by its polynomial moments
-  (degree *d*), carried by one FFT per moment; only each partition's own clusters keep exact corrections. Prototyped
-  outside the repo: it converges to the exact clustered equation as the degree rises, removes the stall under partition
-  refinement (100 fibers, 32²: 2.45 % to 1.25 %), is exact on the cut laminate at a low degree, and in 3D beats reach 1 on
-  accuracy, time and memory. To implement: `degree` replacing `reach`, with checks; kernel memory grows with *d*² in 3D.
+- **Far field by polynomial moments:** the interaction converges with the degree to the exact clustered equation, so
+  refining the partitions pays off (100 fibers, 32² partitions: 1.25 % against 512² Spectral LS at degree 4), and the
+  cut laminate is exact once the degree spans a partition's elements in x. Partitions about an inclusion across need a
+  high degree, since the sharp near field then reaches past a partition. Open: the kernels' memory grows with the
+  square of the polynomials (in 3D, 10 at degree 2 and 20 at degree 3); halving it by their symmetry, or keeping only
+  pairs of total degree up to the degree, are untried.
 - **Inclusion polarization:** one polarization per inclusion cluster; σ33 along z-invariant fibers runs low. Splitting a
-  partition's fiber part by fiber makes FFT-TFA stiffer and less accurate, at full reach too: with the matrix as C0, a
+  partition's fiber part by fiber makes FFT-TFA stiffer and less accurate, with the exact interaction too: with the matrix as C0, a
   coarser fiber polarization errs soft (Brisard–Dormieux 2010's Hashin–Shtrikman bound), offsetting the stiff error of
   one eigenstrain per matrix cluster, which dominates. To do: refine the matrix clusters until refining the fiber helps,
   so that accuracy does not rest on the two cancelling. Wanted: a richer inclusion polarization that works for any
   geometry, needs no offline solve and keeps one interaction operator.
 - **Material states:** how FFT-TFA's and TFA's accuracy and cost change with the number of clusters; with clusters of a
   few elements the clustered model can have several solutions (TFA too).
-- **Memory:** online, FFT-TFA stores the partition kernel and one 6 × 6 correction block per pair of clusters in the same
-  or (with neighbour blocks) neighbouring partitions, so its memory grows with the partitions times the square of the
-  clusters per partition (27 times more with neighbour blocks in 3D), not with the elements. Offline, `get_correction_blocks`
+- **Memory:** online, FFT-TFA stores the moment kernels, (6p)² numbers per frequency of the partition lattice with p
+  the polynomials of its degree, and one 6 × 6 correction block per pair of clusters in the same partition, so its
+  memory grows with the partitions times p² and times the square of the clusters per partition, not with the elements. Offline, `get_correction_blocks`
   cross-correlates the clusters of every partition at once, which in 3D with k-means takes more than a Spectral LS solve
   of the whole load path. To do before any 3D study: build them a chunk of partitions at a time (a chunk size or memory
   budget in `config.py`). Every k-means setting also needs six elastic Spectral LS solves on the elements, the floor of

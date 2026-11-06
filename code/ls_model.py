@@ -4,10 +4,10 @@ The LS equation replaces the composite by a homogeneous reference medium of stif
 where the material differs from it. The strain the polarization causes is a convolution with a kernel P0, so on a
 regular lattice it is one FFT, a 6 × 6 product at every frequency and an inverse FFT (apply_on_lattice). Spectral LS
 (Moulinec–Suquet) solves the equation on the elements by Newton, each correction by conjugate gradients. FFT-TFA
-(fft_tfa_model) uses this file's kernel, its average over partitions and the block helpers.
+(fft_tfa_model) uses this file's kernel, apply_on_lattice and the block helpers.
 
-Translation-invariant operators are stored as one 6 × 6 block per lattice frequency, rfftn's non-redundant half: shape
-(N_z, N, N//2 + 1, 6, 6), lattices indexed [z, y, x] and square in-plane.
+Translation-invariant operators are stored as one block per lattice frequency, rfftn's non-redundant half: shape
+(N_z, N, N//2 + 1, b, b), lattices indexed [z, y, x] and square in-plane; b = 6 here, 6 per polynomial in FFT-TFA.
 """
 
 from typing import NamedTuple
@@ -24,17 +24,18 @@ from newton import Evaluation, Solver, SolverDidNotConverge
 ## ------- Convolution on a Lattice ------- ##
 
 def apply_on_lattice(fourier_blocks, field):
-    """A translation-invariant operator, given by its 6 × 6 block at every lattice frequency (rfftn's half spectrum),
-    applied to a field of one row of 6 per lattice point: transform, multiply frequency by frequency, transform back.
-    Only axes longer than one are transformed, as read from the operator's shape: a transform of length one is the
-    identity, but costs time."""
+    """A translation-invariant operator, given by its b × b block at every lattice frequency (rfftn's half spectrum),
+    applied to a field of b values per lattice point (rows of b, lattice point by lattice point): transform, multiply
+    frequency by frequency, transform back. Only axes longer than one are transformed, as read from the operator's
+    shape: a transform of length one is the identity, but costs time."""
     lattice_shape = (fourier_blocks.shape[0], fourier_blocks.shape[1], fourier_blocks.shape[1])
+    block = fourier_blocks.shape[-1]
     axes = tuple(axis for axis in (0, 1) if lattice_shape[axis] > 1) + (2,)
     transformed_shape = tuple(lattice_shape[axis] for axis in axes)
-    field_transformed = scipy.fft.rfftn(field.reshape(*lattice_shape, 6), axes=axes, workers=config.thread_count)
+    field_transformed = scipy.fft.rfftn(field.reshape(*lattice_shape, block), axes=axes, workers=config.thread_count)
     result_transformed = np.einsum('...ij,...j->...i', fourier_blocks, field_transformed)
     return scipy.fft.irfftn(result_transformed, s=transformed_shape, axes=axes,
-                            workers=config.thread_count).reshape(-1, 6)
+                            workers=config.thread_count).reshape(-1, block)
 
 ## ------- Reference Stiffness ------- ##
 
@@ -49,8 +50,10 @@ def get_spectral_C0(name):
 ## ------- Moulinec–Suquet Kernel P0 ------- ##
 
 def to_fourier_blocks(offset_blocks, lattice_shape):
-    """An operator's blocks by lattice offset (offsets × 6, 6) to its blocks by frequency (rfftn's half spectrum)."""
-    return np.fft.rfftn(offset_blocks.reshape(*lattice_shape, 6, 6), axes=(0, 1, 2))
+    """An operator's b × b blocks by lattice offset (stacked as offsets × b rows of b) to its blocks by frequency
+    (rfftn's half spectrum)."""
+    block = offset_blocks.shape[-1]
+    return np.fft.rfftn(offset_blocks.reshape(*lattice_shape, block, block), axes=(0, 1, 2))
 
 def to_offset_blocks(transformed):
     """The inverse of to_fourier_blocks: an operator's blocks by frequency to its blocks by lattice offset, stacked as
@@ -91,34 +94,9 @@ def get_moulinec_suquet_kernel(lattice_shape, C0):
     P0_transformed[highest_frequencies] = np.eye(6)
     return to_offset_blocks(P0_transformed)
 
-def average_over_partitions(element_P0, discretization):
-    """The partitions' kernel from the elements' (same mesh), by linearity. Unit eigenstrain in a partition is unit
-    eigenstrain in each of its k × k × k_z elements, and a partition's strain is the mean over its elements, so with
-    K = (k_z, k, k) and offsets grouped by d = s − t, which (k_z − |d_z|)(k − |d_y|)(k − |d_x|) element pairs share:
-      P0[D] = Σ_d (k_z − |d_z|)(k − |d_y|)(k − |d_x|) / (k_z k²) · p0_element[K D + d]       (LS note, section 3.2)
-    Offsets are periodic. One element per partition returns the kernel unchanged. A column through the thickness
-    averages over every z offset, which keeps only the ξ_z = 0 frequencies: the in-plane kernel."""
-    k, k_z = discretization.elements_per_partition_side, discretization.elements_per_partition_along_z
-    element_count_z, element_side, _ = discretization.element_lattice_shape
-    element_P0 = element_P0.reshape(*discretization.element_lattice_shape, 6, 6)
-    partition_offsets = k * np.arange(discretization.partitions_per_side)
-    partition_offsets_z = k_z * np.arange(discretization.partitions_along_z)
-    partition_P0 = np.zeros((*discretization.partition_lattice_shape, 6, 6))
-    for d_k in range(1 - k_z, k_z):
-        for d_j in range(1 - k, k):
-            for d_i in range(1 - k, k):
-                weight = (k_z - abs(d_k)) * (k - abs(d_j)) * (k - abs(d_i)) / (k_z * k**2)
-                partition_P0 += weight * element_P0[np.ix_((partition_offsets_z + d_k) % element_count_z,
-                                                           (partition_offsets + d_j) % element_side,
-                                                           (partition_offsets + d_i) % element_side)]
-    return partition_P0.reshape(-1, 6)
-
-def get_P0_transformed(discretization, C0):
-    """P̂0 on the discretization's partition lattice: the Moulinec–Suquet kernel on its element grid, averaged over its
-    partitions, as SCA averages its fine-grid operator over clusters (Liu et al. 2016)."""
-    element_P0 = get_moulinec_suquet_kernel(discretization.element_lattice_shape, C0)
-    partition_P0 = average_over_partitions(element_P0, discretization)
-    return to_fourier_blocks(partition_P0, discretization.partition_lattice_shape)
+def get_P0_transformed(lattice_shape, C0):
+    """P̂0 at every frequency of a lattice of the given shape: the Moulinec–Suquet kernel, as Spectral LS applies it."""
+    return to_fourier_blocks(get_moulinec_suquet_kernel(lattice_shape, C0), lattice_shape)
 
 ## ------- Residual in Matrix Units (LS-24) ------- ##
 
@@ -162,8 +140,8 @@ def get_spectral_clusters(elements_per_side):
 
 def get_spectral_ls_operators(elements_per_side, C0_name):
     C0 = get_spectral_C0(C0_name)
-    return SpectralLSOperators(get_spectral_clusters(elements_per_side), C0,
-                               get_P0_transformed(get_discretization(elements_per_side, elements_per_side), C0))
+    lattice_shape = get_discretization(elements_per_side, elements_per_side).element_lattice_shape
+    return SpectralLSOperators(get_spectral_clusters(elements_per_side), C0, get_P0_transformed(lattice_shape, C0))
 
 class SpectralLSSolver(Solver):
     """Spectral LS: the LS equation LS-18 on the elements, each element its own partition and cluster. Newton on the

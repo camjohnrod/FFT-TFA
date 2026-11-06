@@ -22,7 +22,7 @@ def strain(e11=0, e22=0, e33=0, g12=0, g23=0, g13=0):
 # One name from each list in section 4, where you can add your own.
 geometry                    = "100 fibers"
 materials                   = "glass/PA"
-load_path                   = "tension, then shear"
+load_path                   = "biaxial cyclic"
 
 steps_to_first_turning_point = 25      # the load path's other lines keep the same step length
 
@@ -33,27 +33,27 @@ steps_to_first_turning_point = 25      # the load path's other lines keep the sa
 
 # FFT-TFA and TFA both group the elements of one fine mesh, which resolves the geometry, into clusters. Spectral LS and
 # the reference set their own elements.
-clustered_mesh              = 128      # elements per side
+clustered_mesh              = 256       # elements per side
 
-# FFT-TFA, the method under development (notes/0_fft_tfa_lecture.md): clusters interacting through an FFT on the
-# partitions plus exact corrections between nearby clusters.
-#   partitions          per side: the blocks of elements its FFT runs on; must divide clustered_mesh
+# FFT-TFA, the method under development (notes/0_fft_tfa_lecture.md): clusters interacting exactly inside each
+# partition, and through an FFT on the partitions beyond, each partition summarized by polynomial moments.
+#   partitions          per side: the blocks of elements its FFT runs on; must divide clustered_mesh. Best at most about
+#                       half an inclusion across
 #   matrix_clusters     per partition's matrix part, by k-means
 #   inclusion_clusters  per partition's inclusion part; an elastic inclusion needs one
-#   reach               how many partitions away the exact corrections go: 0 the partition itself, 1 its neighbours too
-#                       (about 9 times the corrections' cost in 2D, 27 in 3D), "full" all of them
-fft_tfa     = [dict(partitions=4,  matrix_clusters=8, inclusion_clusters=1, reach=1), 
-               dict(partitions=8,  matrix_clusters=8, inclusion_clusters=1, reach=1), 
-               dict(partitions=16, matrix_clusters=8, inclusion_clusters=1, reach=1), 
-               dict(partitions=32, matrix_clusters=8, inclusion_clusters=1, reach=1)]
-
+#   degree              of the polynomials summarizing each partition: 0 its mean only; higher converges to the exact
+#                       interaction, "full" is exact. About 2–4 in 2D, 2 in 3D, where the kernels grow fast (preview)
+fft_tfa     = [dict(partitions=4,   matrix_clusters=4, inclusion_clusters=1, degree=3), 
+               dict(partitions=8,   matrix_clusters=4, inclusion_clusters=1, degree=3), 
+               dict(partitions=16,  matrix_clusters=4, inclusion_clusters=1, degree=3), 
+               dict(partitions=32,  matrix_clusters=4, inclusion_clusters=1, degree=3)]
+    
 # Spectral LS, the standard Moulinec–Suquet method, one cluster per element.
 #   elements            per side: its own mesh, coarser or finer than clustered_mesh
 #   C0                  its reference stiffness, which does not change its answer: "midpoint" of the phases, or "matrix"
 #                       (about as fast at contrast 34, 17 % slower at contrast 100)
-spectral_ls = [dict(elements=64,  C0="midpoint"), 
-               dict(elements=128, C0="midpoint"), 
-               dict(elements=256, C0="midpoint")]
+spectral_ls = [dict(elements=64,   C0="midpoint"), 
+               dict(elements=128,  C0="midpoint")]
 
 # TFA, the baseline (notes/3_tfa_baseline.md): clusters interacting through FE influence functions, built once and
 # cached. Its settings mean the same as FFT-TFA's. It stores (6 × clusters)² doubles, which preview reports.
@@ -170,8 +170,8 @@ fiber_push_passes           = 10000
 laminate_tolerance          = 1e-5
 laminate_solver_tolerance   = 1e-11
 laminate_solver_max_iterations = 50
-# FFT-TFA's interaction at full reach must match the element-level LS operator, to this relative tolerance
-# (notes/0_fft_tfa_lecture.md section 7; measured below 1e-14).
+# FFT-TFA's interaction at full degree must match the element-level LS operator, and a uniform polarization must cause
+# no strain at any degree, both to this relative tolerance (measured below 1e-14).
 interaction_check_tolerance = 1e-12
 # Every method stopped at convergence_tolerance must lie within stopping_accuracy_tolerance (relative, as
 # laminate_tolerance) of its own solution at tight_convergence_tolerance, so none gains speed by stopping less
@@ -240,7 +240,7 @@ def check_inputs():
 
     if not (fft_tfa or spectral_ls or tfa):
         raise ValueError("Nothing to run: fft_tfa, spectral_ls and tfa are all empty.")
-    check_entries("fft_tfa", fft_tfa, ("partitions", "matrix_clusters", "inclusion_clusters", "reach"))
+    check_entries("fft_tfa", fft_tfa, ("partitions", "matrix_clusters", "inclusion_clusters", "degree"))
     check_entries("spectral_ls", spectral_ls, ("elements", "C0"))
     check_entries("tfa", tfa, ("partitions", "matrix_clusters", "inclusion_clusters"))
     for entry in fft_tfa + tfa:
@@ -249,8 +249,8 @@ def check_inputs():
         if min(entry["matrix_clusters"], entry["inclusion_clusters"]) < 1:
             raise ValueError(f"The cluster counts must be at least 1. Got {entry}.")
     for entry in fft_tfa:
-        if entry["reach"] != "full" and not (isinstance(entry["reach"], int) and entry["reach"] >= 0):
-            raise ValueError(f"reach must be \"full\" or an integer from 0. Got {entry}.")
+        if entry["degree"] != "full" and not (isinstance(entry["degree"], int) and entry["degree"] >= 0):
+            raise ValueError(f"degree must be \"full\" or an integer from 0. Got {entry}.")
     if reference is not None:
         check_entries("reference", [reference], ("elements", "C0"))
         if reference["elements"] % clustered_mesh != 0:

@@ -116,6 +116,12 @@ class Discretization(NamedTuple):
         return self.elements_along_z // self.partitions_along_z
 
     @property
+    def partition_shape_in_elements(self):
+        """A partition's size in elements along [z, y, x]."""
+        return np.array([self.elements_per_partition_along_z, self.elements_per_partition_side,
+                         self.elements_per_partition_side])
+
+    @property
     def elements_per_partition(self):
         return self.elements_per_partition_side**2 * self.elements_per_partition_along_z
 

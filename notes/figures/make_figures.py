@@ -1,6 +1,6 @@
 # The figures of notes/0_fft_tfa_lecture.md, computed with the code itself: python notes/figures/make_figures.py
-# (a minute or so). Inputs are set here in memory, as check.py does; config.py, the cache and code/output are not
-# touched.
+# (a few minutes). Inputs are pinned here in memory, as check.py does: glass/PA, a centred fiber, check.py's solver
+# settings; config.py, the cache and code/output are not touched.
 
 import pathlib
 import sys
@@ -14,9 +14,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors
 import matplotlib.patches
-import scipy.sparse
 
 import cell
+import check
 import fft_tfa_model
 import ls_model
 import plots
@@ -24,10 +24,15 @@ import run
 from config import strain
 from material import get_unloaded_plastic_state
 
+glass_PA = config.all_materials["glass/PA"]
+for name, value in check.pinned_inputs.items():
+    setattr(config, name, value)
+config.all_materials, config.materials, config.geometry = {"glass/PA": glass_PA}, "glass/PA", "fiber"
 config.cache_folder = pathlib.Path(tempfile.mkdtemp())
-config.geometry, config.materials = "one fiber", "glass/PA"
 style = {**plots.figure_style, 'font.size': 11, 'axes.titlesize': 12}
 phase_colors = matplotlib.colors.ListedColormap(['0.92', '0.62'])
+# The load of figures 2 and 3: tension and shear together, out to 2 % in 20 steps.
+load_path = np.linspace(0, 1, 21)[1:, None] * np.array(strain(e11=0.02, g12=0.02))
 
 def get_clusters(clustered_mesh, partitions, matrix_clusters):
     config.clustered_mesh = clustered_mesh
@@ -76,18 +81,17 @@ def draw_polarization():
     solver = ls_model.SpectralLSSolver(operators)
     matrix_L = cell.get_matrix_L()
     history = get_unloaded_plastic_state(operators.clusters.cluster_count)
-    path = np.linspace(0, 1, 21)[1:, None] * np.array(strain(e11=0.02, g12=0.02))
     maps = {}
-    for step, macro_strain in enumerate(path):
+    for step, macro_strain in enumerate(load_path):
         result = solver.solve_step(macro_strain, history)
         history = result.plastic_state
-        if step in (0, len(path) - 1):
+        if step in (0, len(load_path) - 1):
             polarization = result.stress - result.strain @ matrix_L.T
             maps[step] = get_tensor_norm(polarization).reshape(elements, elements) / 1e6
     with plt.rc_context(style):
         figure, axes = plt.subplots(1, 2, figsize=(8.4, 3.9), layout='constrained')
         titles = {0: r"Elastic: $\bar\varepsilon_{11}=\bar\gamma_{12}=0.1$ %",
-                  len(path) - 1: r"Plastic: $\bar\varepsilon_{11}=\bar\gamma_{12}=2$ %"}
+                  len(load_path) - 1: r"Plastic: $\bar\varepsilon_{11}=\bar\gamma_{12}=2$ %"}
         for axis, (step, values) in zip(axes, maps.items()):
             image = axis.imshow(values, origin='lower', extent=(0, 1, 0, 1), cmap=plots.field_map_colormap)
             axis.set_title(titles[step])
@@ -96,7 +100,50 @@ def draw_polarization():
         figure.savefig(folder / "polarization.png")
     plt.close(figure)
 
-## ------- Figure 3: what the corrections fix, and how far ------- ##
+## ------- Figure 3: a partition's polarization summarized by polynomials ------- ##
+
+def draw_summary():
+    """FFT-TFA's cluster polarizations at the end of figure 2's load, and each partition's best-fitting polynomial of
+    degree 0, 1 and 3: τ(β) ≈ Σ_ψ ψ(β) τ(B, ψ)."""
+    mesh, clusters = get_clusters(64, 4, 2)
+    discretization = mesh.discretization
+    interaction = fft_tfa_model.get_interaction(mesh, clusters, 1)
+    solver = fft_tfa_model.FFTTFASolver(interaction)
+    history = get_unloaded_plastic_state(clusters.cluster_count)
+    for macro_strain in load_path:
+        result = solver.solve_step(macro_strain, history)
+        history = result.plastic_state
+    matrix_L = cell.get_matrix_L()
+    polarization = result.stress - result.strain @ matrix_L.T
+    component, shape = 3, discretization.element_lattice_shape
+    maps = {"Polarization: uniform\non each cluster": polarization[clusters.element_cluster, component]}
+    block = discretization.partition_shape_in_elements
+    z, y, x = np.unravel_index(np.arange(discretization.element_count), shape)
+    for degree in (0, 1, 3):
+        basis = fft_tfa_model.get_polynomial_basis(block, degree)
+        element_basis = basis[z % block[0], y % block[1], x % block[2]]
+        moments = fft_tfa_model.get_cluster_moments(discretization, clusters, basis)
+        partition_moments = np.zeros((clusters.partition_count, basis.shape[-1]))
+        np.add.at(partition_moments, clusters.cluster_partition,
+                  moments * polarization[:, component, None])
+        maps[f"Its summary,\ndegree {degree}"] = np.sum(element_basis * partition_moments[mesh.element_partition],
+                                                         axis=1)
+    largest = max(np.abs(values).max() for values in maps.values()) / 1e6
+    partition = mesh.element_partition.reshape(shape[1:])
+    with plt.rc_context(style):
+        figure, axes = plt.subplots(1, 4, figsize=(12, 3.6), layout='constrained')
+        for axis, (title, values) in zip(axes, maps.items()):
+            image = axis.imshow(values.reshape(shape[1:]) / 1e6, origin='lower', extent=(0, 1, 0, 1),
+                                cmap='RdBu_r', vmin=-largest, vmax=largest)
+            plots.draw_boundaries(axis, partition, plots.boundary_styles["partition"])
+            axis.plot([0, 1, 1, 0, 0], [0, 0, 1, 1, 0], **plots.frame_style)
+            axis.set_title(title)
+            axis.set_axis_off()
+        figure.colorbar(image, ax=axes, label=r"$\tau_{12}$ (MPa)", shrink=0.85)
+        figure.savefig(folder / "summary.png")
+    plt.close(figure)
+
+## ------- Figure 4: where the far field is accurate enough ------- ##
 
 def get_partition_distance(clusters, partition_shape):
     # Every cluster pair's distance in partitions along the farthest axis, periodic.
@@ -104,107 +151,92 @@ def get_partition_distance(clusters, partition_shape):
     offsets = np.abs(position[:, None, :] - position[None, :, :])
     return np.max(np.minimum(offsets, np.array(partition_shape) - offsets), axis=-1)
 
-def get_interaction_strain(interaction, polarization):
-    # FT-2 before FT-4's mean subtraction: the partition FFT on the partitions' mean polarization plus the corrections.
-    # (FT-4 spreads the truncated interaction's small cell mean over every cluster, which would hide the decay.)
-    clusters = interaction.clusters
-    partition_polarization = interaction.cluster_to_partition @ polarization
-    partition_strain = ls_model.apply_on_lattice(interaction.P0_transformed,
-                                                 np.linalg.solve(interaction.matrix_L, partition_polarization.T).T)
-    return (partition_strain[clusters.cluster_partition]
-            + ls_model.apply_sparse(interaction.correction_blocks, polarization))
+def get_exact_pairs(mesh, clusters):
+    """Γ(a←b) for every pair of clusters, 6 × 6 blocks: a unit polarization on b's elements, its strain by the element
+    kernel, averaged over a's elements."""
+    discretization, matrix_L = mesh.discretization, cell.get_matrix_L()
+    shape = discretization.element_lattice_shape
+    kernel = ls_model.to_fourier_blocks(ls_model.get_moulinec_suquet_kernel(shape, matrix_L), shape)
+    counts = np.bincount(clusters.element_cluster)
+    pairs = np.zeros((clusters.cluster_count, clusters.cluster_count, 6, 6))
+    for source in range(clusters.cluster_count):
+        for column in range(6):
+            polarization = np.zeros((discretization.element_count, 6))
+            polarization[clusters.element_cluster == source, column] = 1
+            element_strain = ls_model.apply_on_lattice(kernel, np.linalg.solve(matrix_L, polarization.T).T)
+            average = np.zeros((clusters.cluster_count, 6))
+            np.add.at(average, clusters.element_cluster, element_strain)
+            pairs[:, source, :, column] = average / counts[:, None]
+    return pairs
 
-def draw_reach():
-    mesh, clusters = get_clusters(64, 16, 2)
-    partition_shape = mesh.discretization.partition_lattice_shape
-    exact = fft_tfa_model.get_interaction(mesh, clusters, "full")
-    variants = {"partition FFT alone": exact._replace(correction_blocks=scipy.sparse.bsr_matrix(
-                    exact.correction_blocks.shape, blocksize=(6, 6))),
-                "reach 0": fft_tfa_model.get_interaction(mesh, clusters, 0),
-                "reach 1": fft_tfa_model.get_interaction(mesh, clusters, 1)}
-    distance = get_partition_distance(clusters, partition_shape)
-    largest_distance = distance.max()
-    # Per distance, the volume-weighted root mean square over every pair of clusters at that distance (a unit
-    # polarization in the source), as a share of the same measure of the exact interaction within a partition.
-    squared_errors = {label: np.zeros(largest_distance + 1) for label in variants}
-    squared_own = 0.0
-    unit = np.zeros((clusters.cluster_count, 6))
+def get_far_pairs(interaction):
+    """Γ_far(a←b) for every pair: the far field alone (moments, FFT, read back by the clusters' moments)."""
+    clusters = interaction.clusters
+    pairs = np.zeros((clusters.cluster_count, clusters.cluster_count, 6, 6))
     for source in range(clusters.cluster_count):
-        unit[:] = 0
-        unit[source, 0] = 1
-        exact_change = get_interaction_strain(exact, unit)
-        weights = clusters.share * clusters.share[source]
-        squared_own += np.sum((weights * np.sum(exact_change**2, axis=1))[distance[:, source] == 0])
-        for label, interaction in variants.items():
-            squared_error = weights * np.sum((get_interaction_strain(interaction, unit) - exact_change)**2, axis=1)
-            np.add.at(squared_errors[label], distance[:, source], squared_error)
-    pair_weights = np.zeros(largest_distance + 1)
-    for source in range(clusters.cluster_count):
-        np.add.at(pair_weights, distance[:, source], clusters.share * clusters.share[source])
-    errors = {label: np.sqrt(squared / pair_weights / (squared_own / pair_weights[0]))
-              for label, squared in squared_errors.items()}
-    colors = {"partition FFT alone": '#E69F00', "reach 0": '#56B4E9', "reach 1": '#D55E00'}
+        for column in range(6):
+            polarization = np.zeros((clusters.cluster_count, 6))
+            polarization[source, column] = 1
+            moments = (interaction.to_moments @ polarization).reshape(clusters.partition_count, -1)
+            pairs[:, source, :, column] = interaction.from_moments @ ls_model.apply_on_lattice(
+                interaction.moment_kernels, moments).reshape(-1, 6)
+    return pairs
+
+def draw_far_field():
+    mesh, clusters = get_clusters(64, 8, 2)
+    distance = get_partition_distance(clusters, mesh.discretization.partition_lattice_shape)
+    exact = get_exact_pairs(mesh, clusters)
+    # Per distance, the volume-weighted rms over every pair at that distance of the 6 × 6 block's norm, as a share of the
+    # same measure of the exact interaction within a partition.
+    weights = clusters.share[:, None] * clusters.share[None, :]
+    def get_rms(blocks, at_distance):
+        squared = weights * np.sum(blocks**2, axis=(-1, -2))
+        return np.sqrt(squared[at_distance].sum() / weights[at_distance].sum())
+    own_scale = get_rms(exact, distance == 0)
+    distances = np.arange(distance.max() + 1)
+    degrees = (0, 1, 2, 3, 4)
+    errors = {}
+    for degree in degrees:
+        far = get_far_pairs(fft_tfa_model.get_interaction(mesh, clusters, degree))
+        errors[degree] = np.array([get_rms(far - exact, distance == r) for r in distances]) / own_scale
+    green = np.array(matplotlib.colors.to_rgb(plots.method_styles["FFT-TFA"]['color']))
     with plt.rc_context(style):
         figure, axes = plt.subplots(1, 2, figsize=(10, 3.8), layout='constrained', width_ratios=(1, 1.6))
         axis = axes[0]
         for i in range(-3, 4):
             for j in range(-3, 4):
-                ring = max(abs(i), abs(j))
-                color = ('#56B4E9' if ring == 0 else '#D55E00' if ring == 1 else '0.93')
-                axis.add_patch(matplotlib.patches.Rectangle((i - 0.5, j - 0.5), 1, 1, facecolor=color,
+                own = i == 0 and j == 0
+                axis.add_patch(matplotlib.patches.Rectangle((i - 0.5, j - 0.5), 1, 1,
+                                                            facecolor='#56B4E9' if own else '0.88',
                                                             edgecolor='white', linewidth=2))
         axis.text(0, 0, "A", ha='center', va='center', fontsize=14, color='white')
         axis.set_xlim(-3.5, 3.5)
         axis.set_ylim(-3.5, 3.5)
         axis.set_aspect('equal')
         axis.set_axis_off()
-        axis.set_title("Exact corrections around partition A:\nreach 0 (A itself), reach 1 (and its neighbours)")
+        axis.set_title("Seen from partition A: its own clusters exactly,\nevery other partition through its moments")
         axis = axes[1]
-        for label, error in errors.items():
-            shown = error > 1e-14
-            axis.plot(np.arange(largest_distance + 1)[shown], 100 * error[shown], marker='o', color=colors[label],
-                      label=label)
+        axis.axvspan(-0.3, 0.3, color='#56B4E9', alpha=0.25, linewidth=0)
+        axis.text(0.35, 0.03, "replaced by the\nexact interaction", transform=axis.get_xaxis_transform(), fontsize=10,
+                  va='bottom')
+        for index, degree in enumerate(degrees):
+            color = green + plots.first_entry_lightening * (1 - index / (len(degrees) - 1)) * (1 - green)
+            axis.plot(distances, 100 * errors[degree], marker='o', color=tuple(color), label=f"degree {degree}")
         axis.set_yscale('log')
+        axis.set_xticks(distances)
         axis.set_xlabel("Distance between the two clusters' partitions")
-        axis.set_ylabel("Interaction error, rms (%)")
+        axis.set_ylabel("Far field's error, rms (%)")
         axis.grid(True, which='major', color='0.9', linewidth=0.8)
         axis.spines[['top', 'right']].set_visible(False)
         axis.legend(frameon=False)
-        axis.set_title("Error of the strain a cluster's polarization causes in\nanother, against the exact "
-                       "interaction (full reach)")
-        figure.savefig(folder / "reach.png")
+        axis.set_title("The far field alone against the exact interaction")
+        figure.savefig(folder / "far_field.png")
     plt.close(figure)
     return errors
-
-## ------- Figure 4: the patch test ------- ##
-
-def draw_patch_test():
-    mesh, clusters = get_clusters(64, 16, 2)
-    matrix_L = cell.get_matrix_L()
-    uniform_strain = np.array(strain(e11=1.0))
-    polarization = np.tile(matrix_L @ uniform_strain, (clusters.cluster_count, 1))
-    shape = mesh.discretization.element_lattice_shape[1:]
-    maps = {}
-    for reach in (0, 1, "full"):
-        change = fft_tfa_model.get_strain_change(fft_tfa_model.get_interaction(mesh, clusters, reach), polarization)
-        maps[reach] = 100 * np.abs(change[:, 0])[clusters.element_cluster].reshape(shape)
-    largest = max(values.max() for values in maps.values())
-    with plt.rc_context(style):
-        figure, axes = plt.subplots(1, 3, figsize=(11, 3.9), layout='constrained')
-        for axis, (reach, values) in zip(axes, maps.items()):
-            image = axis.imshow(values, origin='lower', extent=(0, 1, 0, 1), cmap=plots.field_map_colormap, vmin=0,
-                                vmax=largest)
-            axis.set_title(f"{'full reach' if reach == 'full' else f'reach {reach}'}: largest {values.max():.2g} %")
-            axis.set_axis_off()
-        figure.colorbar(image, ax=axes, label=r"spurious strain $|\Delta\varepsilon_{11}|$ (% of $\mathbf{L}_M^{-1}\boldsymbol{\tau}$)",
-                        shrink=0.85)
-        figure.savefig(folder / "patch_test.png")
-    plt.close(figure)
-    return {reach: values.max() for reach, values in maps.items()}
 
 if __name__ == "__main__":
     draw_grids()
     draw_polarization()
-    errors = draw_reach()
-    print("interaction error by distance (%):", {label: np.round(100 * error, 3) for label, error in errors.items()})
-    print("patch test, largest spurious strain (%):", draw_patch_test())
+    draw_summary()
+    errors = draw_far_field()
+    print("far field's error by distance (%):", {degree: np.round(100 * error, 3) for degree, error in errors.items()})

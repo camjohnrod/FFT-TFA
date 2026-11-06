@@ -163,7 +163,7 @@ $$
 
 **(LS-8) The same in eigenstrain form:** $\mathbf P_0^{BA}=\mathbf D_0^{BA}\mathbf C_0$, acting on $\boldsymbol\mu^*$ of LS-6.
 
-The code does not evaluate this double integral. It follows the elements' kernel by linearity: a unit eigenstrain in a partition is one in each of its elements, and a partition's strain is the mean over its elements, so, for partitions of $k\times k\times k_3$ elements, with $|d_1|,|d_2|<k$, $|d_3|<k_3$ and $\mathbf K=(k,k,k_3)$ acting componentwise,
+The code does not evaluate this double integral. FFT-TFA's moment kernels follow the elements' kernel by linearity (`fft_tfa_model.get_moment_kernels`, whose degree-0 kernel is this one): a unit eigenstrain in a partition is one in each of its elements, and a partition's strain is the mean over its elements, so, for partitions of $k\times k\times k_3$ elements, with $|d_1|,|d_2|<k$, $|d_3|<k_3$ and $\mathbf K=(k,k,k_3)$ acting componentwise,
 
 $$
 \mathbf P_0[\mathbf D]=\sum_{\mathbf d}\frac{(k-|d_1|)(k-|d_2|)(k_3-|d_3|)}{k^2k_3}\,\mathbf p_0^{\rm el}[\mathbf K\mathbf D+\mathbf d].
@@ -262,13 +262,14 @@ Convergence and the line search judge $\tilde{\mathbf R}$; the Newton correction
 ## 5. FFT-TFA
 
 FFT-TFA, the method under development, is derived in `0_fft_tfa_lecture.md`, which holds equations FT-1 to FT-7: TFA's
-clusters interacting through LS-5 with $\mathbf C_0=\mathbf L_m$, averaged over the clusters, applied by an FFT on the
-partitions (sections 3.2–3.3) plus exact corrections between the clusters of nearby partitions.
+clusters interacting through LS-5 with $\mathbf C_0=\mathbf L_m$, averaged over the clusters. Each partition interacts with
+its own clusters exactly, and with every other partition through its polynomial moments, by an FFT on the partitions
+(section 3.3); at degree 0 that is the partition interaction of section 3.2.
 
 ## 6. Open points
 
 - **Convergence in $M$.** Schneider (2019) proves convergence of clustered Lippmann–Schwinger equations as clusters are refined, for hardening materials only. FFT-TFA's own open points are in the README's roadmap.
-- **The partition kernel is not the exact partition average.** It can be computed from the partition lattice alone, as a weighted sum over aliases: `1_research_context.md`, sections 2–3.
+- **FFT-TFA's moment kernels follow the element kernel, not the exact partition average.** The degree-0 one can be computed from the partition lattice alone, as a weighted sum over aliases: `1_research_context.md`, sections 2–3.
 
 ## Paper references
 

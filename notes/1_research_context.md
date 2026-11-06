@@ -214,9 +214,11 @@ lists as citing Brisard–Dormieux 2010, Brisard–Dormieux 2012 or Schneider 20
 Titles only flag candidates; none was read.
 
 **Not found in the papers read:**
-- **Our scheme with plasticity**: uniform partitions, a partition-averaged Green operator, FFT on the partition
-  lattice, J2 plasticity. It is the natural extension of Brisard–Dormieux and is covered by Schneider's theory for
-  hardening materials, so it would read as an extension rather than a new method.
+- **Our scheme with plasticity**: uniform partitions with clusters inside them, each partition summarized by
+  polynomial moments of its polarization and its own clusters interacting exactly, FFT on the partition lattice, J2
+  plasticity. Its degree-0 core (one polarization per partition, a partition-averaged Green operator) is the natural
+  extension of Brisard–Dormieux and is covered by Schneider's theory for hardening materials. The near/far split itself
+  resembles fast summation methods from other fields (precorrected FFT, fast multipole), not read yet.
 - **LS and TFA compared numerically on identical partitions.** Schneider relates them formally (section 1); nobody in
   the papers read computes both.
 
