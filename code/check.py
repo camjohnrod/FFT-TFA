@@ -34,6 +34,7 @@ touched.
 
 import contextlib
 import io
+import itertools
 import sys
 import tempfile
 import pathlib
@@ -258,6 +259,35 @@ def get_patch_test_error(mesh, clusters, degree):
     polarization = np.tile(cell.get_matrix_L() @ unit_strain, (clusters.cluster_count, 1))
     return np.abs(fft_tfa_model.get_strain_change(interaction, polarization)).max() / np.abs(unit_strain).max()
 
+# Partition shapes [z, y, x] whose polynomial basis is checked: wider than the problems' partitions, since a basis built
+# from monomials loses its high degrees to round-off only from about 8 elements across.
+basis_check_shapes = [(1, 3, 3), (1, 8, 8), (1, 16, 16), (4, 4, 4), (8, 8, 8)]
+
+def get_basis_error(block_shape, degree):
+    """How far a partition's polynomial basis is from what FFT-TFA needs: orthonormal, the constant first, and as many
+    polynomials as the products of axis degrees adding up to `degree` (at full degree, one per element). Returns the
+    largest error of the first two, or infinity if the count is wrong."""
+    basis = fft_tfa_model.get_polynomial_basis(np.array(block_shape), degree)
+    basis = basis.reshape(-1, basis.shape[-1])
+    axis_degrees = [range(min(degree, size - 1) + 1) for size in block_shape if size > 1]
+    expected_count = sum(1 for e in itertools.product(*axis_degrees) if sum(e) <= degree)
+    if basis.shape[1] != expected_count:
+        return np.inf
+    constant = np.full(len(basis), 1 / np.sqrt(len(basis)))
+    return max(np.abs(basis.T @ basis - np.eye(basis.shape[1])).max(), np.abs(basis[:, 0] - constant).max())
+
+def check_polynomial_basis():
+    all_passed = True
+    for block_shape in basis_check_shapes:
+        full = int(np.sum(np.array(block_shape) - 1))
+        for degree in (0, 2, full):
+            error = get_basis_error(block_shape, degree)
+            all_passed &= report(error <= config.interaction_check_tolerance,
+                                 f"polynomial basis on {block_shape} elements at degree {degree}: orthonormal, constant "
+                                 f"first, complete (largest error {error:.1e}, tolerance "
+                                 f"{config.interaction_check_tolerance:.0e})")
+    return all_passed
+
 def solve_at_full_degree(mesh, clusters):
     return solve_load_path(fft_tfa_model.FFTTFASolver(fft_tfa_model.get_interaction(mesh, clusters, "full")))
 
@@ -400,7 +430,7 @@ def main():
         with np.load(saved_results_path) as saved:
             saved_results = {name: saved[name] for name in saved.files}
 
-    all_passed = True
+    all_passed = check_polynomial_basis()
     result_arrays = {}
     with tempfile.TemporaryDirectory() as cache_folder:
         for problem_name, problem_inputs in check_problems.items():

@@ -274,8 +274,9 @@ $$
 $$
 
 $\varphi(\alpha)$ is the polynomial's value at $\alpha$'s position *inside its own partition*, so every partition has
-the same polynomials. The first is the constant, $1/\sqrt{\lvert A\rvert}$ (`fft_tfa_model.get_polynomial_basis`, by
-Gram–Schmidt). Their number $N_{\text{poly}}$ is 1, 3, 6, 10 for degrees 0–3 in 2D, and 1, 4, 10, 20 in 3D.
+the same polynomials. The first is the constant, $1/\sqrt{\lvert A\rvert}$ (`fft_tfa_model.get_polynomial_basis`: the
+elements lie on a grid, so products of orthonormal polynomials along each axis are orthonormal). Their number
+$N_{\text{poly}}$ is 1, 3, 6, 10 for degrees 0–3 in 2D, and 1, 4, 10, 20 in 3D.
 
 #### Step 2 · Summarize each partition's polarization by its moments
 

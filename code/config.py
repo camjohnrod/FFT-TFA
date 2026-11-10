@@ -53,7 +53,8 @@ fft_tfa     = [dict(partitions=4,   matrix_clusters=4, inclusion_clusters=1, deg
 #   C0                  its reference stiffness, which does not change its answer: "midpoint" of the phases, or "matrix"
 #                       (about as fast at contrast 34, 17 % slower at contrast 100)
 spectral_ls = [dict(elements=64,   C0="midpoint"), 
-               dict(elements=128,  C0="midpoint")]
+               dict(elements=128,  C0="midpoint"), 
+               dict(elements=256,  C0="midpoint")]
 
 # TFA, the baseline (notes/3_tfa_baseline.md): clusters interacting through FE influence functions, built once and
 # cached. Its settings mean the same as FFT-TFA's. It stores (6 × clusters)² doubles, which preview reports.
@@ -129,7 +130,7 @@ newton_max_iterations       = 50
 # Both Krylov methods stop below krylov_tolerance times the Newton residual. GMRES restarts every gmres_restart
 # iterations, at most gmres_max_restarts times (None: scipy's default); CG takes at most cg_max_iterations
 # (None: ten times the unknowns, as scipy's).
-krylov_tolerance            = 1e-6
+krylov_tolerance            = 1e-2
 gmres_restart               = 50
 gmres_max_restarts          = None
 cg_max_iterations           = None
