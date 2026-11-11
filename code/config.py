@@ -46,19 +46,14 @@ clustered_mesh              = 256       # elements per side
 #   inclusion_clusters  per partition's inclusion part; an elastic inclusion needs one
 #   degree              of the polynomials summarizing each partition: 0 its mean only; higher converges to the exact
 #                       interaction, "full" is exact. About 2–4 in 2D, 2 in 3D, where the kernels grow fast (preview)
-fft_tfa     = [dict(partitions=4,   matrix_clusters=4, inclusion_clusters=1, degree=3), 
-               dict(partitions=8,   matrix_clusters=4, inclusion_clusters=1, degree=3), 
-               dict(partitions=16,  matrix_clusters=4, inclusion_clusters=1, degree=3), 
-               dict(partitions=32,  matrix_clusters=4, inclusion_clusters=1, degree=3), 
-               dict(partitions=64,  matrix_clusters=4, inclusion_clusters=1, degree=3)]
+fft_tfa = [[dict(partitions=p, matrix_clusters=2, inclusion_clusters=1, degree=3) for p in (4, 8, 16)],
+           [dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=3) for p in (4, 8, 16)]]
     
 # Spectral LS, the standard Moulinec–Suquet method, one cluster per element.
 #   elements            per side: its own mesh, coarser or finer than clustered_mesh
 #   C0                  its reference stiffness, which does not change its answer: "midpoint" of the phases, or "matrix"
 #                       (about as fast at contrast 34, 17 % slower at contrast 100)
-spectral_ls = [dict(elements=64,   C0="midpoint"), 
-               dict(elements=128,  C0="midpoint"), 
-               dict(elements=256,  C0="midpoint")]
+spectral_ls = [dict(elements=e, C0="midpoint") for e in (32, 64, 128, 256)]
 
 # TFA, the baseline (lecture, section 4 and appendix C): clusters interacting through FE influence functions, built once and
 # cached. Its settings mean the same as FFT-TFA's. It stores (6 × clusters)² doubles, which preview reports.
