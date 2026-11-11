@@ -97,7 +97,7 @@ pinned_inputs = {
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
     "k_means_iterations": 50, "k_means_seed": 0, "k_means_start": "++", "fiber_placement_attempts": 100000,
     "fiber_push_margin": 1e-3, "fiber_push_passes": 10000, "reference": None, "k_means_features_C0": "midpoint",
-    "timing_repeats": 1, "memory_limit_GB": None, "map_turning_point": "last"}
+    "memory_limit_GB": None, "map_turning_point": "last"}
 
 # What each problem changes from pinned_inputs.
 check_problems = {
@@ -317,8 +317,8 @@ def solve_check_problem(problem_inputs, cache_folder):
     config.check_inputs()
     load_path = run.get_load_path()
     with contextlib.redirect_stdout(io.StringIO()):
-        results = run.solve_all(load_path, np.arange(len(load_path.applied_macro_strain)))
-    return {label: entry_result.load_path_result for label, entry_result in results.items()}
+        results, _ = run.solve_all(load_path, np.arange(len(load_path.applied_macro_strain)))
+    return results
 
 def report(passed, description):
     print(f"[{'PASS' if passed else 'FAIL'}] {description}")
@@ -354,13 +354,14 @@ def check_reference(problem_name, spectral_ls_result):
     fields at the turning points, to the bit, and asking for it again loads the same arrays from its cache."""
     load_path = run.get_load_path()
     with contextlib.redirect_stdout(io.StringIO()):
-        reference, reloaded = run.get_reference(load_path), run.get_reference(load_path)
+        (reference, _), (reloaded, _) = run.get_reference(load_path), run.get_reference(load_path)
     turning_steps = load_path.turning_steps
+    fields = ("macro_stress", "cluster_stress", "accumulated_plastic_strain")
     return report(np.array_equal(reference.macro_stress, spectral_ls_result.macro_stress)
-                  and np.array_equal(reference.stress, spectral_ls_result.cluster_stress[turning_steps])
+                  and np.array_equal(reference.cluster_stress, spectral_ls_result.cluster_stress[turning_steps])
                   and np.array_equal(reference.accumulated_plastic_strain,
                                      spectral_ls_result.accumulated_plastic_strain[turning_steps])
-                  and all(np.array_equal(solved, loaded) for solved, loaded in zip(reference, reloaded)),
+                  and all(np.array_equal(getattr(reference, field), getattr(reloaded, field)) for field in fields),
                   f"{problem_name}: the reference at the working resolution equals Spectral LS bit for bit, and loads "
                   "back from its cache unchanged")
 

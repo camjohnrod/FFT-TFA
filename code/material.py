@@ -42,8 +42,10 @@ def get_deviatoric_stress(stress):
     return stress @ deviatoric_projector.T
 
 def get_equivalent_stress(deviatoric_stress):
-    """The von Mises stress √(3/2 s:s) of each deviatoric stress row s (shear rows count twice in s:s)."""
-    return np.sqrt(1.5 * np.sum(deviatoric_stress[:, :3]**2, axis=1) + 3 * np.sum(deviatoric_stress[:, 3:]**2, axis=1))
+    """The von Mises stress √(3/2 s:s) of each deviatoric stress s, its 6 components along the last axis (shear
+    components count twice in s:s)."""
+    return np.sqrt(1.5 * np.sum(deviatoric_stress[..., :3]**2, axis=-1)
+                   + 3 * np.sum(deviatoric_stress[..., 3:]**2, axis=-1))
 
 def get_von_mises_stress(stress):
     return get_equivalent_stress(get_deviatoric_stress(stress))

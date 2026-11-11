@@ -72,16 +72,14 @@ results_name                = "test"   # names the results folder, nothing else
 # The maps show the fields at this turning point of the load path: 1 is the first; "last" on a cyclic path is back at
 # zero strain, so residual stress. replot uses this section's figure settings on a saved run.
 map_turning_point           = "last"
-field_maps_matrix_only      = True     # grey out the inclusion, whose large stresses would set the colour scale
-# Colour scales (min, max), to share one across runs. None: from the finest field (the reference, else Spectral LS).
-von_mises_range_MPa         = (None, None)
+field_maps_matrix_only      = True     # grey out the inclusion, so the matrix's values set the colour scale
+# Colour scale (min, max), to share one across runs. None: from the finest field (the reference, else Spectral LS).
 plastic_strain_range_percent = (None, None)
 # The stress errors cover each component whose reference value reaches this fraction of the largest one.
 loaded_stress_fraction      = 0.05
 
 thread_count                = 1        # for every method alike
 memory_limit_GB             = 5        # an entry needing more stops with an error, the others carry on; None: no limit
-timing_repeats              = 1        # runs per entry, in turn, keeping the fastest; timing noise reaches 30 %
 
 ## ======= 4. Lists to Choose From ======= ##
 
@@ -238,8 +236,8 @@ def check_inputs():
         raise ValueError(f"load_path must be one of all_load_paths: {', '.join(all_load_paths)}. Got {load_path!r}.")
     if not any(all_load_paths[load_path][0]):
         raise ValueError("A load path's first turning point must not be zero: it sets the step length.")
-    if steps_to_first_turning_point < 1 or timing_repeats < 1:
-        raise ValueError("steps_to_first_turning_point and timing_repeats must be at least 1.")
+    if steps_to_first_turning_point < 1:
+        raise ValueError("steps_to_first_turning_point must be at least 1.")
 
     if not (fft_tfa or spectral_ls or tfa):
         raise ValueError("Nothing to run: fft_tfa, spectral_ls and tfa are all empty.")
@@ -265,9 +263,8 @@ def check_inputs():
     if map_turning_point != "last" and not 1 <= map_turning_point <= len(all_load_paths[load_path]):
         raise ValueError(f"map_turning_point must be \"last\" or from 1 to {len(all_load_paths[load_path])}, this load "
                          f"path's turning points. Got {map_turning_point!r}.")
-    for name, (minimum, maximum) in (("von_mises_range_MPa", von_mises_range_MPa),
-                                     ("plastic_strain_range_percent", plastic_strain_range_percent)):
-        if minimum is not None and maximum is not None and minimum >= maximum:
-            raise ValueError(f"{name}: the minimum must be below the maximum.")
+    minimum, maximum = plastic_strain_range_percent
+    if minimum is not None and maximum is not None and minimum >= maximum:
+        raise ValueError("plastic_strain_range_percent: the minimum must be below the maximum.")
 
 check_inputs()
