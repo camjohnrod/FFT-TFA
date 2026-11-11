@@ -143,7 +143,50 @@ def draw_summary():
         figure.savefig(folder / "summary.png")
     plt.close(figure)
 
-## ------- Figure 4: where the far field is accurate enough ------- ##
+## ------- Figure 4: the orthonormal polynomials, and a cluster's indicator projected onto them ------- ##
+
+def draw_basis():
+    """The six orthonormal polynomials of degree at most 2 on a partition of 8 × 8 elements, and one cluster's indicator
+    χ_b with its projection Σ_ψ m(b, ψ) ψ at increasing degree, with the share of χ_b the projection misses."""
+    mesh, clusters = get_clusters(64, 8, 2)
+    discretization = mesh.discretization
+    block = discretization.partition_shape_in_elements
+    basis = fft_tfa_model.get_polynomial_basis(block, 2)[0]
+    # A partition the fiber's edge crosses, and its larger matrix cluster.
+    inclusion_share = np.bincount(mesh.element_partition, weights=mesh.element_phase) / np.prod(block)
+    partition = int(np.argmin(np.abs(inclusion_share - 0.4)))
+    in_partition = np.flatnonzero(clusters.cluster_partition == partition)
+    matrix_clusters = in_partition[clusters.materials.phase[in_partition] == 0]
+    cluster = matrix_clusters[np.argmax(np.bincount(clusters.element_cluster)[matrix_clusters])]
+    elements = np.flatnonzero(mesh.element_partition == partition)
+    _, y, x = np.unravel_index(elements, discretization.element_lattice_shape)
+    indicator = np.zeros(block[1:])
+    indicator[y % block[1], x % block[2]] = clusters.element_cluster[elements] == cluster
+    titles = ["$1$", "$x$", "$y$", "$x^2$", "$xy$", "$y^2$"]
+    with plt.rc_context(style):
+        figure, axes = plt.subplots(2, 6, figsize=(12, 4.6), layout='constrained')
+        largest = np.abs(basis).max()
+        for axis, values, title in zip(axes[0], np.moveaxis(basis, -1, 0), titles):
+            image = axis.imshow(values, origin='lower', cmap='RdBu_r', vmin=-largest, vmax=largest)
+            axis.set_title(f"from {title}")
+            axis.set_axis_off()
+        figure.colorbar(image, ax=axes[0], label="value", shrink=0.85)
+        axes[1, 0].imshow(indicator, origin='lower', cmap='RdBu_r', vmin=-1, vmax=1)
+        axes[1, 0].set_title(r"$\chi_b$, one cluster")
+        for axis, degree in zip(axes[1, 1:], (0, 1, 2, 4, 6)):
+            polynomials = fft_tfa_model.get_polynomial_basis(block, degree)[0]
+            moments = np.einsum('yxp,yx->p', polynomials, indicator)
+            projection = polynomials @ moments
+            missed = np.linalg.norm(indicator - projection) / np.linalg.norm(indicator)
+            image = axis.imshow(projection, origin='lower', cmap='RdBu_r', vmin=-1, vmax=1)
+            axis.set_title(f"degree {degree}: misses {100 * missed:.0f} %")
+        for axis in axes[1]:
+            axis.set_axis_off()
+        figure.colorbar(image, ax=axes[1], label="value", shrink=0.85)
+        figure.savefig(folder / "basis.png")
+    plt.close(figure)
+
+## ------- Figure 5: where the far field is accurate enough ------- ##
 
 def get_partition_distance(clusters, partition_shape):
     # Every cluster pair's distance in partitions along the farthest axis, periodic.
@@ -238,5 +281,6 @@ if __name__ == "__main__":
     draw_grids()
     draw_polarization()
     draw_summary()
+    draw_basis()
     errors = draw_far_field()
     print("far field's error by distance (%):", {degree: np.round(100 * error, 3) for degree, error in errors.items()})

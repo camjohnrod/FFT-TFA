@@ -172,6 +172,12 @@ Open for FFT-TFA (`notes/0_fft_tfa_lecture.md`, section 10):
   high degree, since the sharp near field then reaches past a partition. Open: the kernels' memory grows with the
   square of the polynomials (in 3D, 10 at degree 2 and 20 at degree 3); halving it by their symmetry, or keeping only
   pairs of total degree up to the degree, are untried.
+- **Bug, to fix: `degree = "full"` is not full on partitions 8 or more elements across.** `get_polynomial_basis` drops
+  a monomial when its Gram–Schmidt remainder is below an absolute `1e-8`, and the high powers of positions in
+  [−½, ½] fall below it: 8² gives 63 polynomials of 64, 12² 104 of 144, 16² 120 of 256, so the full degree is no
+  longer exact there (`check.py` misses it: its partitions are smaller). Fix: build the basis as products of
+  orthonormal polynomials along each axis (stable, the same span, so answers change only at round-off); run
+  `check.py save` first, then compare by tolerance, since round-off breaks the bit-for-bit check.
 - **Inclusion polarization:** one polarization per inclusion cluster; σ33 along z-invariant fibers runs low. Splitting a
   partition's fiber part by fiber makes FFT-TFA stiffer and less accurate, with the exact interaction too: with the matrix as C0, a
   coarser fiber polarization errs soft (Brisard–Dormieux 2010's Hashin–Shtrikman bound), offsetting the stiff error of
