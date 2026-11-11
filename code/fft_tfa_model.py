@@ -25,16 +25,17 @@ import numpy as np
 import scipy.sparse
 
 from cell import Clusters, get_matrix_L
-from ls_model import apply_on_lattice, apply_sparse, assemble_blocks, get_moulinec_suquet_kernel, to_fourier_blocks
-from material import apply_blocks, get_algorithmic_stiffness, radial_return
-from newton import Evaluation, Solver, solve_by_gmres
+from ls_model import apply_on_lattice, get_moulinec_suquet_kernel, to_fourier_blocks
+from material import get_algorithmic_stiffness, radial_return
+from newton import (Evaluation, Solver, apply_blocks, apply_sparse, assemble_blocks, get_block_indices,
+                    solve_by_gmres)
 
 ## ------- Polynomials on a Partition ------- ##
 
-def resolve_degree(degree, discretization):
+def resolve_degree(degree, mesh):
     """degree as a number: "full" is the degree whose polynomials span every function on a partition's elements, the sum
     over its axes of their element count minus one."""
-    return int(np.sum(discretization.partition_shape_in_elements - 1)) if degree == "full" else degree
+    return int(np.sum(mesh.partition_size - 1)) if degree == "full" else degree
 
 def get_axis_polynomials(size):
     """Orthonormal polynomials of degree 0 to size − 1 on `size` equally spaced points, the constant first: one column
@@ -72,25 +73,23 @@ def get_polynomial_basis(block_shape, degree):
         columns.append(values.ravel())
     return np.column_stack(columns).reshape(*block_shape, -1)
 
-def get_cluster_moments(discretization, clusters, basis):
+def get_cluster_moments(clusters, basis):
     """Every cluster's moments m, clusters × p: each polynomial summed over the cluster's elements. A cluster's
     polarization τ contributes m_i τ to its partition's moment i."""
-    block = discretization.partition_shape_in_elements
-    z, y, x = np.unravel_index(np.arange(discretization.element_count), discretization.element_lattice_shape)
+    block = clusters.mesh.partition_size
+    z, y, x = np.unravel_index(np.arange(clusters.mesh.element_count), clusters.mesh.element_shape)
     moments = np.zeros((clusters.cluster_count, basis.shape[-1]))
     np.add.at(moments, clusters.element_cluster, basis[z % block[0], y % block[1], x % block[2]])
     return moments
 
 ## ------- Far Field: Moment Kernels (FT-2) ------- ##
 
-def get_moment_kernels(element_Gamma, discretization, basis):
+def get_moment_kernels(element_Gamma, mesh, basis):
     """How each partition's moments act on every other's, at every partition offset D = A − B, shape
     (partition lattice, p, 6, p, 6): the strain in A's polynomial j per unit polarization in B's polynomial i,
       K_ji(D) = Σ_{α in A, β in B} φ_j(α) Γ(α←β) φ_i(β) = Σ_d w_ji(d) Γ(k D + d),   w_ji(d) = Σ_r φ_j(r) φ_i(r − d),
     with d the offset between the two elements' positions inside their partitions."""
-    block = discretization.partition_shape_in_elements
-    element_shape = discretization.element_lattice_shape
-    partition_shape = discretization.partition_lattice_shape
+    block, element_shape, partition_shape = mesh.partition_size, mesh.element_shape, mesh.partition_shape
     p = basis.shape[-1]
     kernels = np.zeros((p, p, *partition_shape, 6, 6))
     starts = [block[axis] * np.arange(partition_shape[axis]) for axis in range(3)]
@@ -113,9 +112,9 @@ class PartitionSlots(NamedTuple):
     element_count: np.ndarray    # partitions × slots: the cluster's elements (1 in an empty slot, to divide by)
     cluster_slot: np.ndarray     # clusters: each cluster's slot in its partition
 
-def get_partition_slots(mesh, clusters):
-    discretization = mesh.discretization
-    block_shape = discretization.partition_shape_in_elements
+def get_partition_slots(clusters):
+    mesh = clusters.mesh
+    block_shape = mesh.partition_size
     partition_count = clusters.partition_count
     clusters_per_partition = np.bincount(clusters.cluster_partition, minlength=partition_count)
     first_cluster = np.cumsum(clusters_per_partition) - clusters_per_partition
@@ -123,8 +122,7 @@ def get_partition_slots(mesh, clusters):
     slot_count = clusters_per_partition.max()
     occupied = np.zeros((partition_count, slot_count), dtype=bool)
     occupied[clusters.cluster_partition, cluster_slot] = True
-    element_z, element_y, element_x = np.unravel_index(np.arange(discretization.element_count),
-                                                       discretization.element_lattice_shape)
+    element_z, element_y, element_x = np.unravel_index(np.arange(mesh.element_count), mesh.element_shape)
     indicators = np.zeros((partition_count, slot_count, *block_shape))
     element_cluster = clusters.element_cluster
     indicators[clusters.cluster_partition[element_cluster], cluster_slot[element_cluster], element_z % block_shape[0],
@@ -132,7 +130,7 @@ def get_partition_slots(mesh, clusters):
     element_count = np.maximum(indicators.sum(axis=(2, 3, 4)), 1)
     return PartitionSlots(first_cluster, occupied, indicators, element_count, cluster_slot)
 
-def get_correction_blocks(mesh, clusters, element_Gamma, moments, self_kernels):
+def get_correction_blocks(clusters, element_Gamma, moments, self_kernels):
     """FT-3's corrections C, for every pair of clusters a, b in the same partition, as sparse 6 × 6 blocks, clusters ×
     clusters: the exact interaction Γ(a←b) minus the far field's share of it.
 
@@ -140,11 +138,9 @@ def get_correction_blocks(mesh, clusters, element_Gamma, moments, self_kernels):
     partition, which n_ab(δ) pairs share (the cross-correlation of the two clusters' indicators, by FFT),
       Γ(a←b) = (1 / n_a) Σ_δ n_ab(δ) Γ(δ),
     while the far field gives Σ_ji (m_j(a) / n_a) K_ji(0) m_i(b), with m the clusters' moments."""
-    discretization = mesh.discretization
-    block_shape = discretization.partition_shape_in_elements
-    element_shape = discretization.element_lattice_shape
+    block_shape, element_shape = clusters.mesh.partition_size, clusters.mesh.element_shape
     partition_count = clusters.partition_count
-    slots = get_partition_slots(mesh, clusters)
+    slots = get_partition_slots(clusters)
     slot_count = slots.occupied.shape[1]
 
     # Step 1: the pair counts n_ab(δ) of every partition, by cross-correlation. Padded to twice the partition, it holds
@@ -165,9 +161,9 @@ def get_correction_blocks(mesh, clusters, element_Gamma, moments, self_kernels):
     far = np.einsum('Aaj,Abi,jxiy->Aabxy', slot_moments / slots.element_count[:, :, None], slot_moments, self_kernels)
     pairs = slots.occupied[:, :, None] & slots.occupied[:, None, :]
     partition, receiving_slot, source_slot = np.nonzero(pairs)
-    return assemble_blocks((exact - far)[pairs], slots.first_cluster[partition] + receiving_slot,
-                           slots.first_cluster[partition] + source_slot,
-                           (clusters.cluster_count, clusters.cluster_count))
+    return assemble_blocks((exact - far)[pairs], get_block_indices(slots.first_cluster[partition] + receiving_slot),
+                           get_block_indices(slots.first_cluster[partition] + source_slot),
+                           (6 * clusters.cluster_count, 6 * clusters.cluster_count))
 
 ## ------- Interaction (FT-2, FT-4) ------- ##
 
@@ -200,23 +196,23 @@ def get_own_strain_change(clusters, moments, self_kernels, correction_blocks):
     mean_row_sum = np.einsum('q,qij->ij', weights, row_sums)
     return own - column_mean - weights[:, None, None] * (row_sums - mean_row_sum)
 
-def get_interaction(mesh, clusters, degree):
+def get_interaction(clusters, degree):
     """FFT-TFA's operators on its clusters, with each partition's polarization summarized by its polynomial moments up
     to `degree` (a number, or "full")."""
-    discretization = mesh.discretization
+    mesh = clusters.mesh
     matrix_L = get_matrix_L()
-    element_shape = discretization.element_lattice_shape
+    element_shape = mesh.element_shape
     # Γ = P0 C0⁻¹: the element-level strain per unit polarization.
     element_Gamma = (get_moulinec_suquet_kernel(element_shape, matrix_L).reshape(*element_shape, 6, 6)
                      @ np.linalg.inv(matrix_L))
-    basis = get_polynomial_basis(discretization.partition_shape_in_elements, resolve_degree(degree, discretization))
+    basis = get_polynomial_basis(mesh.partition_size, resolve_degree(degree, mesh))
     p = basis.shape[-1]
-    kernels = get_moment_kernels(element_Gamma, discretization, basis)
+    kernels = get_moment_kernels(element_Gamma, mesh, basis)
     self_kernels = kernels[0, 0, 0]
-    moment_kernels = to_fourier_blocks(kernels.reshape(-1, 6 * p), discretization.partition_lattice_shape)
+    moment_kernels = to_fourier_blocks(kernels.reshape(-1, 6 * p), mesh.partition_shape)
 
     # Moments ordered partition by partition, then polynomial by polynomial: one row of 6 per polynomial.
-    moments = get_cluster_moments(discretization, clusters, basis)
+    moments = get_cluster_moments(clusters, basis)
     element_counts = np.bincount(clusters.element_cluster, minlength=clusters.cluster_count)
     rows = (clusters.cluster_partition[:, None] * p + np.arange(p)).ravel()
     columns = np.repeat(np.arange(clusters.cluster_count), p)
@@ -227,8 +223,7 @@ def get_interaction(mesh, clusters, degree):
 
     # The corrections are applied at every residual and Jacobian product; stored as dense 6 × 6 blocks (BSR), a product
     # reads one column index per block instead of one per entry.
-    correction_blocks = get_correction_blocks(mesh, clusters, element_Gamma, moments,
-                                              self_kernels).tobsr(blocksize=(6, 6))
+    correction_blocks = get_correction_blocks(clusters, element_Gamma, moments, self_kernels).tobsr(blocksize=(6, 6))
     return Interaction(clusters, matrix_L, to_moments, from_moments, moment_kernels, correction_blocks,
                        get_own_strain_change(clusters, moments, self_kernels, correction_blocks))
 
@@ -250,10 +245,11 @@ def get_strain_change(interaction, polarization):
 
 class FFTTFASolver(Solver):
     """FFT-TFA: Newton on the cluster strains. Its residual is a strain error, like TFA's, judged by its volume average
-    over the clusters; with the matrix as reference medium it is in matrix units already (FT-5)."""
-    def __init__(self, interaction):
-        super().__init__(interaction.clusters, interaction.clusters.cluster_count)
-        self.interaction = interaction
+    over the clusters; with the matrix as reference medium it is in matrix units already (FT-5). degree: how finely
+    each partition's polarization is summarized for the others (a number, or "full")."""
+    def __init__(self, clusters, degree):
+        super().__init__(clusters, clusters.cluster_count)
+        self.interaction = get_interaction(clusters, degree)
 
     def evaluate(self, strain, macro_strain, plastic_history):
         """FT-5: r = ε − ε̄ + (FT-2's strain change), with each cluster's polarization (FT-1)

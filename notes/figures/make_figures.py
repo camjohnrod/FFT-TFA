@@ -36,8 +36,9 @@ load_path = np.linspace(0, 1, 21)[1:, None] * np.array(strain(e11=0.02, g12=0.02
 
 def get_clusters(clustered_mesh, partitions, matrix_clusters):
     config.clustered_mesh = clustered_mesh
-    return run.get_mesh_and_clusters(dict(partitions=partitions, matrix_clusters=matrix_clusters,
-                                          inclusion_clusters=1))
+    clusters = run.get_partition_clusters(dict(partitions=partitions, matrix_clusters=matrix_clusters,
+                                               inclusion_clusters=1))
+    return clusters.mesh, clusters
 
 def draw_phases(axis, image, title):
     axis.imshow(image, origin='lower', extent=(0, 1, 0, 1), **({} if image.ndim == 3 else
@@ -50,7 +51,7 @@ def draw_phases(axis, image, title):
 
 def draw_grids():
     mesh, clusters = get_clusters(32, 4, 3)
-    shape = mesh.discretization.element_lattice_shape[1:]
+    shape = mesh.element_shape[1:]
     phase = mesh.element_phase.reshape(shape)
     element_ids = np.arange(phase.size).reshape(shape)
     partition = mesh.element_partition.reshape(shape)
@@ -77,10 +78,10 @@ def get_tensor_norm(stress):
 
 def draw_polarization():
     elements = 64
-    operators = ls_model.get_spectral_ls_operators(elements, "midpoint")
-    solver = ls_model.SpectralLSSolver(operators)
+    clusters = ls_model.get_element_clusters(elements)
+    solver = ls_model.SpectralLSSolver(clusters, "midpoint")
     matrix_L = cell.get_matrix_L()
-    history = get_unloaded_plastic_state(operators.clusters.cluster_count)
+    history = get_unloaded_plastic_state(clusters.cluster_count)
     maps = {}
     for step, macro_strain in enumerate(load_path):
         result = solver.solve_step(macro_strain, history)
@@ -106,23 +107,21 @@ def draw_summary():
     """FFT-TFA's cluster polarizations at the end of figure 2's load, and each partition's best-fitting polynomial of
     degree 0, 1 and 3: τ(β) ≈ Σ_ψ ψ(β) τ(B, ψ)."""
     mesh, clusters = get_clusters(64, 4, 2)
-    discretization = mesh.discretization
-    interaction = fft_tfa_model.get_interaction(mesh, clusters, 1)
-    solver = fft_tfa_model.FFTTFASolver(interaction)
+    solver = fft_tfa_model.FFTTFASolver(clusters, 1)
     history = get_unloaded_plastic_state(clusters.cluster_count)
     for macro_strain in load_path:
         result = solver.solve_step(macro_strain, history)
         history = result.plastic_state
     matrix_L = cell.get_matrix_L()
     polarization = result.stress - result.strain @ matrix_L.T
-    component, shape = 3, discretization.element_lattice_shape
+    component, shape = 3, mesh.element_shape
     maps = {"Polarization: uniform\non each cluster": polarization[clusters.element_cluster, component]}
-    block = discretization.partition_shape_in_elements
-    z, y, x = np.unravel_index(np.arange(discretization.element_count), shape)
+    block = mesh.partition_size
+    z, y, x = np.unravel_index(np.arange(mesh.element_count), shape)
     for degree in (0, 1, 3):
         basis = fft_tfa_model.get_polynomial_basis(block, degree)
         element_basis = basis[z % block[0], y % block[1], x % block[2]]
-        moments = fft_tfa_model.get_cluster_moments(discretization, clusters, basis)
+        moments = fft_tfa_model.get_cluster_moments(clusters, basis)
         partition_moments = np.zeros((clusters.partition_count, basis.shape[-1]))
         np.add.at(partition_moments, clusters.cluster_partition,
                   moments * polarization[:, component, None])
@@ -149,8 +148,7 @@ def draw_basis():
     """The six orthonormal polynomials of degree at most 2 on a partition of 8 × 8 elements, and one cluster's indicator
     χ_b with its projection Σ_ψ m(b, ψ) ψ at increasing degree, with the share of χ_b the projection misses."""
     mesh, clusters = get_clusters(64, 8, 2)
-    discretization = mesh.discretization
-    block = discretization.partition_shape_in_elements
+    block = mesh.partition_size
     basis = fft_tfa_model.get_polynomial_basis(block, 2)[0]
     # A partition the fiber's edge crosses, and its larger matrix cluster.
     inclusion_share = np.bincount(mesh.element_partition, weights=mesh.element_phase) / np.prod(block)
@@ -159,7 +157,7 @@ def draw_basis():
     matrix_clusters = in_partition[clusters.materials.phase[in_partition] == 0]
     cluster = matrix_clusters[np.argmax(np.bincount(clusters.element_cluster)[matrix_clusters])]
     elements = np.flatnonzero(mesh.element_partition == partition)
-    _, y, x = np.unravel_index(elements, discretization.element_lattice_shape)
+    _, y, x = np.unravel_index(elements, mesh.element_shape)
     indicator = np.zeros(block[1:])
     indicator[y % block[1], x % block[2]] = clusters.element_cluster[elements] == cluster
     titles = ["$1$", "$x$", "$y$", "$x^2$", "$xy$", "$y^2$"]
@@ -197,14 +195,13 @@ def get_partition_distance(clusters, partition_shape):
 def get_exact_pairs(mesh, clusters):
     """Γ(a←b) for every pair of clusters, 6 × 6 blocks: a unit polarization on b's elements, its strain by the element
     kernel, averaged over a's elements."""
-    discretization, matrix_L = mesh.discretization, cell.get_matrix_L()
-    shape = discretization.element_lattice_shape
-    kernel = ls_model.to_fourier_blocks(ls_model.get_moulinec_suquet_kernel(shape, matrix_L), shape)
+    matrix_L, shape = cell.get_matrix_L(), mesh.element_shape
+    kernel = ls_model.get_P0_transformed(shape, matrix_L)
     counts = np.bincount(clusters.element_cluster)
     pairs = np.zeros((clusters.cluster_count, clusters.cluster_count, 6, 6))
     for source in range(clusters.cluster_count):
         for column in range(6):
-            polarization = np.zeros((discretization.element_count, 6))
+            polarization = np.zeros((mesh.element_count, 6))
             polarization[clusters.element_cluster == source, column] = 1
             element_strain = ls_model.apply_on_lattice(kernel, np.linalg.solve(matrix_L, polarization.T).T)
             average = np.zeros((clusters.cluster_count, 6))
@@ -227,7 +224,7 @@ def get_far_pairs(interaction):
 
 def draw_far_field():
     mesh, clusters = get_clusters(64, 8, 2)
-    distance = get_partition_distance(clusters, mesh.discretization.partition_lattice_shape)
+    distance = get_partition_distance(clusters, mesh.partition_shape)
     exact = get_exact_pairs(mesh, clusters)
     # Per distance, the volume-weighted rms over every pair at that distance of the 6 × 6 block's norm, as a share of the
     # same measure of the exact interaction within a partition.
@@ -240,7 +237,7 @@ def draw_far_field():
     degrees = (0, 1, 2, 3, 4)
     errors = {}
     for degree in degrees:
-        far = get_far_pairs(fft_tfa_model.get_interaction(mesh, clusters, degree))
+        far = get_far_pairs(fft_tfa_model.get_interaction(clusters, degree))
         errors[degree] = np.array([get_rms(far - exact, distance == r) for r in distances]) / own_scale
     green = np.array(matplotlib.colors.to_rgb(plots.method_styles["FFT-TFA"]['color']))
     with plt.rc_context(style):

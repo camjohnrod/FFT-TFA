@@ -38,10 +38,6 @@ deviatoric_projector = np.zeros((6, 6))
 deviatoric_projector[:3, :3] = np.eye(3) - np.ones((3, 3)) / 3
 deviatoric_projector[3:, 3:] = np.eye(3)
 
-def apply_blocks(blocks, rows):
-    """One 6 × 6 block times one row of 6, row by row: blocks[p] @ rows[p] for every p."""
-    return np.einsum('pij,pj->pi', blocks, rows)
-
 def get_deviatoric_stress(stress):
     return stress @ deviatoric_projector.T
 
@@ -71,7 +67,7 @@ def get_trial_state(strain, materials, plastic_history):
     """Step 1 of the radial return: freeze the plastic strain, compute the elastic stress L (ε − μ_n), and compare its
     von Mises stress with the flow stress. Where it lies beyond, the closed-form multiplier Δp = f / (3G + H) brings it
     back (G the shear modulus, H the hardening modulus)."""
-    stress = apply_blocks(materials.L, strain - plastic_history.plastic_strain)
+    stress = np.einsum('pij,pj->pi', materials.L, strain - plastic_history.plastic_strain)
     mean_stress = np.sum(stress[:, :3], axis=1) / 3
     deviatoric_stress = stress - np.outer(mean_stress, volumetric_direction)
     equivalent_stress = get_equivalent_stress(deviatoric_stress)

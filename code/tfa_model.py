@@ -14,19 +14,18 @@ cached in code/cache/, since P can take minutes.
 import sys
 import time
 import numpy as np
-import scipy.sparse
 import scipy.sparse.linalg
 import tqdm
 
 import config
-from cell import (get_cached, get_geometry_parameters, get_flat_index, get_inclusion_L, get_matrix_L, get_memory_MB,
+from cell import (get_cache_path, get_cached, get_geometry_parameters, get_inclusion_L, get_matrix_L, get_memory_MB,
                   get_value_per_phase)
-from material import apply_blocks, get_eigenstrain_sensitivity, radial_return, get_yielding_clusters
-from newton import Evaluation, Solver, solve_by_gmres
+from material import get_eigenstrain_sensitivity, radial_return, get_yielding_clusters
+from newton import (Evaluation, Solver, apply_blocks, assemble_blocks, get_block_indices, solve_by_gmres)
 
 ## ------- Element Matrices ------- ##
 
-# The element's corners in natural coordinates, in the order get_flat_index gives them (x fastest).
+# The element's corners in natural coordinates, x fastest, as the nodes are numbered.
 corner_natural_coordinates = np.array([[-1, -1, -1], [1, -1, -1], [-1, 1, -1], [1, 1, -1],
                                        [-1, -1,  1], [1, -1,  1], [-1, 1,  1], [1, 1,  1]])
 
@@ -41,7 +40,7 @@ def get_shape_function_derivatives(xi, eta, zeta):
     derivative_wrt_zeta = corner_zeta * xi_bracket  * eta_bracket  / 8
     return derivative_wrt_xi, derivative_wrt_eta, derivative_wrt_zeta
 
-def get_B(discretization):
+def get_B(mesh):
     """The strain-displacement matrix ε = B u (engineering shear) at each of the 2 × 2 × 2 Gauss points, the same for
     every element of the regular mesh: shape (8 Gauss points, 6, 24)."""
     gauss_point_coordinates = corner_natural_coordinates / np.sqrt(3)
@@ -49,9 +48,10 @@ def get_B(discretization):
 
     for gauss_index, (xi, eta, zeta) in enumerate(gauss_point_coordinates):
         derivatives_wrt_xi, derivatives_wrt_eta, derivatives_wrt_zeta = get_shape_function_derivatives(xi, eta, zeta)
-        derivatives_wrt_x = derivatives_wrt_xi   * 2 / discretization.element_side_length
-        derivatives_wrt_y = derivatives_wrt_eta  * 2 / discretization.element_side_length
-        derivatives_wrt_z = derivatives_wrt_zeta * 2 / discretization.element_length_along_z
+        size_z, size_y, size_x = mesh.element_size
+        derivatives_wrt_x = derivatives_wrt_xi   * 2 / size_x
+        derivatives_wrt_y = derivatives_wrt_eta  * 2 / size_y
+        derivatives_wrt_z = derivatives_wrt_zeta * 2 / size_z
 
         for corner in range(8):
             column = 3 * corner
@@ -76,43 +76,28 @@ def get_K_element(B, gauss_point_volume, L):
 
 ## ------- Assembly ------- ##
 
-def get_element_dofs(discretization):
+def get_element_dofs(mesh):
     """The 24 degrees of freedom of each element, its 8 nodes in corner_natural_coordinates order, nodes numbered as the
-    elements are, periodically."""
-    k, j, i = [axis.reshape(-1, 1) for axis in np.meshgrid(*map(np.arange, discretization.element_lattice_shape),
-                                                           indexing="ij")]
-    offset_i, offset_j, offset_k = (corner_natural_coordinates.T + 1) // 2
-    element_nodes = get_flat_index((i + offset_i) % discretization.elements_per_side,
-                                (j + offset_j) % discretization.elements_per_side,
-                                (k + offset_k) % discretization.elements_along_z, discretization.elements_per_side)
+    elements are, periodically: the node at an element's far corner is the next element's first."""
+    z, y, x = [axis.reshape(-1, 1) for axis in np.indices(mesh.element_shape).reshape(3, -1)]
+    offset_x, offset_y, offset_z = (corner_natural_coordinates.T + 1) // 2
+    element_nodes = np.ravel_multi_index((z + offset_z, y + offset_y, x + offset_x), mesh.element_shape, mode="wrap")
     return (3 * element_nodes[:, :, None] + np.arange(3)).reshape(-1, 24)
-
-def get_cluster_components(element_cluster):
-    """The six entries of each element's cluster in a cluster-stacked vector such as ε, μ or b."""
-    return 6 * element_cluster[:, None] + np.arange(6)
-
-def assemble_element_blocks(element_blocks, element_rows, element_columns, shape):
-    """Adds each element's block into a sparse global matrix at the given global rows and columns. Blocks that share an
-    entry are summed, as in finite-element assembly."""
-    rows = np.broadcast_to(element_rows[:, :, None], element_blocks.shape)
-    columns = np.broadcast_to(element_columns[:, None, :], element_blocks.shape)
-    return scipy.sparse.coo_matrix((element_blocks.ravel(), (rows.ravel(), columns.ravel())), shape=shape).tocsr()
 
 class FEModel:
     """The periodic FE model of the composite on a mesh: its element matrices and the global operators of ER-24."""
     def __init__(self, mesh):
         self.mesh = mesh
-        self.discretization = mesh.discretization
-        self.B = get_B(self.discretization)
-        self.gauss_point_volume = self.discretization.element_volume / 8
+        self.dof_count = 3 * mesh.element_count
+        self.B = get_B(mesh)
+        self.gauss_point_volume = mesh.element_volume / 8
         self.integrated_B = self.gauss_point_volume * np.sum(self.B, axis=0)    # ∫ B dV over one element
         self.L_per_element = get_value_per_phase(get_matrix_L(), get_inclusion_L(), mesh.element_phase)
-        self.element_dofs = get_element_dofs(self.discretization)
+        self.element_dofs = get_element_dofs(mesh)
 
     def get_K(self):
         K_elements = np.array([get_K_element(self.B, self.gauss_point_volume, L) for L in self.L_per_element])
-        dof_count = self.discretization.dof_count
-        return assemble_element_blocks(K_elements, self.element_dofs, self.element_dofs, (dof_count, dof_count))
+        return assemble_blocks(K_elements, self.element_dofs, self.element_dofs, (self.dof_count, self.dof_count))
 
     def get_F_elements(self):
         """Each element's nodal load per unit eigenstrain, ∫ Bᵀ L dV (24 × 6)."""
@@ -120,23 +105,21 @@ class FEModel:
 
     def get_F_macro_strain(self):
         """Nodal loads per unit macro strain. Moving the applied strain to the right-hand side gives −∫ Bᵀ L ε̄ dV."""
-        macro_strain_columns = np.tile(np.arange(6), (self.discretization.element_count, 1))
-        return -assemble_element_blocks(self.get_F_elements(), self.element_dofs, macro_strain_columns,
-                                        (self.discretization.dof_count, 6))
+        macro_strain_columns = np.tile(np.arange(6), (self.mesh.element_count, 1))
+        return -assemble_blocks(self.get_F_elements(), self.element_dofs, macro_strain_columns, (self.dof_count, 6))
 
     def get_F_eigenstrain(self, clusters):
         """F_μ in ER-24: nodal loads per unit cluster eigenstrain, one block of six columns per cluster."""
-        return assemble_element_blocks(self.get_F_elements(), self.element_dofs,
-                                       get_cluster_components(clusters.element_cluster),
-                                       (self.discretization.dof_count, 6 * clusters.cluster_count))
+        return assemble_blocks(self.get_F_elements(), self.element_dofs, get_block_indices(clusters.element_cluster),
+                               (self.dof_count, 6 * clusters.cluster_count))
 
     def get_cluster_averaging_operator(self, clusters):
         """A_ε in ER-24: maps nodal displacements to cluster-average strain."""
-        partition_volume = self.discretization.elements_per_partition * self.discretization.element_volume
+        partition_volume = self.mesh.elements_per_partition * self.mesh.element_volume
         cluster_volume = clusters.share * partition_volume
         element_blocks = self.integrated_B / cluster_volume[clusters.element_cluster, None, None]
-        return assemble_element_blocks(element_blocks, get_cluster_components(clusters.element_cluster),
-                                       self.element_dofs, (6 * clusters.cluster_count, self.discretization.dof_count))
+        return assemble_blocks(element_blocks, get_block_indices(clusters.element_cluster), self.element_dofs,
+                               (6 * clusters.cluster_count, self.dof_count))
 
 ## ------- Influence Functions E and P ------- ##
 
@@ -144,7 +127,7 @@ def get_influence_function_solver(model, clusters):
     """Factorizes K once and returns solve(F), the cluster-average strain response A_ε K⁻¹ F to every load column of F,
     so that several sets of load columns share one factorization. Pinning one node's three displacements removes the
     rigid translation of the periodic cell."""
-    dof_count = model.discretization.dof_count
+    dof_count = model.dof_count
     free_dofs = np.arange(3, dof_count)
     K_free = model.get_K()[free_dofs][:, free_dofs].tocsc()
     print(f"  {f'factor K ({K_free.shape[0]} DOFs)':<26}: ", end="", flush=True)
@@ -171,10 +154,10 @@ def get_influence_function_solver(model, clusters):
 
     return solve
 
-def compute_E_and_P(mesh, clusters):
+def compute_E_and_P(clusters):
     """E and P from one factorization of K, the seconds they took and the memory they needed."""
     start_time, start_memory = time.perf_counter(), get_memory_MB("VmRSS")
-    model = FEModel(mesh)
+    model = FEModel(clusters.mesh)
     solve = get_influence_function_solver(model, clusters)
     # ER-1: E is the applied macro strain plus the fluctuation it causes; P is A_ε K⁻¹ F_μ (ER-24).
     E = np.tile(np.eye(6), (clusters.cluster_count, 1)) + solve(model.get_F_macro_strain())
@@ -187,27 +170,32 @@ def compute_E_and_P(mesh, clusters):
 # Increase whenever a code change alters E or P, so caches made by the old code are recomputed.
 cache_version = 4
 
-def get_E_and_P(mesh, clusters):
-    """E and P on the clusters, and the seconds and memory they took to build, measured when they were computed, even if
-    they now come from the cache."""
-    discretization = mesh.discretization
+def get_E_and_P(clusters):
+    """E and P on the clusters, from the cache when they were computed before. Also the (seconds, peak MB) of the work the
+    cache saved, (0, 0) if they were computed now: building them took those seconds then, loading them took some now."""
+    mesh = clusters.mesh
+    elements_along_z, _, elements_per_side = mesh.element_shape
     parameters = {"cache_version": cache_version,
                   **get_geometry_parameters(),
-                  "elements_per_side": discretization.elements_per_side,
-                  "elements_along_z": discretization.elements_along_z,
-                  "partitions_per_side": discretization.partitions_per_side,
+                  "elements_per_side": elements_per_side,
+                  "elements_along_z": elements_along_z,
+                  "partitions_per_side": mesh.partition_shape[2],
                   "L_matrix": get_matrix_L(),
                   "L_inclusion": get_inclusion_L(),
                   # The clusters themselves, so any change of clustering (k-means settings included) finds its own
                   # cache.
                   "element_cluster": clusters.element_cluster}
-    description = (f"E and P on {clusters.cluster_count} clusters, {discretization.elements_per_side} elements per "
-                   f"side, {discretization.partitions_per_side} partitions per side, {config.geometry}, "
-                   f"{config.materials}")
-    arrays = get_cached("E_and_P", parameters, description, lambda: compute_E_and_P(mesh, clusters))
+    description = (f"E and P on {clusters.cluster_count} clusters, {elements_per_side} elements per side, "
+                   f"{mesh.partition_shape[2]} partitions per side, {config.geometry}, {config.materials}")
+    is_cached = get_cache_path("E_and_P", parameters).exists()
+    start_time = time.perf_counter()
+    arrays = get_cached("E_and_P", parameters, description, lambda: compute_E_and_P(clusters))
+    load_seconds = time.perf_counter() - start_time
+    saved = ((float(arrays["build_seconds"]) - load_seconds, float(arrays["build_peak_MB"])) if is_cached
+             else (0.0, 0.0))
     # Column-major, so the columns of a run of consecutive clusters are contiguous and P products can read just the
     # yielding clusters' columns without copying them (apply_P_to_clusters).
-    return arrays["E"], np.asfortranarray(arrays["P"]), float(arrays["build_seconds"]), float(arrays["build_peak_MB"])
+    return arrays["E"], np.asfortranarray(arrays["P"]), saved
 
 ## ------- Solver ------- ##
 
@@ -228,10 +216,9 @@ def apply_P_to_clusters(P, cluster_field, clusters):
 class TFASolver(Solver):
     """TFA on the given clusters, which E and P were built on. Each step starts from the exact elastic predictor
     E ε̄ + P μₙ, and every evaluation solves the clusters that stay elastic exactly (evaluate)."""
-    def __init__(self, E, P, clusters):
+    def __init__(self, clusters):
         super().__init__(clusters, clusters.cluster_count)
-        self.E = E
-        self.P = P
+        self.E, self.P, self.offline_from_cache = get_E_and_P(clusters)
         # Set at the start of each step (start_step): b = E ε̄, the strain the macro strain alone causes (ER-4), and
         # P μₙ, the strain the accepted eigenstrains cause.
         self.b = None

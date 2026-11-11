@@ -226,18 +226,16 @@ def get_laminate_error(result, exact_phase_stress):
 
 ## ------- FFT-TFA at Full Degree, and the Patch Test ------- ##
 
-def get_interaction_error(mesh, clusters):
+def get_interaction_error(clusters):
     """FFT-TFA's interaction at full degree (FT-2 to FT-4), against the element-level LS operator: random polarizations,
     one per cluster, spread over its elements, strains −Γ0 * τ = −D0 τ by FFT on the element lattice (Moulinec–Suquet
     kernel, C0 = L_m), averaged over each cluster's elements. The largest relative difference. At full degree the
     polynomials represent every partition's polarization exactly, so the two must agree to round-off; FT-4 then removes
     a mean that is zero to round-off."""
-    discretization, matrix_L = mesh.discretization, cell.get_matrix_L()
-    interaction = fft_tfa_model.get_interaction(mesh, clusters, "full")
+    shape, matrix_L = clusters.mesh.element_shape, cell.get_matrix_L()
+    interaction = fft_tfa_model.get_interaction(clusters, "full")
     polarization = 1e6 * np.random.default_rng(0).standard_normal((clusters.cluster_count, 6))
-    kernel = ls_model.to_fourier_blocks(ls_model.get_moulinec_suquet_kernel(discretization.element_lattice_shape,
-                                                                          matrix_L),
-                                      discretization.element_lattice_shape)
+    kernel = ls_model.get_P0_transformed(shape, matrix_L)
     element_strain = ls_model.apply_on_lattice(
         kernel, np.linalg.solve(matrix_L, polarization[clusters.element_cluster].T).T)
     element_average = np.zeros((clusters.cluster_count, 6))
@@ -251,10 +249,10 @@ def solve_load_path(solver):
         return run.run_load_path("check", solver, load_path.applied_macro_strain,
                                  np.arange(len(load_path.applied_macro_strain)))
 
-def get_patch_test_error(mesh, clusters, degree):
+def get_patch_test_error(clusters, degree):
     """The strain FFT-TFA's interaction gives a uniform polarization, which must cause none: its largest component,
     relative to the strain L_m⁻¹ τ the polarization stands for."""
-    interaction = fft_tfa_model.get_interaction(mesh, clusters, degree)
+    interaction = fft_tfa_model.get_interaction(clusters, degree)
     unit_strain = np.array(strain(e11=1.0, e22=0.5, g12=0.3))
     polarization = np.tile(cell.get_matrix_L() @ unit_strain, (clusters.cluster_count, 1))
     return np.abs(fft_tfa_model.get_strain_change(interaction, polarization)).max() / np.abs(unit_strain).max()
@@ -288,15 +286,14 @@ def check_polynomial_basis():
                                  f"{config.interaction_check_tolerance:.0e})")
     return all_passed
 
-def solve_at_full_degree(mesh, clusters):
-    return solve_load_path(fft_tfa_model.FFTTFASolver(fft_tfa_model.get_interaction(mesh, clusters, "full")))
+def solve_at_full_degree(clusters):
+    return solve_load_path(fft_tfa_model.FFTTFASolver(clusters, "full"))
 
 def get_split_clusters(mesh):
     """Each partition's part in each phase, its matrix part cut into two clusters along y by element row, in the order
     cell.get_clusters expects: by partition, matrix first."""
-    side = mesh.discretization.elements_per_side
-    block = mesh.discretization.elements_per_partition_side
-    element_rows = (np.arange(mesh.discretization.element_count) // side) % side
+    side, block = mesh.element_shape[2], mesh.partition_size[2]
+    element_rows = (np.arange(mesh.element_count) // side) % side
     in_second_half = element_rows % block >= block // 2
     keys = 3 * mesh.element_partition + np.where(mesh.element_phase == 1, 2, in_second_half)
     return cell.get_clusters(mesh, np.unique(keys, return_inverse=True)[1])
@@ -304,9 +301,8 @@ def get_split_clusters(mesh):
 def solve_on_split_clusters(mesh):
     """FFT-TFA at full degree and TFA along the load path on get_split_clusters."""
     clusters = get_split_clusters(mesh)
-    E, P, *_ = tfa_model.get_E_and_P(mesh, clusters)
-    return {"FFT-TFA at full degree": solve_at_full_degree(mesh, clusters),
-            "TFA": solve_load_path(tfa_model.TFASolver(E, P, clusters))}
+    return {"FFT-TFA at full degree": solve_at_full_degree(clusters),
+            "TFA": solve_load_path(tfa_model.TFASolver(clusters))}
 
 ## ------- Checks ------- ##
 
@@ -330,7 +326,7 @@ def report(passed, description):
 
 def check_laminate(problem_name, results):
     """Every method, and FFT-TFA at full degree, against the laminate's exact solution."""
-    mesh, clusters = run.get_mesh_and_clusters(config.fft_tfa[0])
+    clusters = run.get_partition_clusters(config.fft_tfa[0])
     exact_phase_stress = get_laminate_phase_stress(clusters, run.get_load_path().applied_macro_strain)
     tolerance = config.laminate_tolerance
     all_passed = True
@@ -342,11 +338,11 @@ def check_laminate(problem_name, results):
             continue
         all_passed &= report(error <= tolerance, f"{problem_name}: {method} matches the exact solution (largest "
                                                  f"relative difference {error:.1e}, tolerance {tolerance:.0e})")
-    error = get_laminate_error(solve_at_full_degree(mesh, clusters), exact_phase_stress)
+    error = get_laminate_error(solve_at_full_degree(clusters), exact_phase_stress)
     all_passed &= report(error <= tolerance, f"{problem_name}: FFT-TFA at full degree matches the exact solution "
                                              f"(largest relative difference {error:.1e}, tolerance {tolerance:.0e})")
     if problem_name == "laminate":
-        for method, result in solve_on_split_clusters(mesh).items():
+        for method, result in solve_on_split_clusters(clusters.mesh).items():
             error = get_laminate_error(result, exact_phase_stress)
             all_passed &= report(error <= tolerance,
                                  f"{problem_name}: {method} on clusters dividing a partition's matrix part matches the "
@@ -400,14 +396,14 @@ def check_problem(problem_name, problem_inputs, saved_results, cache_folder):
         all_passed &= check_laminate(problem_name, results)
     if config.reference is not None:
         all_passed &= check_reference(problem_name, results["Spectral LS"])
-    mesh, clusters = run.get_mesh_and_clusters(config.fft_tfa[0])
-    interaction_error = get_interaction_error(mesh, clusters)
+    clusters = run.get_partition_clusters(config.fft_tfa[0])
+    interaction_error = get_interaction_error(clusters)
     all_passed &= report(interaction_error <= config.interaction_check_tolerance,
                          f"{problem_name}: FFT-TFA's interaction at full degree matches the element-level LS operator "
                          f"(largest relative difference {interaction_error:.1e}, tolerance "
                          f"{config.interaction_check_tolerance:.0e})")
     degree = config.fft_tfa[0]["degree"]
-    patch_error = get_patch_test_error(mesh, clusters, degree)
+    patch_error = get_patch_test_error(clusters, degree)
     all_passed &= report(patch_error <= config.interaction_check_tolerance,
                          f"{problem_name}: FFT-TFA at degree {degree} gives a uniform polarization no strain (largest "
                          f"{patch_error:.1e}, tolerance {config.interaction_check_tolerance:.0e})")

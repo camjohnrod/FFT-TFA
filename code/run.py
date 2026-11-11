@@ -46,14 +46,13 @@ import tqdm
 
 import plots
 from cell import (Clusters, cluster_by_k_means, cluster_by_phase, get_cache_entries, get_cache_path, get_cached,
-                  get_clusters, get_discretization, get_fiber_radius, get_geometry, get_geometry_parameters,
-                  get_inclusion_L, get_matrix_L, get_memory_MB, get_periodic_mesh, is_shape_constant_along_z)
-from fft_tfa_model import FFTTFASolver, get_interaction, get_polynomial_basis, resolve_degree
-from ls_model import (SpectralLSSolver, get_elastic_strain_concentration, get_spectral_clusters,
-                      get_spectral_ls_operators)
+                  get_clusters, get_fiber_radius, get_geometry, get_geometry_parameters, get_inclusion_L, get_matrix_L,
+                  get_memory_MB, get_mesh, is_shape_constant_along_z)
+from fft_tfa_model import FFTTFASolver, get_polynomial_basis, resolve_degree
+from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_element_clusters
 from material import get_unloaded_plastic_state, get_von_mises_stress
 from newton import SolverDidNotConverge
-from tfa_model import TFASolver, get_E_and_P
+from tfa_model import TFASolver
 
 ## ------- Commands ------- ##
 
@@ -92,8 +91,7 @@ def preview():
           f"{', '.join(str(step + 1) for step in load_path.turning_steps)}")
     info_entries, arrays = [], {}
     for entry in get_entries():
-        clusters = (get_spectral_clusters(entry.settings["elements"]) if entry.method == "Spectral LS"
-                    else get_mesh_and_clusters(entry.settings)[1])
+        clusters = get_entry_clusters(entry)
         print(f"{entry.label}: {clusters.cluster_count} clusters, {describe_storage(entry, clusters)}")
         arrays |= get_entry_arrays(entry, clusters)
         info_entries.append({"label": entry.label, "method": entry.method, "settings": entry.settings,
@@ -111,16 +109,16 @@ def describe_storage(entry, clusters):
     """What an entry stores, in MB: FFT-TFA's moment kernels (one 6p × 6p block per frequency, p the polynomials of its
     degree) and one 6 × 6 block per pair of clusters in the same partition (FT-3), TFA's dense P, Spectral LS's kernel
     and LS-24's operator."""
-    discretization = get_entry_discretization(entry)
-    partition_shape = discretization.partition_lattice_shape
+    mesh = clusters.mesh
+    partition_shape = mesh.partition_shape
     frequencies = partition_shape[0] * partition_shape[1] * (partition_shape[2] // 2 + 1)     # rfftn's half
     kernel_MB = 36 * 16 * frequencies / 1024**2                     # one complex 6 × 6 block per frequency
     if entry.method == "Spectral LS":
         return f"kernels {2 * kernel_MB:.0f} MB"
     if entry.method == "TFA":
         return f"P {(6 * clusters.cluster_count)**2 * 8 / 1024**2:.0f} MB"
-    block = discretization.partition_shape_in_elements
-    polynomials = get_polynomial_basis(block, resolve_degree(entry.settings["degree"], discretization)).shape[-1]
+    block = mesh.partition_size
+    polynomials = get_polynomial_basis(block, resolve_degree(entry.settings["degree"], mesh)).shape[-1]
     counts = np.bincount(clusters.cluster_partition, minlength=clusters.partition_count)
     # Offline, the largest arrays: the kernels in real space before their transform, and get_correction_blocks' pair
     # counts over twice a partition, for every pair of slots in every partition.
@@ -184,38 +182,30 @@ def get_element_cluster(mesh, settings):
     numbers, from elastic Spectral LS on the same elements), or with one cluster per part, the parts themselves."""
     if settings["matrix_clusters"] == settings["inclusion_clusters"] == 1:
         return cluster_by_phase(mesh)
-    operators = get_spectral_ls_operators(mesh.discretization.elements_per_side, config.k_means_features_C0)
-    return cluster_by_k_means(mesh, get_elastic_strain_concentration(operators).reshape(-1, 36),
-                              settings["matrix_clusters"], settings["inclusion_clusters"])
+    features = get_elastic_strain_concentration(get_element_clusters(mesh.element_shape[2]),
+                                                config.k_means_features_C0)
+    return cluster_by_k_means(mesh, features.reshape(-1, 36), settings["matrix_clusters"],
+                              settings["inclusion_clusters"])
 
-def get_mesh_and_clusters(settings):
-    """The mesh and clusters of an FFT-TFA or TFA entry."""
-    mesh = get_periodic_mesh(get_discretization(config.clustered_mesh, settings["partitions"]))
-    return mesh, get_clusters(mesh, get_element_cluster(mesh, settings))
+def get_partition_clusters(settings):
+    """The clusters of an FFT-TFA or TFA entry's settings, on the shared clustered mesh."""
+    mesh = get_mesh(config.clustered_mesh, settings["partitions"])
+    return get_clusters(mesh, get_element_cluster(mesh, settings))
 
-# Each builder returns the entry's solver, its offline seconds and any offline memory (MB) spent earlier, in a cached
-# build.
+def get_entry_clusters(entry):
+    """An entry's clusters: one per element for Spectral LS, partition clusters for FFT-TFA and TFA."""
+    if entry.method == "Spectral LS":
+        return get_element_clusters(entry.settings["elements"])
+    return get_partition_clusters(entry.settings)
 
-def build_fft_tfa(settings):
-    start_time = time.perf_counter()
-    mesh, clusters = get_mesh_and_clusters(settings)
-    solver = FFTTFASolver(get_interaction(mesh, clusters, settings["degree"]))
-    return solver, time.perf_counter() - start_time, 0.0
-
-def build_spectral_ls(settings):
-    start_time = time.perf_counter()
-    solver = SpectralLSSolver(get_spectral_ls_operators(settings["elements"], settings["C0"]))
-    return solver, time.perf_counter() - start_time, 0.0
-
-def build_tfa(settings):
-    """Its offline costs count E and P as they were when computed, even when they come from the cache."""
-    start_time = time.perf_counter()
-    mesh, clusters = get_mesh_and_clusters(settings)
-    clusters_seconds = time.perf_counter() - start_time
-    E, P, build_seconds, build_peak_MB = get_E_and_P(mesh, clusters)
-    return TFASolver(E, P, clusters), clusters_seconds + build_seconds, build_peak_MB
-
-builders = {"FFT-TFA": build_fft_tfa, "Spectral LS": build_spectral_ls, "TFA": build_tfa}
+def get_solver(entry):
+    """An entry's solver, built from its clusters and its own settings."""
+    clusters = get_entry_clusters(entry)
+    if entry.method == "FFT-TFA":
+        return FFTTFASolver(clusters, entry.settings["degree"])
+    if entry.method == "Spectral LS":
+        return SpectralLSSolver(clusters, entry.settings["C0"])
+    return TFASolver(clusters)
 
 ## ------- Load Path ------- ##
 
@@ -305,10 +295,12 @@ class EntryResult(NamedTuple):
     failure_reason: str
 
 def solve_entry(entry, applied_macro_strain, field_steps):
-    start_memory = get_memory_MB("VmRSS")
+    start_memory, start_time = get_memory_MB("VmRSS"), time.perf_counter()
     reset_peak_memory()
-    solver, offline_seconds, earlier_peak_MB = builders[entry.method](entry.settings)
-    peak_offline_MB = max(get_memory_MB("VmHWM") - start_memory, earlier_peak_MB)
+    solver = get_solver(entry)
+    cached_seconds, cached_peak_MB = solver.offline_from_cache
+    offline_seconds = time.perf_counter() - start_time + cached_seconds
+    peak_offline_MB = max(get_memory_MB("VmHWM") - start_memory, cached_peak_MB)
     reset_peak_memory()
     load_path_result = run_load_path(entry.label, solver, applied_macro_strain, field_steps)
     return EntryResult(entry, load_path_result, offline_seconds, load_path_result.solve_time_per_step.sum(),
@@ -401,30 +393,28 @@ def get_reference_parameters(load_path):
 def get_reference(load_path):
     """The reference from the cache when it matches, otherwise solved now and cached, with the seconds it took to
     build."""
-    elements = config.reference["elements"]
-    discretization = get_discretization(elements, elements)
+    clusters = get_element_clusters(config.reference["elements"])
+    lattice_shape = clusters.mesh.element_shape
 
     def compute():
-        voxel_label = get_lattice_label(discretization.partition_lattice_shape)
-        print(f"Solving the reference: Spectral LS on {voxel_label} voxels, {len(load_path.applied_macro_strain)} load "
-              "steps")
+        print(f"Solving the reference: Spectral LS on {get_lattice_label(lattice_shape)} voxels, "
+              f"{len(load_path.applied_macro_strain)} load steps")
         start_time = time.perf_counter()
-        operators = get_spectral_ls_operators(elements, config.reference["C0"])
-        result = run_load_path("Reference", SpectralLSSolver(operators), load_path.applied_macro_strain,
-                               load_path.turning_steps)
+        solver = SpectralLSSolver(clusters, config.reference["C0"])
+        result = run_load_path("Reference", solver, load_path.applied_macro_strain, load_path.turning_steps)
         if result.completed_step_count < len(load_path.applied_macro_strain):
             raise RuntimeError(f"The reference stopped at load step {result.completed_step_count + 1}: "
                                f"{result.failure_reason}")
         # The arrays keep the names older caches were saved with, so those still load.
-        return {"material_ids": operators.clusters.materials.phase,
+        return {"material_ids": clusters.materials.phase,
                 "macroscopic_stress": result.macro_stress, "stress": result.cluster_stress,
                 "accumulated_plastic_strain": result.accumulated_plastic_strain,
                 "build_seconds": time.perf_counter() - start_time}
 
-    description = (f"reference, {get_lattice_label(discretization.partition_lattice_shape)} voxels, "
-                   f"{config.geometry}, {config.materials}, {config.load_path}")
+    description = (f"reference, {get_lattice_label(lattice_shape)} voxels, {config.geometry}, {config.materials}, "
+                   f"{config.load_path}")
     arrays = get_cached("reference", get_reference_parameters(load_path), description, compute)
-    return Reference(discretization.partition_lattice_shape, arrays["material_ids"], arrays["macroscopic_stress"],
+    return Reference(lattice_shape, arrays["material_ids"], arrays["macroscopic_stress"],
                      arrays["stress"], arrays["accumulated_plastic_strain"], float(arrays["build_seconds"]))
 
 ## ------- Saving a Run ------- ##
@@ -434,15 +424,9 @@ def get_lattice_label(lattice_shape):
     counts = [lattice_shape[2], lattice_shape[1]] + ([lattice_shape[0]] if lattice_shape[0] > 1 else [])
     return "×".join(map(str, counts))
 
-def get_entry_discretization(entry):
-    if entry.method == "Spectral LS":
-        return get_discretization(entry.settings["elements"], entry.settings["elements"])
-    return get_discretization(config.clustered_mesh, entry.settings["partitions"])
-
 def get_entry_arrays(entry, clusters):
     """What the cross-section of an entry needs."""
-    return {f"{entry.label}/element_cluster": clusters.element_cluster.reshape(
-                get_entry_discretization(entry).element_lattice_shape),
+    return {f"{entry.label}/element_cluster": clusters.element_cluster.reshape(clusters.mesh.element_shape),
             f"{entry.label}/cluster_partition": clusters.cluster_partition,
             f"{entry.label}/cluster_phase": clusters.materials.phase}
 

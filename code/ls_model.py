@@ -4,7 +4,7 @@ The LS equation replaces the composite by a homogeneous reference medium of stif
 where the material differs from it. The strain the polarization causes is a convolution with a kernel P0, so on a
 regular lattice it is one FFT, a 6 × 6 product at every frequency and an inverse FFT (apply_on_lattice). Spectral LS
 (Moulinec–Suquet) solves the equation on the elements by Newton, each correction by conjugate gradients. FFT-TFA
-(fft_tfa_model) uses this file's kernel, apply_on_lattice and the block helpers.
+(fft_tfa_model) uses this file's kernel and apply_on_lattice.
 
 Translation-invariant operators are stored as one block per lattice frequency, rfftn's non-redundant half: shape
 (N_z, N, N//2 + 1, b, b), lattices indexed [z, y, x] and square in-plane; b = 6 here, 6 per polynomial in FFT-TFA.
@@ -13,13 +13,11 @@ Translation-invariant operators are stored as one block per lattice frequency, r
 from typing import NamedTuple
 import numpy as np
 import scipy.fft
-import scipy.sparse
 
 import config
-from cell import (Clusters, cluster_by_phase, get_clusters, get_discretization, get_inclusion_L, get_matrix_L,
-                  get_periodic_mesh)
-from material import apply_blocks, get_algorithmic_stiffness, get_unloaded_plastic_state, radial_return
-from newton import Evaluation, Solver, SolverDidNotConverge
+from cell import cluster_by_phase, get_clusters, get_inclusion_L, get_matrix_L, get_mesh
+from material import get_algorithmic_stiffness, get_unloaded_plastic_state, radial_return
+from newton import Evaluation, Solver, SolverDidNotConverge, apply_blocks
 
 ## ------- Convolution on a Lattice ------- ##
 
@@ -111,47 +109,23 @@ def get_matrix_units_operator(P0_transformed, C0, matrix_L):
     matrix_cell_jacobian = np.eye(6) - P0_transformed @ (np.eye(6) - np.linalg.solve(C0, matrix_L))
     return np.linalg.inv(matrix_cell_jacobian)
 
-## ------- Block Helpers ------- ##
-
-def assemble_blocks(blocks, block_rows, block_columns, shape_in_blocks):
-    """A sparse matrix of 6 × 6 blocks, each block at its block row and column, blocks at the same position summed."""
-    rows = np.broadcast_to(6 * block_rows[:, None, None] + np.arange(6)[:, None], blocks.shape)
-    columns = np.broadcast_to(6 * block_columns[:, None, None] + np.arange(6), blocks.shape)
-    return scipy.sparse.coo_matrix((blocks.ravel(), (rows.ravel(), columns.ravel())),
-                                   shape=(6 * shape_in_blocks[0], 6 * shape_in_blocks[1])).tocsr()
-
-def apply_sparse(matrix, rows):
-    """A sparse matrix on stacked rows of 6."""
-    return (matrix @ rows.reshape(-1)).reshape(-1, 6)
-
 ## ------- Spectral LS ------- ##
 
-class SpectralLSOperators(NamedTuple):
-    """What Spectral LS needs, built once: its clusters (one per element), the reference stiffness C0, and the kernel
-    P̂0 as one 6 × 6 block per frequency."""
-    clusters: Clusters
-    C0: np.ndarray
-    P0_transformed: np.ndarray
-
-def get_spectral_clusters(elements_per_side):
-    """One partition and one cluster per element."""
-    mesh = get_periodic_mesh(get_discretization(elements_per_side, elements_per_side))
+def get_element_clusters(elements):
+    """Clusters of one element each, on a mesh of `elements` per side: Spectral LS's material states."""
+    mesh = get_mesh(elements, elements)
     return get_clusters(mesh, cluster_by_phase(mesh))
-
-def get_spectral_ls_operators(elements_per_side, C0_name):
-    C0 = get_spectral_C0(C0_name)
-    lattice_shape = get_discretization(elements_per_side, elements_per_side).element_lattice_shape
-    return SpectralLSOperators(get_spectral_clusters(elements_per_side), C0, get_P0_transformed(lattice_shape, C0))
 
 class SpectralLSSolver(Solver):
     """Spectral LS: the LS equation LS-18 on the elements, each element its own partition and cluster. Newton on the
-    element strains, each correction by conjugate gradients (LS-28), convergence judged in matrix units (LS-24)."""
-    def __init__(self, operators):
-        super().__init__(operators.clusters, operators.clusters.partition_count)
-        self.C0 = operators.C0
-        self.P0_transformed = operators.P0_transformed
-        if self.clusters.cluster_count != self.clusters.partition_count:
-            raise ValueError("Spectral LS needs exactly one cluster per partition.")
+    element strains, each correction by conjugate gradients (LS-28), convergence judged in matrix units (LS-24).
+    clusters: one per element (get_element_clusters); C0: the reference stiffness's name, "midpoint" or "matrix"."""
+    def __init__(self, clusters, C0):
+        super().__init__(clusters, clusters.cluster_count)
+        if clusters.cluster_count != clusters.mesh.element_count:
+            raise ValueError("Spectral LS needs exactly one cluster per element.")
+        self.C0 = get_spectral_C0(C0)
+        self.P0_transformed = get_P0_transformed(clusters.mesh.element_shape, self.C0)
         self.to_matrix_units = get_matrix_units_operator(self.P0_transformed, self.C0, get_matrix_L())
 
     def measure_residual(self, residual):
@@ -201,13 +175,16 @@ class SpectralLSSolver(Solver):
         raise SolverDidNotConverge(f"CG did not converge inside a Newton iteration within {max_iterations} "
                                    "iterations. Loosen krylov_tolerance or raise cg_max_iterations")
 
-def get_elastic_strain_concentration(operators):
+def get_elastic_strain_concentration(clusters, C0):
     """The strain of every element per unit macro strain in elasticity, elements × 6 × 6 (column k for the k-th unit
     macro strain): the strain concentration tensor that k-means clusters on (Liu–Bessa–Liu 2016, section 2.2.1). Each
-    column is one Spectral LS load step with every phase elastic."""
-    materials = operators.clusters.materials
+    column is one Spectral LS load step from zero, with every phase elastic."""
+    materials = clusters.materials
     elastic_materials = materials._replace(yield_stress=np.full(len(materials.yield_stress), np.inf))
-    elastic_operators = operators._replace(clusters=operators.clusters._replace(materials=elastic_materials))
-    unloaded = get_unloaded_plastic_state(operators.clusters.cluster_count)
-    return np.stack([SpectralLSSolver(elastic_operators).solve_step(unit_strain, unloaded).strain
-                     for unit_strain in np.eye(6)], axis=-1)
+    solver = SpectralLSSolver(clusters._replace(materials=elastic_materials), C0)
+    unloaded = get_unloaded_plastic_state(clusters.cluster_count)
+    columns = []
+    for unit_strain in np.eye(6):
+        solver.start_over()
+        columns.append(solver.solve_step(unit_strain, unloaded).strain)
+    return np.stack(columns, axis=-1)

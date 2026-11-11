@@ -96,94 +96,55 @@ def is_inside_inclusion(centres):
         return np.sum(offsets_from_centre[:, :2]**2, axis=1) < geometry["radius"]**2
     raise ValueError(f"Unknown shape {geometry['shape']!r}")
 
-## ------- Discretization ------- ##
+## ------- Mesh ------- ##
 
-class Discretization(NamedTuple):
-    """A mesh of elements_per_side² × elements_along_z hexahedra over the periodic cubic cell, and its lattice of
-    partitions_per_side² × partitions_along_z partitions. Lattices are indexed [z, y, x], as get_flat_index orders them
-    (x fastest)."""
-    elements_per_side: int
-    elements_along_z: int
-    partitions_per_side: int
-    partitions_along_z: int
-
-    @property
-    def elements_per_partition_side(self):
-        return self.elements_per_side // self.partitions_per_side
+class Mesh(NamedTuple):
+    """The elements of the periodic cubic cell, each in one partition. Lattices are indexed [z, y, x], x fastest when
+    flattened. A shape constant along z has one element layer and one partition layer (columns through the thickness);
+    every other shape is meshed and partitioned alike along x, y and z."""
+    element_shape: tuple             # elements along [z, y, x]
+    partition_shape: tuple           # partitions along [z, y, x]
+    element_phase: np.ndarray        # every element's phase: 0 matrix, 1 inclusion
+    element_partition: np.ndarray    # every element's partition
 
     @property
-    def elements_per_partition_along_z(self):
-        return self.elements_along_z // self.partitions_along_z
-
-    @property
-    def partition_shape_in_elements(self):
-        """A partition's size in elements along [z, y, x]."""
-        return np.array([self.elements_per_partition_along_z, self.elements_per_partition_side,
-                         self.elements_per_partition_side])
-
-    @property
-    def elements_per_partition(self):
-        return self.elements_per_partition_side**2 * self.elements_per_partition_along_z
-
-    @property
-    def element_lattice_shape(self):
-        return (self.elements_along_z, self.elements_per_side, self.elements_per_side)
-
-    @property
-    def partition_lattice_shape(self):
-        return (self.partitions_along_z, self.partitions_per_side, self.partitions_per_side)
+    def partition_size(self):
+        """A partition's size in elements, along [z, y, x]."""
+        return np.array(self.element_shape) // np.array(self.partition_shape)
 
     @property
     def element_count(self):
-        return self.elements_per_side**2 * self.elements_along_z
+        return int(np.prod(self.element_shape))
 
     @property
-    def dof_count(self):
-        return 3 * self.element_count
+    def partition_count(self):
+        return int(np.prod(self.partition_shape))
 
     @property
-    def element_side_length(self):
-        return config.cell_side / self.elements_per_side
+    def elements_per_partition(self):
+        return int(np.prod(self.partition_size))
 
     @property
-    def element_length_along_z(self):
-        return config.cell_side / self.elements_along_z
+    def element_size(self):
+        """An element's side lengths along [z, y, x]."""
+        return config.cell_side / np.array(self.element_shape)
 
     @property
     def element_volume(self):
-        return self.element_side_length**2 * self.element_length_along_z
+        size_z, size_y, size_x = self.element_size
+        return size_x * size_y * size_z
 
-def get_discretization(elements_per_side, partitions_per_side):
-    if is_shape_constant_along_z():
-        return Discretization(elements_per_side, 1, partitions_per_side, 1)
-    return Discretization(elements_per_side, elements_per_side, partitions_per_side, partitions_per_side)
-
-## ------- Periodic Mesh ------- ##
-
-class Mesh(NamedTuple):
-    """The elements, one entry per element in lattice order [z, y, x] (x fastest)."""
-    discretization: Discretization
-    element_partition: np.ndarray    # the partition of each element
-    element_phase: np.ndarray        # the phase of each element: 0 matrix, 1 inclusion
-
-def get_flat_index(i, j, k, count_per_side):
-    """The position of lattice point (x index i, y index j, z index k) when the lattice is flattened, x fastest."""
-    return i + count_per_side * j + count_per_side**2 * k
-
-def get_element_phase(discretization):
-    """The geometry, resolved on the elements: 1 for an element whose centre lies inside the inclusion, else 0."""
-    centres_xy = (np.arange(discretization.elements_per_side) + 0.5) * discretization.element_side_length
-    centres_z = (np.arange(discretization.elements_along_z) + 0.5) * discretization.element_length_along_z
-    z, y, x = np.meshgrid(centres_z, centres_xy, centres_xy, indexing="ij")
-    return is_inside_inclusion(np.column_stack([x.ravel(), y.ravel(), z.ravel()])).astype(int)
-
-def get_periodic_mesh(discretization):
-    k, j, i = np.meshgrid(*map(np.arange, discretization.element_lattice_shape), indexing="ij")
-    element_partition = get_flat_index(i // discretization.elements_per_partition_side,
-                                        j // discretization.elements_per_partition_side,
-                                        k // discretization.elements_per_partition_along_z,
-                                        discretization.partitions_per_side).reshape(-1)
-    return Mesh(discretization, element_partition, get_element_phase(discretization))
+def get_mesh(elements, partitions):
+    """The mesh of `elements` per side, grouped into `partitions` per side, with every element's phase: 1 where its
+    centre lies inside the inclusion."""
+    layers = (1, 1) if is_shape_constant_along_z() else (elements, partitions)
+    element_shape, partition_shape = (layers[0], elements, elements), (layers[1], partitions, partitions)
+    z, y, x = np.indices(element_shape).reshape(3, -1)
+    size = np.array(element_shape) // np.array(partition_shape)
+    element_partition = np.ravel_multi_index((z // size[0], y // size[1], x // size[2]), partition_shape)
+    side_z, side_y, side_x = config.cell_side / np.array(element_shape)
+    centres = np.column_stack([(x + 0.5) * side_x, (y + 0.5) * side_y, (z + 0.5) * side_z])
+    return Mesh(element_shape, partition_shape, is_inside_inclusion(centres).astype(int), element_partition)
 
 ## ------- Materials ------- ##
 
@@ -232,6 +193,7 @@ class Clusters(NamedTuple):
     """A method's clusters and where they lie. A cluster is a set of elements of one phase in one partition, with one
     material state (one strain, stress and eigenstrain). Clusters are numbered partition by partition, so a partition's
     clusters are consecutive. Clusters have unequal volumes, so every cell average goes through average."""
+    mesh: Mesh                         # the elements the clusters group
     materials: Materials               # one row per cluster
     share: np.ndarray                  # each cluster's share of its partition's volume (c_p)
     element_cluster: np.ndarray        # the cluster of every element
@@ -300,8 +262,8 @@ def get_clusters(mesh, element_cluster):
         raise ValueError("A cluster holds both phases; every cluster must lie in one phase.")
     if np.any(cluster_partition[element_cluster] != mesh.element_partition):
         raise ValueError("A cluster spans partitions; every cluster must lie in one partition.")
-    share = np.bincount(element_cluster) / mesh.discretization.elements_per_partition
-    return Clusters(get_materials(phase), share, element_cluster, cluster_partition)
+    share = np.bincount(element_cluster) / mesh.elements_per_partition
+    return Clusters(mesh, get_materials(phase), share, element_cluster, cluster_partition)
 
 ## ------- Memory ------- ##
 

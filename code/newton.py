@@ -5,10 +5,12 @@ or per element for Spectral LS) and solves it by Newton: at the current strain, 
 J δε = −r for a correction δε by a Krylov method (GMRES here, or conjugate gradients for Spectral LS, in ls_model), step
 along it with a backtracking line search, and repeat until the residual is small. Solver runs that loop; a method only
 says how to evaluate its residual (evaluate) and how to compute a Newton correction (get_newton_correction).
+Also here: helpers for fields of 6 × 6 blocks, which every method uses.
 """
 
 from typing import NamedTuple
 import numpy as np
+import scipy.sparse
 import scipy.sparse.linalg
 
 import config
@@ -32,6 +34,27 @@ class Evaluation(NamedTuple):
 
 class SolverDidNotConverge(RuntimeError):
     """A load step the method cannot solve. The method stops there; the others carry on."""
+
+## ------- Fields of 6 × 6 Blocks ------- ##
+
+def apply_blocks(blocks, rows):
+    """One 6 × 6 block times one row of 6, row by row: blocks[p] @ rows[p] for every p."""
+    return np.einsum('pij,pj->pi', blocks, rows)
+
+def assemble_blocks(blocks, rows, columns, shape):
+    """A sparse matrix of the given shape holding the dense blocks, block p at the global rows[p] and columns[p];
+    entries that land on the same place are summed, as in finite-element assembly."""
+    rows = np.broadcast_to(rows[:, :, None], blocks.shape)
+    columns = np.broadcast_to(columns[:, None, :], blocks.shape)
+    return scipy.sparse.coo_matrix((blocks.ravel(), (rows.ravel(), columns.ravel())), shape=shape).tocsr()
+
+def get_block_indices(block_numbers):
+    """The six rows (or columns) of each numbered 6 × 6 block: 6 × number + 0, ..., 5."""
+    return 6 * block_numbers[:, None] + np.arange(6)
+
+def apply_sparse(matrix, rows):
+    """A sparse matrix on stacked rows of 6."""
+    return (matrix @ rows.reshape(-1)).reshape(-1, 6)
 
 ## ------- Residual Size ------- ##
 
@@ -89,11 +112,21 @@ class Solver:
     A method (a subclass) supplies
       evaluate(strain, macro_strain, plastic_history)      an Evaluation of its residual at the given strain,
       get_newton_correction(current, plastic_history)      the Newton correction there and its Krylov iteration count,
-    and may change where a step starts (start_step), how the residual's size is judged (measure_residual, average) or
-    when a step counts as diverging (divergence_limit)."""
+    and may change where a step starts (start_step), how the residual's size is judged (measure_residual) or when a step
+    counts as diverging (divergence_limit).
+
+    offline_from_cache is the (seconds, peak MB) of offline work the method loaded from the cache instead of doing it:
+    run.py counts it as if it were done now."""
+    offline_from_cache = (0.0, 0.0)
+
     def __init__(self, clusters, unknown_count):
         self.clusters = clusters
         self.previous_strain = np.zeros((unknown_count, 6))
+        self.previous_macro_strain = np.zeros(6)
+
+    def start_over(self):
+        """Forget the steps solved so far: the next starts from zero strain, as a new solver would."""
+        self.previous_strain = np.zeros_like(self.previous_strain)
         self.previous_macro_strain = np.zeros(6)
 
     def start_step(self, macro_strain, plastic_history):
@@ -104,14 +137,12 @@ class Solver:
         """The residual as convergence judges it: the residual itself, unless a method says otherwise."""
         return residual
 
-    def average(self, values):
-        return self.clusters.average(values)
-
     def divergence_limit(self):
         return config.divergence_limit
 
     def get_relative_residual(self, evaluation, macro_strain):
-        return get_relative_residual(self.measure_residual(evaluation.residual), macro_strain, self.average)
+        return get_relative_residual(self.measure_residual(evaluation.residual), macro_strain,
+                                     self.clusters.average)
 
     def take_step(self, current, correction, relative_residual, macro_strain, plastic_history):
         """Backtracking line search: the full Newton step if it lowers the relative residual enough (by the fraction
