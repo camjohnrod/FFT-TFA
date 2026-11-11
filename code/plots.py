@@ -1,5 +1,5 @@
 """Every figure run.py saves: the macroscopic stress-strain curves and stress errors, error against time, each entry's
-discretization of the cross-section, and maps and a profile of the von Mises stress and the accumulated plastic strain.
+discretization of the cross-section, and a field's maps and profile.
 
 Every method is drawn the same way in every figure (method_styles). Only plot appearance is set here: this file imports
 no other file of the project, and run.py hands it plain arrays.
@@ -19,10 +19,9 @@ import matplotlib.lines
 figure_style = {'font.family': 'serif', 'font.serif': ['cmr10'], 'mathtext.fontset': 'cm',
                 'axes.formatter.use_mathtext': True, 'axes.formatter.useoffset': False, 'savefig.dpi': 200}
 
-# One look per line, in legend order: told apart by colour (Okabe–Ito, whose pairs stay distinct under simulated
-# colour blindness) and by dash pattern. The reference, when it runs, is solid black, drawn first so every method shows
-# on top of it. FFT-TFA, the method being tested, is dash-dotted, Spectral LS dotted. TFA, the baseline, is a thinner
-# dash drawn on top, so it stays visible where the curves agree.
+# One look per method, told apart by colour (Okabe–Ito, distinct under colour blindness) and by dash pattern. The
+# reference is solid black, drawn first so every method shows on top of it; TFA is a thinner dash drawn last, so it stays
+# visible where the curves agree.
 method_styles = {
     "Reference":   {'color': 'black', 'linestyle': '-', 'zorder': 0},
     "FFT-TFA":     {'color': '#009E73', 'linestyle': (0, (6, 2, 1.5, 2)), 'zorder': 2},
@@ -229,12 +228,9 @@ cross_section_style = {**figure_style, 'font.size': 12, 'axes.titlesize': 13}
 cross_section_panel_size = 4.2
 cross_section_legend_row_height = 0.3    # inches of figure height per row of the legend
 
-# A method's clusters, when it colours them in, fill their elements: each matrix cluster in its own colour, lightened so
-# the boundaries stay visible, and the inclusion's clusters in greys, so the inclusion still reads as the inclusion.
-# Elements of one cluster share its colour wherever they lie, and methods with the same clusters colour them alike. The
-# matrix colours are tab20's dark colours, then its light ones (so consecutive clusters differ), then tab20b's and
-# tab20c's, without any grey (no colour whose channels lie within grey_tolerance of each other), so no matrix cluster
-# looks like the inclusion; they repeat past 53 matrix clusters, where the cluster boundaries still tell clusters apart.
+# k-means clusters are coloured in: each matrix cluster in its own lightened colour (tab20's dark colours, then its light
+# ones so neighbours differ, then tab20b's and tab20c's, greys left out so none looks like the inclusion; they repeat
+# past 53), the inclusion's clusters in greys.
 grey_tolerance = 0.1
 matrix_cluster_colors = np.array([color for color in plt.cm.tab20.colors[::2] + plt.cm.tab20.colors[1::2]
                                   + plt.cm.tab20b.colors + plt.cm.tab20c.colors
@@ -253,11 +249,8 @@ class CellMap(NamedTuple):
     element_phase: np.ndarray
     fill_cluster_ids: np.ndarray = None
 
-# The kinds of line, drawn in this order, each named in the legend by what it bounds: hairline grey for Spectral LS's
-# voxels, so its fine grid shows without competing, lighter than the clusters' lines so the two read apart; thin dark
-# grey for the clusters (one material state each), visible on the light phases and the cluster colours without
-# drawing the eye; thick black for FFT-TFA's partitions, the cells of its FFT, drawn on top where the two
-# coincide. Every panel is framed alike.
+# The kinds of line, drawn in this order and named in the legend by what they bound: hairline grey for Spectral LS's
+# voxels, thin dark grey for the clusters, thick black on top for FFT-TFA's partitions, the cells of its FFT.
 boundary_styles = {
     "voxel":     {'label': "voxel", 'color': '0.62', 'linewidth': 0.3},
     "cluster":   {'label': "cluster: uniform eigenstrain", 'color': '0.2', 'linewidth': 0.5},

@@ -33,8 +33,12 @@ should communicate what it does").
 - **What runs is a list of entries per method** (`fft_tfa`, `spectral_ls`, `tfa`), empty to switch a method off. Each
   entry holds that method's own settings, so nothing downstream reads a global partition or cluster count.
   `clustered_mesh` (elements per side) is one fine mesh shared by FFT-TFA and TFA; Spectral LS's elements are its own.
+- **The code is for teaching** (the user's goals, 2026-11-10): correct first, then obvious to use and to read, nothing
+  convoluted; reuse general helpers; optimize only where the code stays readable; a fair comparison between methods.
+  Every method is a `newton.Solver` built from its clusters and its own settings (`FFTTFASolver(clusters, degree)`,
+  `SpectralLSSolver(clusters, C0)`, `TFASolver(clusters)`); keep new methods and features to that shape.
 - **FFT-TFA is separate from Spectral LS**: `fft_tfa_model.py` uses only `ls_model`'s shared code (the Moulinec–Suquet
-  kernel, `apply_on_lattice`, the block helpers). Its reference medium is always the matrix (no setting). Its
+  kernel, `apply_on_lattice`) and `newton`'s block helpers. Its reference medium is always the matrix (no setting). Its
   interaction: each partition's own clusters exactly (the corrections, FT-3), every other partition through its
   polynomial moments up to `degree` (per entry; `"full"` is exact), by one FFT; the corrections act on the
   polarization's deviation from its cell mean, so a uniform polarization causes no strain.
@@ -68,16 +72,9 @@ python code/check.py save         # the same, then save the results
 python notes/figures/make_figures.py  # the lecture's figures (a few minutes)
 ```
 
-There is no pytest suite and no way to run one check problem alone. `check.py` solves seven problems (the laminate, cut
-laminate, z laminate, fiber, sphere, k-means sphere and random fibers) with every method and checks, each against a
-tolerance in config.py: every method against the laminates' exact solution (FFT-TFA on the cut laminate only at full
-degree; at degree 1 it is printed as INFO, `inexact_methods`); FFT-TFA's interaction at full degree against the
-element-level LS operator averaged over its clusters (`get_interaction_error`), and the patch test at the problem's
-degree (`get_patch_test_error`); stopping accuracy against a tight solve on the fiber and sphere (not with k-means
-clusters of a few elements, which can have several solutions); the cached reference against Spectral LS
-(`check_reference`); and every result against `code/check_saved_results.npz` (untracked) bit for bit, at the
-`thread_count` it was saved with, skipped if none is saved. For a refactor: `check.py save` on a clean tree before,
-`check.py` after.
+There is no pytest suite and no way to run one check problem alone; check.py's docstring lists its checks. Its last
+check compares every result with `code/check_saved_results.npz` (untracked) bit for bit, at the `thread_count` it was
+saved with, and is skipped if none is saved. For a refactor: `check.py save` on a clean tree before, `check.py` after.
 
 Not covered by `check.py`, so recheck by hand after touching them: FFT-TFA's block-Jacobi preconditioner must leave
 answers alone (compare with it on and off), FFT-TFA's Newton product must match finite differences of its residual (FT-6),
@@ -105,23 +102,16 @@ Estimate the cost of large configurations (`preview`) and run them in the backgr
 Imports go one way: `config` → `material` → `newton` → `cell` → `ls_model`, `tfa_model` → `fft_tfa_model` (from
 `ls_model`) → `run` → `check`. `plots.py` imports no project module; only `run.py` calls it.
 
-| Module | Contents |
-|---|---|
-| `config.py` | every input, `strain`, `check_inputs()`, folders |
-| `run.py` | the commands first (`run`, `preview`, `replot`, `list_cache`, `main`), then `Entry`, `get_entries`, the builders, `get_load_path`, `run_load_path`, `run_in_own_process`, `solve_all`, the cached reference (`Reference`, `get_reference`), `save_run`, `get_saved_run`, `runs.csv`, tables, macroscopic stress errors, `draw_run` |
-| `fft_tfa_model.py` | FFT-TFA: the polynomials on a partition (`get_polynomial_basis`, `resolve_degree`), the moment kernels (`get_moment_kernels`) and cluster moments, correction blocks inside each partition (`get_correction_blocks` on `PartitionSlots`, FT-3; stored as 6 × 6 BSR blocks), `Interaction`, `get_interaction`, `get_strain_change` (FT-2 with FT-4), the block-Jacobi preconditioner's diagonal blocks (`get_own_strain_change`, FT-7), `FFTTFASolver` (FT-5, FT-6) |
-| `cell.py` | shapes (`is_inside_inclusion`, `shapes_constant_along_z`, `get_fiber_centres`), `Discretization`, `Mesh`, `Materials`, `Clusters`, `cluster_by_phase`, `cluster_by_k_means`, `get_clusters`, `get_memory_MB`, the cache (`get_cached`) |
-| `newton.py` | `Solver` (the one Newton loop and line search), `solve_by_gmres`, relative residual, `SolverDidNotConverge` |
-| `ls_model.py` | `apply_on_lattice` (FFT convolution, any block size), C0, the Moulinec–Suquet kernel and P0 on Spectral LS's elements (`get_P0_transformed`), LS-24 (`get_matrix_units_operator`), `SpectralLSOperators`, `SpectralLSSolver` (its corrections by CG, LS-28), `get_elastic_strain_concentration` (k-means features) |
-| `tfa_model.py` | element matrices, `FEModel`, E and P (`compute_E_and_P`) and their cache (`get_E_and_P`), column-restricted P products, `TFASolver` with the elastic reset |
-| `material.py` | vectorized J2 radial return (`radial_return`), its sensitivity H_μ and algorithmic stiffness L_t, `apply_blocks` |
-| `plots.py` | the figures: `method_styles` keyed by method name, `get_line_styles` (tints for a method's several entries); the cross-section's `boundary_styles` (voxel, cluster, partition lines) and k-means cluster colours |
-| `check.py` | the checks and the laminate's exact solution |
+The README's "Reading the code" table says what each module holds, in reading order. The shared types: `cell.Mesh`
+(elements and partitions, shapes along [z, y, x]), `cell.Clusters` (its mesh, the material states, ordered by partition),
+`run.LoadPathResult` (a solver's results along the load path; the reference's too).
 
 A method is a `newton.Solver` subclass with `evaluate` (its residual: LS-18, FT-5, ER-4) and `get_newton_correction` (LS-20
 with LS-28, FT-6, ER-21). `start_step` (TFA's elastic predictor), `measure_residual` (Spectral LS's LS-24) and
 `divergence_limit` (TFA's) may change. Figures are drawn only from what a run saved (`run.json`, `results.npz`), which is
-why `replot` needs no solve.
+why `replot` needs no solve: `results.npz` holds the macroscopic stress at every step and maps of the mid-thickness
+layer (cluster, partition, phase; stress and accumulated plastic strain at the turning points), so any field in
+`run.fields` can be added and redrawn. Runs saved before 2026-11-10 stored per-cluster arrays and cannot be replotted.
 
 ## Non-obvious points
 
@@ -132,7 +122,8 @@ why `replot` needs no solve.
 - **Cache keys and cached arrays keep old names:** the key strings in `cell.get_geometry_parameters`,
   `run.get_reference_parameters` and `tfa_model.get_E_and_P` (`"domain_side_length"`, `"elements_per_side"`, ...) are
   hashed into the cache file names, and the cached reference stores `material_ids` and `macroscopic_stress`. Renaming
-  any of them orphans every existing cache (a reference can take 30 min); rename only with a version bump, on purpose.
+  any of them, or changing a value's type (they are Python ints), orphans every existing cache (a reference can take 30
+  min); change them only with a version bump, on purpose.
 - **Strain convention (ER-2):** engineering shear, `(ε11, ε22, ε33, 2ε12, 2ε23, 2ε13)`.
 - **Convergence (LS-24):** Spectral LS's residual is a strain of its reference medium, so convergence and the line search
   judge M_m⁻¹ r (the correction an all-matrix cell would need, `measure_residual`), while the Newton correction still solves
@@ -148,31 +139,23 @@ why `replot` needs no solve.
 - **No global lattice size online:** solvers, FFTs and the load path take sizes from the arrays they're given, never from
   config.
 - **Each entry runs in its own process** (`run_in_own_process`): that is what makes its peak memory its own and lets
-  `memory_limit_GB` stop only it. Reported peaks are above the process's start, leaving out Python and its modules. A
-  cached E and P report the seconds and memory they took when computed.
-- **Correction blocks** come from FFT cross-correlations of the clusters' indicators on twice the partition, against the
-  element kernel on the mesh's own element lattice.
+  `memory_limit_GB` stop only it. Reported peaks are above the process's start, leaving out Python and its modules.
 - **Lattices are 3D, indexed `[z, y, x]`.** A z-constant shape has one element layer and columns of partitions.
   `apply_on_lattice` transforms only axes longer than one (length-1 transforms are identities but slow).
 - **Half spectrum:** Fourier blocks (Spectral LS's `P0_transformed`, FFT-TFA's `moment_kernels`) hold only `rfftn`'s
   half (shape `(N_z, N, N//2 + 1, b, b)`), transformed back with `irfftn(..., s=(N_z, N, N))`; `apply_on_lattice` does
   both. Anything new reading them must do the same.
-- **Clusters:** `cell.Clusters` holds the material states (`volume` as a share of the cluster's partition), ordered by
-  partition. Clusters have unequal volumes: every cell average goes through `Clusters.average`. Every method reports stress
-  and plastic state per cluster.
+- **Clusters:** `cell.Clusters` holds its mesh and the material states, ordered by partition. Clusters have unequal
+  volumes: every cell average goes through `Clusters.average`. Every method reports stress and plastic state per cluster.
 - **A new shape** goes in `is_inside_inclusion`, `check_geometry`, the geometry cache parameters
   (`cell.get_geometry_parameters`: every parameter of the shape, or a stale E, P or reference is reused silently) and, if
   constant along z, `shapes_constant_along_z`. `"random fibers"` keys its cache on the placed radius and centres
   (`get_fiber_centres`), which stand for the count, volume fraction, gap and seed.
 - **TFA's P** is stored column-major so consecutive yielding clusters form a contiguous column block
   (`apply_P_to_clusters`). Don't fancy-index `P[:, columns]`: the copy costs more than the full product.
-- **k-means** runs on each element's elastic strain concentration from six elastic Spectral LS steps on the mesh's elements,
-  per partition's part in each phase (one cluster per part is exactly partition phases, with no features needed), with a
-  fixed seed; a part gets no more clusters than distinct features, and empty clusters are dropped. Its time counts in the
-  offline time of each entry that uses it.
 - **Iteration counts:** "Newton its" are corrections, "Krylov its" the inner (GMRES, or CG for Spectral LS) iterations
-  summed. "Online" is `solve_step` wall time; "Offline" is each entry's operator build as if it ran alone.
-- **A failed load step** raises `SolverDidNotConverge`; that entry stops and the others carry on.
+  summed. "Online" is `solve_step` wall time; "Offline" is building the entry's solver (its clusters included), work
+  loaded from the cache counted as when it was computed (`Solver.offline_from_cache`, set by TFA's E and P).
 - **Known differences by design:** LS methods (FFT-TFA included) start each step from the previous strain plus the
   uniform increment; TFA starts from the exact elastic predictor, so LS spends Newton iterations on elastic steps.
 

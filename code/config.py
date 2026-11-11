@@ -62,7 +62,8 @@ spectral_ls = [dict(elements=64,   C0="midpoint"),
 tfa         = []
 
 # The fine solution everything is compared with: Spectral LS, elements a multiple of clustered_mesh. Solved once and
-# cached, not timed; a first solve can take 30 min, so run it in the background. None: no reference.
+# cached, not timed, and solved again after any change of geometry, materials, load path or solver tolerance; a first
+# solve can take 30 min, so run it in the background. None: no reference.
 reference   = dict(elements=512, C0="midpoint")
 
 ## ======= 3. Results, Figures and Computer ======= ##
