@@ -36,21 +36,41 @@ def resolve_degree(degree, discretization):
     over its axes of their element count minus one."""
     return int(np.sum(discretization.partition_shape_in_elements - 1)) if degree == "full" else degree
 
+def get_axis_polynomials(size):
+    """Orthonormal polynomials of degree 0 to size − 1 on `size` equally spaced points, the constant first: one column
+    per degree. Built by the three-term (Stieltjes) recurrence, each new polynomial x times the last, orthogonalized
+    against all the earlier ones twice, which stays accurate at every degree; orthogonalizing the monomials xⁿ instead
+    loses the high degrees to round-off, since they are nearly parallel."""
+    positions = (np.arange(size) - (size - 1) / 2) / size
+    polynomials = [np.full(size, 1 / np.sqrt(size))]
+    for _ in range(size - 1):
+        values = positions * polynomials[-1]
+        for _ in range(2):
+            for polynomial in polynomials:
+                values = values - (polynomial @ values) * polynomial
+        polynomials.append(values / np.linalg.norm(values))
+    return np.column_stack(polynomials)
+
 def get_polynomial_basis(block_shape, degree):
     """Orthonormal polynomials of total degree at most `degree` on the element positions of a partition, the constant
-    first: one column per polynomial, shape (k_z, k, k, p). Built by Gram–Schmidt on the monomials in order of degree;
-    a monomial the block cannot tell apart from lower ones (x² on two elements) is dropped."""
+    first: one column per polynomial, shape (k_z, k, k, p), in order of total degree. Each is a product of one
+    polynomial per axis (get_axis_polynomials), of degrees adding up to at most `degree`: the elements lie on a grid,
+    so these products are orthonormal and span the same polynomials as the monomials of that total degree. An axis of k
+    elements holds degrees up to k − 1 (x² on two elements is no new function), so at full degree the basis holds one
+    polynomial per element."""
     axes = [axis for axis in range(3) if block_shape[axis] > 1]
-    positions = np.meshgrid(*[(np.arange(size) - (size - 1) / 2) / size for size in block_shape], indexing="ij")
-    exponents = sorted((e for e in itertools.product(range(degree + 1), repeat=len(axes)) if sum(e) <= degree), key=sum)
-    polynomials = []
+    axis_polynomials = [get_axis_polynomials(block_shape[axis]) for axis in axes]
+    exponents = sorted((e for e in itertools.product(*[range(min(degree, block_shape[axis] - 1) + 1) for axis in axes])
+                        if sum(e) <= degree), key=sum)
+    columns = []
     for exponent in exponents:
-        values = np.prod([positions[axis].ravel()**power for axis, power in zip(axes, exponent)], axis=0)
-        for polynomial in polynomials:
-            values = values - (polynomial @ values) * polynomial
-        if np.linalg.norm(values) > 1e-8:
-            polynomials.append(values / np.linalg.norm(values))
-    return np.column_stack(polynomials).reshape(*block_shape, -1)
+        values = np.ones(tuple(block_shape))
+        for axis, polynomials, power in zip(axes, axis_polynomials, exponent):
+            shape = [1, 1, 1]
+            shape[axis] = block_shape[axis]
+            values = values * polynomials[:, power].reshape(shape)
+        columns.append(values.ravel())
+    return np.column_stack(columns).reshape(*block_shape, -1)
 
 def get_cluster_moments(discretization, clusters, basis):
     """Every cluster's moments m, clusters × p: each polynomial summed over the cluster's elements. A cluster's

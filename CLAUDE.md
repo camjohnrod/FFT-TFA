@@ -148,8 +148,10 @@ why `replot` needs no solve.
 - **FFT-TFA's moment kernels** hold one 6p × 6p block per frequency of the partition lattice (`rfftn`'s half, over the
   axes longer than one), p the polynomials of the degree: memory grows as p² × partitions, independent of the clusters
   per partition; in 3D p = 4, 10, 20 for degrees 1–3, so degree 3 is already expensive (`preview` reports it). The
-  basis is orthonormal on a partition's elements, built by Gram–Schmidt, constant first, so the degree-0 moment is a
-  scaled mean and degree 0 reproduces the partition-averaged kernel.
+  basis is orthonormal on a partition's elements, constant first, so the degree-0 moment is a scaled mean and degree 0
+  reproduces the partition-averaged kernel. It is built as products of orthonormal polynomials along each axis (by
+  recurrence, `get_axis_polynomials`), never by Gram–Schmidt on monomials, which loses the high degrees to round-off: at
+  full degree it must hold one polynomial per element, which `check.py` checks on partitions up to 16 across.
 - **No global lattice size online:** solvers, FFTs and the load path take sizes from the arrays they're given, never from
   config.
 - **Each entry runs in its own process** (`run_in_own_process`): that is what makes its peak memory its own and lets

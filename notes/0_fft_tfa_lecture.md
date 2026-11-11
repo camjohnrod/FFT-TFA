@@ -440,20 +440,18 @@ strain, which is also the strain FT-1 is evaluated at:
 
 $$
 \large
-\boldsymbol\varepsilon(a)=\bar{\boldsymbol\varepsilon}-\sum_b\Big\langle\sum_\beta\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\chi_b(\beta)\Big\rangle_a\boldsymbol\tau(b)
+\sum_{\alpha\text{ in }A}\varphi(\alpha)\,\psi(\alpha)=
+\begin{cases}1 & \varphi=\psi\\ 0 & \varphi\neq\psi\end{cases}
 $$
 
-#### Step 3 · Define the averaged kernel
+$\varphi(\alpha)$ is the polynomial's value at $\alpha$'s position *inside its own partition*, so every partition has
+the same polynomials. The first is the constant, $1/\sqrt{\lvert A\rvert}$ (`fft_tfa_model.get_polynomial_basis`: the
+elements lie on a grid, so products of orthonormal polynomials along each axis are orthonormal). Their number
+$N_{\text{poly}}$ is 1, 3, 6, 10 for degrees 0–3 in 2D, and 1, 4, 10, 20 in 3D.
 
-Write the average over $a$ with $a$'s indicator, so that both clusters appear the same way:
+#### Step 2 · Summarize each partition's polarization by its moments
 
-$$
-\large
-\boxed{\
-\hat{\boldsymbol\Gamma}(a\leftarrow b)=\frac1{\lvert a\rvert}\sum_\alpha\sum_\beta\chi_a(\alpha)\,\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\chi_b(\beta)\ }
-$$
-
-the strain averaged over $a$ per unit polarization on $b$. Then we have
+Define the **moment** of partition $B$'s polarization along $\psi$:
 
 $$
 \large
