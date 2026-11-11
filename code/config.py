@@ -28,8 +28,11 @@ steps_to_first_turning_point = 25      # the load path's other lines keep the sa
 
 ## ======= 2. What to Compare ======= ##
 
-# Any number of entries per method, each a line in the table and in the figures; an empty list switches a method off.
-# Later entries of a method are drawn darker, so list them coarse to fine.
+# Any number of entries per method, each a line in the table; an empty list switches a method off. A list of entries is
+# one scheme: the error-against-time plot joins them in one line, in the order listed (so list them coarse to fine), and
+# the other figures draw its last. To compare schemes, give a list of lists, one per scheme, for example:
+#   fft_tfa = [[dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=2) for p in (4, 8, 16)],
+#              [dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=3) for p in (4, 8, 16)]]
 
 # FFT-TFA and TFA both group the elements of one fine mesh, which resolves the geometry, into clusters. Spectral LS and
 # the reference set their own elements.
@@ -192,9 +195,25 @@ output_folder = pathlib.Path(__file__).parent / "output"
 for thread_variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ[thread_variable] = str(thread_count)
 
-def check_entries(name, entries, needed_settings):
-    """Every entry of a method's list must hold exactly that method's settings."""
-    for entry in entries:
+def get_schemes(listed):
+    """A method's schemes, each a list of entries: a list of entries is one scheme, a list of lists one per inner list."""
+    if all(isinstance(entry, dict) for entry in listed):
+        return [list(listed)] if listed else []
+    if all(isinstance(scheme, list) and scheme and all(isinstance(entry, dict) for entry in scheme) for scheme in listed):
+        return [list(scheme) for scheme in listed]
+    raise ValueError("A method's entries must be a list of dicts (one scheme) or a list of non-empty lists of dicts "
+                     f"(one per scheme). Got {listed}.")
+
+def get_all_entries(listed):
+    """Every entry of a method's schemes."""
+    return [entry for scheme in get_schemes(listed) for entry in scheme]
+
+def check_entries(name, listed, needed_settings):
+    """Every entry of a method must hold exactly that method's settings, and no scheme may list one entry twice."""
+    for scheme in get_schemes(listed):
+        if any(scheme.count(entry) > 1 for entry in scheme):
+            raise ValueError(f"A scheme of {name} lists an entry twice: {scheme}.")
+    for entry in get_all_entries(listed):
         if set(entry) != set(needed_settings):
             raise ValueError(f"Each entry of {name} needs exactly {', '.join(needed_settings)}. Got {entry}.")
 
@@ -245,19 +264,19 @@ def check_inputs():
     check_entries("fft_tfa", fft_tfa, ("partitions", "matrix_clusters", "inclusion_clusters", "degree"))
     check_entries("spectral_ls", spectral_ls, ("elements", "C0"))
     check_entries("tfa", tfa, ("partitions", "matrix_clusters", "inclusion_clusters"))
-    for entry in fft_tfa + tfa:
+    for entry in get_all_entries(fft_tfa) + get_all_entries(tfa):
         if clustered_mesh % entry["partitions"] != 0:
             raise ValueError(f"partitions={entry['partitions']} must divide clustered_mesh={clustered_mesh}.")
         if min(entry["matrix_clusters"], entry["inclusion_clusters"]) < 1:
             raise ValueError(f"The cluster counts must be at least 1. Got {entry}.")
-    for entry in fft_tfa:
+    for entry in get_all_entries(fft_tfa):
         if entry["degree"] != "full" and not (isinstance(entry["degree"], int) and entry["degree"] >= 0):
             raise ValueError(f"degree must be \"full\" or an integer from 0. Got {entry}.")
     if reference is not None:
         check_entries("reference", [reference], ("elements", "C0"))
         if reference["elements"] % clustered_mesh != 0:
             raise ValueError("reference's elements must be a multiple of clustered_mesh.")
-    for C0 in [entry["C0"] for entry in spectral_ls] + [k_means_features_C0] + ([reference["C0"]] if reference else []):
+    for C0 in [entry["C0"] for entry in get_all_entries(spectral_ls)] + [k_means_features_C0] + ([reference["C0"]] if reference else []):
         if C0 not in ("midpoint", "matrix"):
             raise ValueError(f"A reference stiffness C0 must be \"midpoint\" or \"matrix\". Got {C0!r}.")
 

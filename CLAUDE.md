@@ -31,7 +31,11 @@ should communicate what it does").
   configuration; "default" means `git show HEAD:code/config.py`. The user edits it while you work: change it by targeted
   edits, never by rewriting it from an earlier read.
 - **What runs is a list of entries per method** (`fft_tfa`, `spectral_ls`, `tfa`), empty to switch a method off. Each
-  entry holds that method's own settings, so nothing downstream reads a global partition or cluster count.
+  entry holds that method's own settings, so nothing downstream reads a global partition or cluster count. A list of
+  lists splits a method into schemes, chosen by the user (`config.get_schemes`; names from the settings, `run.get_entries`):
+  the error-against-time plot draws one line per scheme in the order listed, the other line figures each scheme's last
+  (finest) entry only, never several shades of one scheme; a scheme's colour is a shade of its method's
+  (`plots.scheme_shades`). An entry listed in two schemes is solved once.
   `clustered_mesh` (elements per side) is one fine mesh shared by FFT-TFA and TFA; Spectral LS's elements are its own.
 - **The code is for teaching** (the user's goals, 2026-11-10): correct first, then obvious to use and to read, nothing
   convoluted; reuse general helpers; optimize only where the code stays readable; a fair comparison between methods.

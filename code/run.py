@@ -151,10 +151,14 @@ def main():
 ## ------- Entries ------- ##
 
 class Entry(NamedTuple):
-    """One line of the comparison: a method, what it is called, and its settings (config.fft_tfa and the others)."""
+    """One line of the comparison: a method, what it is called, and its settings (config.fft_tfa and the others), in a
+    scheme of its method: its name, its place among the method's schemes, and what tells the entry apart within it."""
     method: str
     label: str
     settings: dict
+    scheme: str
+    scheme_index: int
+    point: str
 
 def format_setting(name, value):
     """How a setting shows in an entry's label: partitions or elements per side as 8² or 8³, m=, i=, degree, C0."""
@@ -164,14 +168,25 @@ def format_setting(name, value):
             "C0": f"C0 {value}"}[name]
 
 def get_entries():
-    """Every entry config.py lists, in the order of the table and the figures. A lone entry is called by its method;
-    several are told apart by the settings that differ among them."""
+    """Every entry config.py lists, scheme by scheme, in the order of the table. A scheme is named by its method and the
+    settings its entries share that differ between the method's schemes; an entry within it, by the settings that
+    differ among the scheme's entries. A method with one scheme is named by the method alone."""
     entries = []
     for method, listed in (("FFT-TFA", config.fft_tfa), ("Spectral LS", config.spectral_ls), ("TFA", config.tfa)):
-        for settings in listed:
-            differing = [format_setting(name, value) for name, value in settings.items()
-                         if any(other[name] != value for other in listed)]
-            entries.append(Entry(method, " ".join([method, *differing]), settings))
+        schemes = config.get_schemes(listed)
+        shared = [{name: value for name, value in scheme[0].items() if all(entry[name] == value for entry in scheme)}
+                  for scheme in schemes]
+        names = [" ".join([method, *(format_setting(name, value) for name, value in scheme_shared.items()
+                                     if any(other.get(name) != value for other in shared))])
+                 for scheme_shared in shared]
+        if len(set(names)) < len(names):
+            names = [f"{name} ({index + 1})" for index, name in enumerate(names)]
+        for index, (scheme, scheme_shared, name) in enumerate(zip(schemes, shared, names)):
+            for settings in scheme:
+                point = " ".join(format_setting(setting, value) for setting, value in settings.items()
+                                 if setting not in scheme_shared)
+                label = name if not point else f"{name} {point}" if name == method else f"{name}, {point}"
+                entries.append(Entry(method, label, settings, name, index, point))
     return entries
 
 def get_element_cluster(mesh, settings):
@@ -328,9 +343,13 @@ def solve_all(load_path, field_steps=None):
     """Every entry's LoadPathResult by label (None where it could not be built), and each entry's line of run.json: what
     it is, how far it got and what it cost. Fields are kept at the given load steps, by default the turning points."""
     field_steps = load_path.turning_steps if field_steps is None else field_steps
-    results, entries = {}, []
+    results, entries, outcomes = {}, [], {}
     for entry in get_entries():
-        value, failure_reason = run_in_own_process(solve_entry, entry, load_path, field_steps)
+        # An entry listed in several schemes is solved once.
+        key = (entry.method, json.dumps(entry.settings, sort_keys=True))
+        if key not in outcomes:
+            outcomes[key] = run_in_own_process(solve_entry, entry, load_path, field_steps)
+        value, failure_reason = outcomes[key]
         if value is None:
             print(f"{entry.label} failed: {failure_reason}")
             result, costs = None, {"offline_seconds": 0.0, "peak_offline_MB": 0.0, "peak_online_MB": 0.0}
@@ -340,6 +359,7 @@ def solve_all(load_path, field_steps=None):
         solved = result is not None
         results[entry.label] = result
         entries.append({"label": entry.label, "method": entry.method, "settings": entry.settings,
+                        "scheme": entry.scheme, "scheme_index": entry.scheme_index, "point": entry.point,
                         "cluster_count": result.clusters.cluster_count if solved else 0,
                         "completed_step_count": result.completed_step_count if solved else 0,
                         "newton_iterations": int(result.newton_iterations_per_step.sum()) if solved else 0,
@@ -536,6 +556,30 @@ class Field(NamedTuple):
 fields = [Field("plastic_strain", "Accumulated plastic strain (%)", lambda _, plastic_strain: 100 * plastic_strain,
                 "plastic_strain_range_percent")]
 
+def get_scheme_indices(info):
+    """Every drawn label's place among its method's schemes, which sets its colour (the reference's is 0)."""
+    return {"Reference": 0, **{entry["label"]: entry.get("scheme_index", 0) for entry in info["entries"]}}
+
+def get_finest_entries(entries):
+    """Each scheme's last entry that solved a load step: the one the line figures draw."""
+    finest = {}
+    for entry in entries:
+        if entry["completed_step_count"] > 0:
+            finest[entry["method"], entry.get("scheme", entry["label"])] = entry
+    return list(finest.values())
+
+def get_scheme_points(entries, errors):
+    """The error-against-time plot's schemes, from the entries that completed the load path: one dict per scheme, its
+    points in the order listed."""
+    schemes = {}
+    for entry in entries:
+        key = entry["method"], entry.get("scheme", entry["method"])
+        scheme = schemes.setdefault(key, {"method": entry["method"], "index": entry.get("scheme_index", 0),
+                                          "name": key[1], "points": []})
+        scheme["points"].append((entry.get("point", entry["label"]), entry["online_seconds"],
+                                 get_root_mean_square_error(errors[entry["label"]])))
+    return list(schemes.values())
+
 def get_cell_map(entry, arrays):
     """An entry's discretization on its element grid at mid-thickness, with its settings: k-means clusters coloured in.
     """
@@ -586,11 +630,14 @@ def get_matrix_only(field_maps, inclusion_maps):
             for field_map in field_maps]
 
 def draw_load_path_figures(folder, info, arrays, drawn):
-    """The figures along the load path, and with the reference on, the error table."""
+    """The figures along the load path, each scheme's finest entry in the stress-strain and stress-error figures, every
+    entry in the error-against-time plot; and with the reference on, the error table of every entry."""
     applied_macro_strain = arrays["applied_macro_strain"]
     step_count = len(applied_macro_strain)
-    stress_MPa = {entry["label"]: arrays[f"{entry['label']}/macro_stress"] / 1e6 for entry in drawn}
-    completed_step_counts = {entry["label"]: entry["completed_step_count"] for entry in drawn}
+    finest = get_finest_entries(drawn)
+    scheme_indices = get_scheme_indices(info)
+    stress_MPa = {entry["label"]: arrays[f"{entry['label']}/macro_stress"] / 1e6 for entry in finest}
+    completed_step_counts = {entry["label"]: entry["completed_step_count"] for entry in finest}
     error_table = ""
     if info["reference"] is not None:
         reference_stress = arrays["Reference/macro_stress"]
@@ -599,15 +646,13 @@ def draw_load_path_figures(folder, info, arrays, drawn):
         components = get_loaded_components(reference_stress)
         errors = get_macro_stress_errors(info, arrays, components)
         error_table = get_error_table(info, errors, components, step_count)
-        plots.plot_macro_stress_errors(errors, components, step_count, folder / "macro_stress_error.png")
-        complete = [entry for entry in drawn if entry["completed_step_count"] == step_count]
-        methods = [entry["method"] for entry in complete]
-        if any(methods.count(method) > 1 for method in methods):
-            plots.plot_error_against_time(
-                {entry["label"]: (entry["method"], entry["online_seconds"],
-                                  get_root_mean_square_error(errors[entry["label"]])) for entry in complete},
-                folder / "error_against_time.png")
-    plots.plot_stress_strain(stress_MPa, completed_step_counts, applied_macro_strain, folder / "stress_strain.png")
+        plots.plot_macro_stress_errors({entry["label"]: errors[entry["label"]] for entry in finest}, components,
+                                       step_count, scheme_indices, folder / "macro_stress_error.png")
+        schemes = get_scheme_points([entry for entry in drawn if entry["completed_step_count"] == step_count], errors)
+        if any(len(scheme["points"]) > 1 for scheme in schemes):
+            plots.plot_error_against_time(schemes, folder / "error_against_time.png")
+    plots.plot_stress_strain(stress_MPa, completed_step_counts, applied_macro_strain, scheme_indices,
+                             folder / "stress_strain.png")
     return error_table
 
 def draw_field_figures(folder, info, arrays):
@@ -621,6 +666,8 @@ def draw_field_figures(folder, info, arrays):
     # The profile follows the middle row of the mesh's elements, which the reference's subdivide; a map on other
     # elements (Spectral LS's) shows its row at that height. The inclusion's stretches come from the finest map.
     profile_height = (info["clustered_mesh"] // 2 + 0.5) / info["clustered_mesh"]
+    reached = [entry for entry in info["entries"] if entry["completed_step_count"] > turning_steps[turning_point]]
+    profile_labels = {"Reference", *(entry["label"] for entry in get_finest_entries(reached))}
     for field in fields:
         field_maps, inclusion_maps = get_field_maps(info, arrays, turning_point, field)
         if not field_maps:
@@ -630,8 +677,9 @@ def draw_field_figures(folder, info, arrays):
         plots.plot_field_maps(shown_maps, field.label, title,
                               *get_color_limits(shown_maps, *getattr(config, field.range_setting)),
                               folder / f"{field.name}.png")
-        plots.plot_field_profiles(field_maps, profile_height, max(inclusion_maps.values(), key=len), field.label, title,
-                                  info["side_length_mm"], folder / f"{field.name}_profile.png")
+        plots.plot_field_profiles([field_map for field_map in field_maps if field_map.title in profile_labels],
+                                  profile_height, max(inclusion_maps.values(), key=len), field.label, title,
+                                  info["side_length_mm"], get_scheme_indices(info), folder / f"{field.name}_profile.png")
 
 def draw_run(folder):
     """Every table and figure of a saved run, from what it saved, with config.py's figure settings: the tables printed

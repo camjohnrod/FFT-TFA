@@ -33,8 +33,10 @@ load_path_style = {**figure_style, 'font.size': 12, 'axes.labelsize': 13, 'xtick
                    'ytick.labelsize': 11, 'legend.fontsize': 12, 'lines.linewidth': 1.8, 'axes.spines.top': False,
                    'axes.spines.right': False}
 legend_style = {'loc': 'outside upper center', 'frameon': False, 'handlelength': 3.2}
-# How much lighter a method's first entry is drawn than its last, as a mix with white.
-first_entry_lightening = 0.55
+# A method's schemes (config.py's inner lists), in the order listed: the first in its method's colour, the next ones
+# darker (negative: a mix with black) or lighter (positive: a mix with white), each with its own marker.
+scheme_shades = [0, -0.4, 0.45, -0.65]
+scheme_markers = ['o', 's', '^', 'D']
 # Legends wrap past this many entries, so that long labels stay inside the figure.
 legend_columns = 4
 
@@ -46,18 +48,17 @@ def get_display_label(label):
     """An entry's label as figures show it: Computer Modern has no ² or ³ of its own."""
     return label.replace("²", "$^2$").replace("³", "$^3$")
 
-def get_line_styles(labels):
-    """Each label's line: its method's style, a method's earlier entries in lighter tints when it has several."""
-    styles = {}
-    for method in method_styles:
-        method_labels = [label for label in labels if get_method(label) == method]
-        for index, label in enumerate(method_labels):
-            share_of_last = 1 if len(method_labels) == 1 else index / (len(method_labels) - 1)
-            lightening = first_entry_lightening * (1 - share_of_last)
-            color = np.array(matplotlib.colors.to_rgb(method_styles[method]['color']))
-            styles[label] = {**method_styles[method], 'color': tuple(color + lightening * (1 - color)),
-                             'label': get_display_label(label)}
-    return styles
+def get_scheme_color(method, scheme_index):
+    """The colour of a method's scheme: its method's colour, shaded by the scheme's place (scheme_shades)."""
+    color = np.array(matplotlib.colors.to_rgb(method_styles[method]['color']))
+    shade = scheme_shades[scheme_index % len(scheme_shades)]
+    return tuple(color * (1 + shade) if shade < 0 else color + shade * (1 - color))
+
+def get_line_styles(scheme_indices):
+    """Each label's line: its method's style in its scheme's colour. scheme_indices: label -> the place of its scheme
+    among its method's (0 for the reference)."""
+    return {label: {**method_styles[get_method(label)], 'color': get_scheme_color(get_method(label), index),
+                    'label': get_display_label(label)} for label, index in scheme_indices.items()}
 
 def plot_lines(axis, x_values, values_per_label, line_styles):
     """Each label's curve against x_values from the unloaded state, as far as it was solved, with an x where it stopped
@@ -73,10 +74,10 @@ def style_panel(axis, ylabel, x_locator):
     axis.grid(True, color='0.9', linewidth=0.8)
     axis.set_axisbelow(True)
 
-def add_legend(figure, axis):
-    """One legend above the figure for the lines of the given axis, wrapping past legend_columns entries."""
+def add_legend(figure, axis, columns=legend_columns):
+    """One legend above the figure for the lines of the given axis, wrapping past the given number of columns."""
     handles, labels = axis.get_legend_handles_labels()
-    figure.legend(handles, labels, ncols=min(len(handles), legend_columns), columnspacing=2.4, **legend_style)
+    figure.legend(handles, labels, ncols=min(len(handles), columns), columnspacing=2.4, **legend_style)
 
 def save_panel_figure(row_count, draw_panels, xlabel, plot_path):
     """A figure of panels three to a row on a shared x axis, drawn by draw_panels(axes), with one legend above."""
@@ -131,12 +132,13 @@ def get_load_axis(applied_macro_strain):
             r"Load factor $t$,   $\bar{\varepsilon} = t\,\bar{\varepsilon}_{\max}$,   $\bar{\varepsilon}_{\max}$:  "
             + max_strain_description)
 
-def plot_stress_strain(stress_MPa_per_method, completed_step_count_per_method, applied_macro_strain, plot_path):
+def plot_stress_strain(stress_MPa_per_method, completed_step_count_per_method, applied_macro_strain, scheme_indices,
+                       plot_path):
     """Each entry's macroscopic stress (MPa, one row per step) against the applied strain, one panel per component, from
     the unloaded state to the last step it solved. A row whose components are zero for every entry is left out (uniaxial
     loading leaves every shear at zero), and a zero panel in a kept row shows only "0"."""
     load_axis, load_axis_label = get_load_axis(applied_macro_strain)
-    line_styles = get_line_styles(stress_MPa_per_method)
+    line_styles = get_line_styles({label: scheme_indices[label] for label in stress_MPa_per_method})
     solved_stress_MPa = {method: np.vstack([np.zeros(6), stress[:completed_step_count_per_method[method]]])
                          for method, stress in stress_MPa_per_method.items()}
     largest_stress = max(np.abs(stress).max() for stress in solved_stress_MPa.values())
@@ -168,13 +170,13 @@ def plot_stress_strain(stress_MPa_per_method, completed_step_count_per_method, a
 stress_component_subscripts = ["11", "22", "33", "12", "23", "13"]
 error_zero_line_style = {'color': '0.6', 'linewidth': 0.8, 'zorder': 1}
 
-def plot_macro_stress_errors(error_percent_per_method, components, step_count, plot_path):
+def plot_macro_stress_errors(error_percent_per_method, components, step_count, scheme_indices, plot_path):
     """Each method's signed macroscopic stress error (%, one row per step it solved, one column per component in
     components) against the load step, one panel per component, three to a row as in the stress-strain figure, from the
     unloaded state (step 0, no error) to the last step the method solved. The load step, not the applied strain, so that
     a cyclic path unrolls instead of folding back on itself."""
     load_steps = np.arange(step_count + 1)
-    line_styles = get_line_styles(error_percent_per_method)
+    line_styles = get_line_styles({label: scheme_indices[label] for label in error_percent_per_method})
 
     def draw_panels(axes):
         for axis in axes.flat[len(components):]:
@@ -191,22 +193,22 @@ def plot_macro_stress_errors(error_percent_per_method, components, step_count, p
 
 ## ------- Error Against Time ------- ##
 
-def plot_error_against_time(points_per_label, plot_path):
-    """Each entry's root-mean-square macroscopic stress error (%) against its online time, entries of a method joined in
-    the order listed, each marked with what tells it from the others. points_per_label: label -> (method, seconds,
-    error)."""
+def plot_error_against_time(schemes, plot_path):
+    """Each scheme's root-mean-square macroscopic stress error (%) against online time, one line per scheme through its
+    entries in the order listed, each point marked with what tells it from the scheme's others. schemes: one dict per
+    scheme, with its method, its place among its method's schemes (index), its name, and its points, (point label,
+    seconds, error)."""
     with plt.rc_context(load_path_style):
-        figure, axis = plt.subplots(figsize=(6, 4), layout='constrained')
-        for method, style in method_styles.items():
-            points = {label: point for label, point in points_per_label.items() if point[0] == method}
-            if not points:
-                continue
-            seconds, errors = [[point[column] for point in points.values()] for column in (1, 2)]
-            axis.plot(seconds, errors, marker='o', markersize=6, color=style['color'], linestyle=style['linestyle'],
-                      label=method)
-            for label, x, y in zip(points, seconds, errors):
-                axis.annotate(get_display_label(label.removeprefix(method).strip()), (x, y), textcoords='offset points',
-                              xytext=(6, 5), fontsize=11, color='0.25')
+        figure, axis = plt.subplots(figsize=(7, 5), layout='constrained')
+        for scheme in schemes:
+            style = method_styles[scheme["method"]]
+            point_labels, seconds, errors = zip(*scheme["points"])
+            axis.plot(seconds, errors, marker=scheme_markers[scheme["index"] % len(scheme_markers)], markersize=6,
+                      color=get_scheme_color(scheme["method"], scheme["index"]), linestyle=style['linestyle'],
+                      label=get_display_label(scheme["name"]))
+            for point_label, x, y in zip(point_labels, seconds, errors):
+                axis.annotate(get_display_label(point_label), (x, y), textcoords='offset points', xytext=(6, 5),
+                              fontsize=11, color='0.25')
         axis.set_xscale('log')
         axis.set_yscale('log')
         for log_axis in (axis.xaxis, axis.yaxis):
@@ -217,8 +219,7 @@ def plot_error_against_time(points_per_label, plot_path):
         axis.set_ylabel("Macroscopic stress error, rms (%)")
         axis.grid(True, which='both', color='0.92', linewidth=0.8)
         axis.set_axisbelow(True)
-        handles, labels = axis.get_legend_handles_labels()
-        figure.legend(handles, labels, ncols=len(handles), **legend_style)
+        add_legend(figure, axis, columns=2)
         figure.savefig(plot_path)
     plt.close(figure)
 
@@ -362,7 +363,8 @@ def plot_field_maps(field_maps, label, title, value_min, value_max, plot_path):
 profile_inclusion_color = '0.93'    # the inclusion's stretches along the profile, where an elastic phase has no flow
 profile_figure_size = (11, 3.6)
 
-def plot_field_profiles(field_maps, profile_height, inclusion_map, label, title, side_length_mm, plot_path):
+def plot_field_profiles(field_maps, profile_height, inclusion_map, label, title, side_length_mm, scheme_indices,
+                        plot_path):
     """Each map's values along the horizontal line at profile_height (a fraction of the side), left to right as on the
     maps, as steps (one value per element or voxel), in the style of the stress-strain figure. The inclusion's stretches
     along the line, read from inclusion_map (True inside, the finest available grid), are shaded."""
@@ -379,7 +381,7 @@ def plot_field_profiles(field_maps, profile_height, inclusion_map, label, title,
         changes = np.flatnonzero(np.diff(np.concatenate([[0], inclusion.astype(int), [0]])))
         for first, stop in zip(changes[::2], changes[1::2]):
             axis.axvspan(edges[first], edges[stop], color=profile_inclusion_color, linewidth=0, zorder=0)
-        line_styles = get_line_styles([field_map.title for field_map in field_maps])
+        line_styles = get_line_styles({field_map.title: scheme_indices[field_map.title] for field_map in field_maps})
         for field_map in field_maps:
             values = get_row(field_map.values)
             axis.plot(get_edges(values), np.append(values, values[-1]), drawstyle='steps-post',

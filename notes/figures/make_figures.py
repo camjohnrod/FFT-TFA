@@ -260,7 +260,7 @@ def draw_far_field():
         axis.text(0.35, 0.03, "replaced by the\nexact interaction", transform=axis.get_xaxis_transform(), fontsize=10,
                   va='bottom')
         for index, degree in enumerate(degrees):
-            color = green + plots.first_entry_lightening * (1 - index / (len(degrees) - 1)) * (1 - green)
+            color = green + 0.55 * (1 - index / (len(degrees) - 1)) * (1 - green)     # lighter for lower degrees
             axis.plot(distances, 100 * errors[degree], marker='o', color=tuple(color), label=f"degree {degree}")
         axis.set_yscale('log')
         axis.set_xticks(distances)

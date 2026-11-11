@@ -37,7 +37,7 @@ It needs Linux (or WSL), and Python 3.12 with `numpy`, `scipy`, `matplotlib` and
 
 **What to run:** every setting is in `code/config.py`, with what it means. Its first screen is all you normally touch:
 the problem (a geometry, materials and a load path, each one name from the lists further down, where you can add your
-own) and the entries of each method to compare.
+own) and the entries of each method to compare, which you can group into schemes, say degree 2 against degree 3.
 
 **What a run gives:** a folder in `code/output/` with a summary table, figures, and the results; the top of
 `code/run.py` lists its files.
