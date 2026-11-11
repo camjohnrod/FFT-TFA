@@ -13,11 +13,11 @@ material model (clusters, eigenstrains, update at the average strain) and differ
 averages the LS operator over its clusters with the matrix as C0, exact in the matrix but with the inclusion's
 polarization uniform per cluster (TFA resolves it), summarizes the other partitions by polynomial moments up to a
 `degree`, and uses the Moulinec–Suquet kernel instead of FE. At full degree FFT-TFA is SCA's clustered LS equation with
-C0 = L_m (`notes/0_fft_tfa_lecture.md`, sections 6–7). Neither difference is a bug.
+C0 = L_m (`notes/fft_tfa_lecture.md`, sections 6–7). Neither difference is a bug.
 
-Read the relevant note before changing solver math. Code names map onto the notes' symbols and numbered equations
-(FT-* in `notes/0_fft_tfa_lecture.md`, LS-* in `notes/2_ls_model.md` sections 2–4, ER-* in `notes/3_tfa_baseline.md`), which code
-comments cite. Comments cite equations and papers, never the history of a decision. The code is meant to read as an
+The theory is one note, `notes/fft_tfa_lecture.md`: FFT-TFA in its body, the material law, Spectral LS and TFA in its
+appendix. Read the relevant section before changing solver math; keep it one file. Code names map onto its symbols and
+its numbered equations (FT-*, LS-*, ER-*), which code comments cite. Comments cite equations and papers, never the history of a decision. The code is meant to read as an
 introduction for someone new to it: each module opens with a docstring saying what it does in plain words, functions and
 classes carry docstrings, and names are short but say what a thing is (the user's words: "tight and concise, but it
 should communicate what it does").
@@ -46,15 +46,14 @@ should communicate what it does").
 - **Fairness between methods:** each gets its best setting from the same principles, justified from the LS
   literature only (no FE papers), all share the Newton–Krylov settings and thread count, and all stop at the same
   accuracy (LS-24; FFT-TFA's residual is already in matrix units, FT-5), which `check.py` checks. The papers are in
-  `references/`, with one note per paper read cover to cover in `references/reading_notes/`; cite from those, never
-  from a title or abstract.
+  `references/`; cite only papers read cover to cover, never from a title or abstract.
 - **Small codebase:** one file per method and concept, the current ten; don't add modules without asking, and don't bring
   back what the cleanups removed (tags `pre-cleanup`, `pre-cleanup-2` and `pre-cleanup-3`: fixed-point solvers,
   FFT-preconditioned TFA, the FE kernel for P0, the coarse LS lattice, CP, the Fourier preconditioner, softening, FFT-TFA's
   truncation to neighbouring partitions, `reach`) without the user asking. Field error
   measures against the reference were left for later (a fair field error across different meshes is not settled, see the
   README's roadmap).
-- **The user has said they don't really understand LS-24.** When it comes up, explain it from the LS note's section 4.3
+- **The user has said they don't really understand LS-24.** When it comes up, explain it from the lecture's appendix B.3
   before building on it.
 
 ## Running the code
@@ -69,22 +68,16 @@ python code/check.py save         # the same, then save the results
 python notes/figures/make_figures.py  # the lecture's figures (a few minutes)
 ```
 
-There is no pytest suite and no way to run one check problem alone. `check.py` solves `"laminate"`, `"cut laminate"`,
-`"fiber"`, `"z laminate"`, `"sphere"`, `"k-means sphere"` and `"random fibers"` with every method. On the laminates every
-method must match the exact solution to `laminate_tolerance` (Spectral LS on its own coarser elements on the laminate,
-finer on the z laminate, both resolving the layer exactly), except FFT-TFA on the cut laminate (`inexact_methods`: printed
-as INFO: degree 1 cannot follow the polarization's step across a cut partition); FFT-TFA at full degree must match it on
-every laminate, and with TFA also on the laminate with each partition's matrix part cut into two clusters
-(`get_split_clusters`). On every problem FFT-TFA's interaction at full degree must equal the element-level LS operator
-averaged over its clusters (`get_interaction_error`, to `interaction_check_tolerance`): that catches a wrong kernel,
-moment, pair count, correction block or average; and at the problem's degree a uniform polarization must cause no
-strain (`get_patch_test_error`). On the fiber and the sphere every method must stop
-within `stopping_accuracy_tolerance` of its own solution at `tight_convergence_tolerance` (not with k-means clusters of a few
-elements, whose clustered problem can have several solutions, for TFA too). On the fiber the reference is on at the
-working resolution and must equal Spectral LS bit for bit and reload from its cache unchanged (`check_reference`). Every
-method must complete every step and reproduce `code/check_saved_results.npz` (untracked) bit for bit, at the
-`thread_count` it was saved with; with none saved, check.py skips that test and says so, so run `check.py save` on a clean
-tree first. For a refactor: `check.py save` before, `check.py` after.
+There is no pytest suite and no way to run one check problem alone. `check.py` solves seven problems (the laminate, cut
+laminate, z laminate, fiber, sphere, k-means sphere and random fibers) with every method and checks, each against a
+tolerance in config.py: every method against the laminates' exact solution (FFT-TFA on the cut laminate only at full
+degree; at degree 1 it is printed as INFO, `inexact_methods`); FFT-TFA's interaction at full degree against the
+element-level LS operator averaged over its clusters (`get_interaction_error`), and the patch test at the problem's
+degree (`get_patch_test_error`); stopping accuracy against a tight solve on the fiber and sphere (not with k-means
+clusters of a few elements, which can have several solutions); the cached reference against Spectral LS
+(`check_reference`); and every result against `code/check_saved_results.npz` (untracked) bit for bit, at the
+`thread_count` it was saved with, skipped if none is saved. For a refactor: `check.py save` on a clean tree before,
+`check.py` after.
 
 Not covered by `check.py`, so recheck by hand after touching them: FFT-TFA's block-Jacobi preconditioner must leave
 answers alone (compare with it on and off), FFT-TFA's Newton product must match finite differences of its residual (FT-6),
@@ -195,12 +188,8 @@ near field: 14–68 % off at practical partition sizes). Declined: polarization 
 concentration plus one polarization per cluster (needs offline fine-mesh solves, and a near/far split of the interaction
 to be fast); the user wants a richer polarization that needs neither (README, "Open").
 
-Known behaviour, model error rather than bugs (lecture, section 10):
-- **FFT-TFA's far field converges with the degree, not with the partitions alone:** at degree 0 (each partition's mean)
-  refining the partitions can stall; the cut laminate is 7 % off in its worst cluster at degree 1 and exact once the
-  degree spans a partition's elements in x. With partitions about an inclusion across, the near field reaches beyond a
-  partition and needs a high degree (16² on the 100-fiber cell: still 2.6 % at degree 4); partitions at most about half
-  an inclusion across work best.
+Known behaviour, model error rather than bugs: FFT-TFA's far field converges with the degree, not with the partitions
+alone, and partitions should be at most about half an inclusion across (lecture, section 10). Also:
 - **k-means clusters break the cell's mirror symmetry,** so normal loading gives a small spurious macroscopic shear
   (about 3e-4 of the normal stress).
 - **Element-level LS rang along high-contrast interfaces:** an alternation near the inclusion's corners that refinement did

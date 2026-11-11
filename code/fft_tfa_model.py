@@ -1,4 +1,4 @@
-"""FFT-TFA, the method under development (notes/0_fft_tfa_lecture.md, equations FT-*).
+"""FFT-TFA, the method under development (notes/fft_tfa_lecture.md, equations FT-*).
 
 FFT-TFA keeps TFA's material model: clusters, each with one uniform eigenstrain and one material update at its average
 strain. What differs is how the clusters interact. TFA uses the composite's exact influence functions, a dense matrix P

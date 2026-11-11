@@ -35,7 +35,7 @@ steps_to_first_turning_point = 25      # the load path's other lines keep the sa
 # the reference set their own elements.
 clustered_mesh              = 256       # elements per side
 
-# FFT-TFA, the method under development (notes/0_fft_tfa_lecture.md): clusters interacting exactly inside each
+# FFT-TFA, the method under development (notes/fft_tfa_lecture.md): clusters interacting exactly inside each
 # partition, and through an FFT on the partitions beyond, each partition summarized by polynomial moments.
 #   partitions          per side: the blocks of elements its FFT runs on; must divide clustered_mesh. Best at most about
 #                       half an inclusion across
@@ -57,7 +57,7 @@ spectral_ls = [dict(elements=64,   C0="midpoint"),
                dict(elements=128,  C0="midpoint"), 
                dict(elements=256,  C0="midpoint")]
 
-# TFA, the baseline (notes/3_tfa_baseline.md): clusters interacting through FE influence functions, built once and
+# TFA, the baseline (lecture, section 4 and appendix C): clusters interacting through FE influence functions, built once and
 # cached. Its settings mean the same as FFT-TFA's. It stores (6 × clusters)² doubles, which preview reports.
 tfa         = []
 
@@ -121,10 +121,10 @@ all_load_paths = {
 cell_side                   = 1e-3     # the side of the periodic cubic cell, in m
 
 # Newton–Krylov, shared by every method: each load step is solved by Newton, each correction by a Krylov method, GMRES
-# or conjugate gradients for Spectral LS, whose Newton system is symmetric (notes/2_ls_model.md section 4.2). A step has
+# or conjugate gradients for Spectral LS, whose Newton system is symmetric (lecture, appendix B.2). A step has
 # converged when its relative residual (the strain residual over the imposed strain, never over less than
 # residual_strain_scale_floor) is below convergence_tolerance. Spectral LS's residual is a strain of its reference
-# medium, so it is judged as the correction an all-matrix cell would need (notes/2_ls_model.md section 4.3), and the
+# medium, so it is judged as the correction an all-matrix cell would need (lecture, appendix B.3), and the
 # tolerance means the same for any reference stiffness. FFT-TFA's reference medium is the matrix already.
 convergence_tolerance       = 1e-6
 residual_strain_scale_floor = 1e-4

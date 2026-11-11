@@ -4,3 +4,5 @@ code/cache/
 code/output/
 .venv/
 code/check_saved_results.npz
+notes/*.zip
+references/*.pptx

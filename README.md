@@ -14,9 +14,9 @@ Every method keeps one material state per cluster. They differ only in how those
 
 | Method | How clusters interact |
 |---|---|
-| **FFT-TFA** | The method under development. TFA's clusters, interacting through the Lippmann–Schwinger (LS) equation of a homogeneous medium of the matrix's stiffness: exact for the matrix's polarization, uniform per cluster in the inclusion. Inside each partition the clusters interact exactly; beyond it, each partition's polarization is summarized by its polynomial moments up to a `degree` and every partition acts on every other through one FFT on the partitions. The degree converges to the exact clustered equation. (`notes/0_fft_tfa_lecture.md`) |
-| **Spectral LS** | The LS equation on the elements, each its own cluster: the standard Moulinec–Suquet spectral method, as a comparison. (`notes/2_ls_model.md`, section 4) |
-| **TFA** | The baseline. Clusters interact through the composite's exact FE influence functions E and P: exact in elasticity, but P is dense. (`notes/3_tfa_baseline.md`) |
+| **FFT-TFA** | The method under development. TFA's clusters, interacting through the Lippmann–Schwinger (LS) equation of a homogeneous medium of the matrix's stiffness: exact for the matrix's polarization, uniform per cluster in the inclusion. Inside each partition the clusters interact exactly; beyond it, each partition's polarization is summarized by its polynomial moments up to a `degree` and every partition acts on every other through one FFT on the partitions. The degree converges to the exact clustered equation. (`notes/fft_tfa_lecture.md`) |
+| **Spectral LS** | The LS equation on the elements, each its own cluster: the standard Moulinec–Suquet spectral method, as a comparison. (lecture, appendix B) |
+| **TFA** | The baseline. Clusters interact through the composite's exact FE influence functions E and P: exact in elasticity, but P is dense. (lecture, section 4 and appendix C) |
 
 All of them solve each load step by Newton's method, with a Krylov method for each correction (GMRES; conjugate
 gradients for Spectral LS, whose Newton system is symmetric) and a backtracking line search.
@@ -25,8 +25,8 @@ gradients for Spectral LS, whose Newton system is symmetric) and a backtracking 
 FFT-TFA and TFA share their material model, so their difference is how the clusters interact: FFT-TFA takes the
 inclusion's polarization uniform per cluster (exact in the matrix, with the matrix as reference medium), summarizes
 other partitions by polynomial moments, and uses the Moulinec–Suquet kernel where TFA uses FE. At full degree, FFT-TFA
-is SCA's clustered equation with the matrix as reference medium. (`notes/0_fft_tfa_lecture.md`
-sections 6 and 7, `notes/1_research_context.md`)
+is SCA's clustered equation with the matrix as reference medium. (`notes/fft_tfa_lecture.md`
+sections 6 and 7)
 
 ## Quick start
 
@@ -139,8 +139,8 @@ shouldn't alter results, run `check.py save` before it and `check.py` after.
 | `code/newton.py` | what all methods share: the Newton loop, line search, GMRES |
 | `code/material.py` | the J2 return map |
 | `code/plots.py` | the figures |
-| `notes/` | the theory, in reading order: a lecture deriving FFT-TFA (start here), research context, the LS equation and Spectral LS, the TFA baseline, background derivations |
-| `references/` | the papers the notes cite; `reading_notes/` has one note per paper read cover to cover |
+| `notes/` | the theory: one lecture deriving FFT-TFA, with Spectral LS, TFA and the material law in its appendix; `figures/make_figures.py` draws its figures |
+| `references/` | the papers the lecture cites |
 
 ## Status and roadmap
 
@@ -164,7 +164,7 @@ partitions, and the checks.
    LS, which stores every element. Spectral LS here keeps several 6 × 6 arrays per element (its kernel, the LS-24 operator,
    stiffness, tangent); a fair comparison counts a leaner one.
 
-Open for FFT-TFA (`notes/0_fft_tfa_lecture.md`, section 10):
+Open for FFT-TFA (`notes/fft_tfa_lecture.md`, section 10):
 
 - **Far field by polynomial moments:** the interaction converges with the degree to the exact clustered equation, so
   refining the partitions pays off (100 fibers, 32² partitions: 1.25 % against 512² Spectral LS at degree 4), and the
@@ -172,12 +172,6 @@ Open for FFT-TFA (`notes/0_fft_tfa_lecture.md`, section 10):
   high degree, since the sharp near field then reaches past a partition. Open: the kernels' memory grows with the
   square of the polynomials (in 3D, 10 at degree 2 and 20 at degree 3); halving it by their symmetry, or keeping only
   pairs of total degree up to the degree, are untried.
-- **Bug, to fix: `degree = "full"` is not full on partitions 8 or more elements across.** `get_polynomial_basis` drops
-  a monomial when its Gram–Schmidt remainder is below an absolute `1e-8`, and the high powers of positions in
-  [−½, ½] fall below it: 8² gives 63 polynomials of 64, 12² 104 of 144, 16² 120 of 256, so the full degree is no
-  longer exact there (`check.py` misses it: its partitions are smaller). Fix: build the basis as products of
-  orthonormal polynomials along each axis (stable, the same span, so answers change only at round-off); run
-  `check.py save` first, then compare by tolerance, since round-off breaks the bit-for-bit check.
 - **Inclusion polarization:** one polarization per inclusion cluster; σ33 along z-invariant fibers runs low. Splitting a
   partition's fiber part by fiber makes FFT-TFA stiffer and less accurate, with the exact interaction too: with the matrix as C0, a
   coarser fiber polarization errs soft (Brisard–Dormieux 2010's Hashin–Shtrikman bound), offsetting the stiff error of

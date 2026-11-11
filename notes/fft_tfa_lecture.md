@@ -11,12 +11,14 @@ material states inside the blocks. That is what lets the model be refined.
 **How to read it.** Every derivation is written out one move at a time: each step says what it does (substitute,
 rearrange, define, average) and then shows the result. Each section opens with its **Goal** and **Reason**. The
 lecture assumes small-strain elasticity and knowing what an FFT does. The labels LS-\*, FT-\*, ER-\* are the ones the
-code's comments cite. Every figure is computed by the code (`notes/figures/make_figures.py`).
+code's comments cite, which is why they are not consecutive. Every figure is computed by the code
+(`notes/figures/make_figures.py`). Papers are cited by author and year.
 
 **Contents.** 1 The problem · 2 Three grids · 3 The Lippmann–Schwinger equation · 4 TFA through the LS equation ·
 5 The matrix as reference medium · 6 The clustered equation · 7 A fast interaction (7.1 polynomials on a partition,
 7.2 the far field, 7.3 the near field, 7.4 the result, 7.5 offline, 7.6 checks) · 8 Solving a load step · 9 The methods
-side by side · 10 Known limits · Appendix
+side by side · 10 Known limits · Appendix: A the material law, B Spectral LS, C TFA, D the equations in the code,
+E names in the code
 
 ### Notation
 
@@ -37,7 +39,7 @@ reference medium.
 
 | Symbol | Meaning |
 |---|---|
-| $\boldsymbol\varepsilon,\ \boldsymbol\sigma$ | strain, stress (Voigt vectors of 6, engineering shear $\gamma_{12}=2\varepsilon_{12}$) |
+| $\boldsymbol\varepsilon,\ \boldsymbol\sigma$ | strain, stress: Voigt vectors $(\varepsilon_{11},\varepsilon_{22},\varepsilon_{33},2\varepsilon_{12},2\varepsilon_{23},2\varepsilon_{13})$ and $(\sigma_{11},\sigma_{22},\sigma_{33},\sigma_{12},\sigma_{23},\sigma_{13})$, so $\boldsymbol\sigma^{\mathsf T}\boldsymbol\varepsilon$ is the work (ER-2) |
 | $\boldsymbol\mu$ | eigenstrain: here the plastic strain |
 | $\boldsymbol\tau$ | polarization: the stress the reference medium gets wrong (section 3) |
 | $\bar{\boldsymbol\varepsilon},\ \bar{\boldsymbol\sigma}$ | macro strain and macro stress: cell averages |
@@ -74,7 +76,7 @@ $$
 $\mathbf L$ is $\mathbf L_M$ in the matrix and $\mathbf L_I$ in the inclusion. The eigenstrain $\boldsymbol\mu$ is the
 plastic strain, zero in the elastic inclusion.
 
-**The material law is a black box** (`material.py`; derivation in `notes/background_influence_functions_and_J2/`).
+**The material law is a black box** (`material.py`; the equations are in Appendix A).
 At each load step, given a strain and the plastic history of the previous step, the radial return gives the plastic
 strain and the stress, and its derivative gives the tangent:
 
@@ -245,7 +247,7 @@ $\beta$. It depends only on the offset from $\beta$ to $\alpha$, it is symmetric
 $\boldsymbol\Gamma_0(\alpha\leftarrow\beta)^{\mathsf T}=\boldsymbol\Gamma_0(\beta\leftarrow\alpha)$, and its sum over
 all sources is zero. Applying it costs one FFT, a $6\times6$ product per frequency and one inverse FFT:
 $O(N_{\text{elem}}\log N_{\text{elem}})$ (LS-17, `ls_model.apply_on_lattice`). Solving it with one material state per
-element is **Spectral LS**, Moulinec–Suquet's method (`ls_model.SpectralLSSolver`; `notes/2_ls_model.md` section 4).
+element is **Spectral LS**, Moulinec–Suquet's method (`ls_model.SpectralLSSolver`; Appendix B).
 
 ---
 
@@ -309,7 +311,7 @@ $$
 $$
 \large
 \boxed{\ \boldsymbol\varepsilon(a)=\mathbf E(a)\,\bar{\boldsymbol\varepsilon}+\sum_b\mathbf P(a\leftarrow b)\,\boldsymbol\mu(b)\ }
-\tag{ER-4}
+\tag{ER-1}
 $$
 
 with the two influence tensors defined by what they do to any $\mathbf v$:
@@ -321,8 +323,8 @@ $$
 \mathbf P(a\leftarrow b)\,\mathbf v=\big\langle\boldsymbol\Lambda_0^{-1}\boldsymbol\Gamma_0[\mathbf L\,\chi_b\,\mathbf v]\big\rangle_a
 $$
 
-This is TFA's equation (`notes/3_tfa_baseline.md`; the code computes $\mathbf E$ and $\mathbf P$ by finite elements,
-the same quantities by another discretization). Note the order: TFA **solves the equation at every point first**
+This is TFA's equation (Fish–Cui 2026, eq. 8). The code computes $\mathbf E$ and $\mathbf P$ by finite elements,
+the same quantities by another discretization, and solves it by Newton (Appendix C). Note the order: TFA **solves the equation at every point first**
 (through $\boldsymbol\Lambda_0^{-1}$), **then averages** over the clusters.
 
 **The cost.** $\mathbf P$ is **dense**: $(6N_{\text{clust}})^2$ numbers, every product touches all of them, and building
@@ -440,18 +442,20 @@ strain, which is also the strain FT-1 is evaluated at:
 
 $$
 \large
-\sum_{\alpha\text{ in }A}\varphi(\alpha)\,\psi(\alpha)=
-\begin{cases}1 & \varphi=\psi\\ 0 & \varphi\neq\psi\end{cases}
+\boldsymbol\varepsilon(a)=\bar{\boldsymbol\varepsilon}-\sum_b\Big\langle\sum_\beta\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\chi_b(\beta)\Big\rangle_a\boldsymbol\tau(b)
 $$
 
-$\varphi(\alpha)$ is the polynomial's value at $\alpha$'s position *inside its own partition*, so every partition has
-the same polynomials. The first is the constant, $1/\sqrt{\lvert A\rvert}$ (`fft_tfa_model.get_polynomial_basis`: the
-elements lie on a grid, so products of orthonormal polynomials along each axis are orthonormal). Their number
-$N_{\text{poly}}$ is 1, 3, 6, 10 for degrees 0–3 in 2D, and 1, 4, 10, 20 in 3D.
+#### Step 3 · Define the averaged kernel
 
-#### Step 2 · Summarize each partition's polarization by its moments
+Write the average over $a$ with $a$'s indicator, so that both clusters appear the same way:
 
-Define the **moment** of partition $B$'s polarization along $\psi$:
+$$
+\large
+\boxed{\
+\hat{\boldsymbol\Gamma}(a\leftarrow b)=\frac1{\lvert a\rvert}\sum_\alpha\sum_\beta\chi_a(\alpha)\,\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\chi_b(\beta)\ }
+$$
+
+the strain averaged over $a$ per unit polarization on $b$. Then we have
 
 $$
 \large
@@ -536,7 +540,13 @@ $$
 (\varphi,\psi)_A=\begin{cases}1 & \varphi=\psi\\ 0 & \varphi\neq\psi\end{cases}
 $$
 
-The first polynomial is the constant, $1/\sqrt{\lvert A\rvert}$ (`fft_tfa_model.get_polynomial_basis`).
+The first polynomial is the constant, $1/\sqrt{\lvert A\rvert}$.
+
+**How the code builds them.** Gram–Schmidt on the monomials loses the high degrees to round-off, since high powers of
+positions inside a partition are nearly parallel. `fft_tfa_model.get_polynomial_basis` builds the same polynomials, up
+to sign, as products of one orthonormal polynomial per axis (`get_axis_polynomials`, by a three-term recurrence). On a
+grid such products are orthonormal, and each is its monomial plus terms of lower total degree, so it is the one unit
+vector Gram–Schmidt could produce from that monomial.
 
 **Example: one row of 4 elements.** Positions $x=-\tfrac32,-\tfrac12,\tfrac12,\tfrac32$. Gram–Schmidt gives, as values
 at the four elements:
@@ -999,7 +1009,7 @@ is each cluster's effect on itself: the far field's self-term, the cluster's own
 means of FT-4 take back. They are built once (`fft_tfa_model.get_own_strain_change`).
 
 **Convergence** is judged on FT-5 directly. It is a strain error, like TFA's, and with $\mathbf C_0=\mathbf L_M$ it is
-already the "matrix units" measure that Spectral LS has to compute (LS-24, `notes/2_ls_model.md` section 4.3).
+already the "matrix units" measure that Spectral LS has to compute (LS-24, Appendix B.3).
 
 **One load step** (`newton.Solver.solve_step`):
 
@@ -1087,12 +1097,233 @@ far from its source, the discrete kernel's high-frequency content, and polynomia
 
 ## Appendix
 
-#### The equations in the code
+### A. The material law (`material.py`)
+
+Each phase is isotropic and elastic; the matrix also yields, by $J_2$ plasticity with linear isotropic hardening
+$H\ge0$. A material state carries its **plastic history** $\mathbf z_n=(\boldsymbol\mu_n,p_n)$, accepted at the end of
+the last load step: the plastic strain and the accumulated plastic strain $p$. During a step the history stays fixed
+while Newton tries strains; it is accepted once the step converges.
+
+**(ER-3) The update.** At a trial strain $\boldsymbol\varepsilon$:
+
+$$
+\large
+\boldsymbol\mu=\boldsymbol\mu(\boldsymbol\varepsilon;\mathbf z_n),\qquad\boldsymbol\sigma=\mathbf L\,(\boldsymbol\varepsilon-\boldsymbol\mu)
+$$
+
+The semicolon says that the history is held fixed. FFT-TFA and TFA update each cluster at its average strain: a model
+choice, since the update of an average need not equal the average of the updates.
+
+**The radial return** (`material.radial_return`). With $G$ the shear modulus, $\sigma_y$ the initial yield stress,
+$\mathbf v=(1,1,1,0,0,0)$ and $\mathbf W=\operatorname{diag}(1,1,1,2,2,2)$:
+
+1. **Elastic trial:** freeze the plastic strain,
+   $$
+   \boldsymbol\sigma^{\text{tr}}=\mathbf L(\boldsymbol\varepsilon-\boldsymbol\mu_n),\quad
+   \mathbf s^{\text{tr}}=\boldsymbol\sigma^{\text{tr}}-\tfrac13(\sigma^{\text{tr}}_{11}+\sigma^{\text{tr}}_{22}+\sigma^{\text{tr}}_{33})\,\mathbf v,\quad
+   q^{\text{tr}}=\sqrt{\tfrac32\,\mathbf s^{\text{tr}\mathsf T}\mathbf W\mathbf s^{\text{tr}}},\quad
+   f^{\text{tr}}=q^{\text{tr}}-(\sigma_y+Hp_n)
+   $$
+2. **If $f^{\text{tr}}\le0$**, the state stays elastic: $\boldsymbol\mu=\boldsymbol\mu_n$, $p=p_n$.
+3. **Otherwise**, flow along $\mathbf n=\tfrac32\mathbf W\mathbf s^{\text{tr}}/q^{\text{tr}}$ by the amount that lands on
+   the hardened yield surface:
+   $$
+   \Delta p=\frac{f^{\text{tr}}}{3G+H},\qquad\boldsymbol\mu=\boldsymbol\mu_n+\Delta p\,\mathbf n,\qquad p=p_n+\Delta p
+   $$
+   The deviatoric stress shrinks radially, its direction unchanged; the mean stress does not change.
+
+**(ER-8) Its derivative** (`material.get_eigenstrain_sensitivity`), with the history fixed. Zero in the elastic branch,
+unloading from a plastic history included. In the plastic branch, with $\hat{\mathbf s}=\mathbf s^{\text{tr}}/q^{\text{tr}}$
+and $\mathbf I_{\text{dev}}$ the deviatoric projector,
+
+$$
+\large
+\mathbf H_\mu=\frac{\partial\boldsymbol\mu}{\partial\boldsymbol\varepsilon}
+=\frac{3G}{3G+H}\,\mathbf n\,\hat{\mathbf s}^{\mathsf T}+\frac{3G\,\Delta p}{q^{\text{tr}}}\big(\mathbf I_{\text{dev}}-\mathbf n\,\hat{\mathbf s}^{\mathsf T}\big),
+\qquad
+\mathbf L_T=\frac{d\boldsymbol\sigma}{d\boldsymbol\varepsilon}=\mathbf L\,(\mathbf I-\mathbf H_\mu)
+$$
+
+The first term is a strain change along the flow direction, which changes how far the trial lies beyond yield; the
+second, one across it, which turns the flow direction. $\mathbf L_T$ is symmetric, and positive definite when $H>0$.
+
+### B. Spectral LS (`ls_model.py`)
+
+Spectral LS solves LS-5 with one material state per element. It is written here as the code writes it, with the
+**equivalent eigenstrain** in place of the polarization:
+
+$$
+\large
+\boldsymbol\mu^*=\boldsymbol\varepsilon-\mathbf C_0^{-1}\boldsymbol\sigma,
+\qquad
+\boldsymbol\tau=-\mathbf C_0\,\boldsymbol\mu^*,
+\qquad
+\mathbf P_0=\boldsymbol\Gamma_0\,\mathbf C_0
+\tag{LS-6}
+$$
+
+so LS-5 reads $\boldsymbol\varepsilon=\bar{\boldsymbol\varepsilon}+\mathbf P_0[\boldsymbol\mu^*]$. $\boldsymbol\mu^*$
+holds the elastic contrast and the plastic strain together; it is not a plastic history.
+
+#### B.1 The kernel
+
+At every frequency $\boldsymbol\xi\neq\mathbf 0$ of the element lattice, with $\mathbf n=\boldsymbol\xi/\lvert\boldsymbol\xi\rvert$
+and $\mathbf B(\mathbf n)$ ($6\times3$) the engineering strain of a displacement varying along $\mathbf n$, per unit
+gradient (Moulinec–Suquet 1998, eq. 4; `ls_model.get_P0_transformed`):
+
+$$
+\large
+\hat{\mathbf P}_0(\boldsymbol\xi)=\hat{\boldsymbol\Gamma}_0(\mathbf n)\,\mathbf C_0,
+\qquad
+\hat{\boldsymbol\Gamma}_0(\mathbf n)=\mathbf B(\mathbf n)\big[\mathbf B(\mathbf n)^{\mathsf T}\mathbf C_0\mathbf B(\mathbf n)\big]^{-1}\mathbf B(\mathbf n)^{\mathsf T}
+\tag{LS-21}
+$$
+
+$$
+\large
+\hat{\mathbf P}_0(\mathbf 0)=\mathbf 0,\qquad\langle\boldsymbol\varepsilon\rangle=\bar{\boldsymbol\varepsilon},\qquad\bar{\boldsymbol\sigma}=\langle\boldsymbol\sigma\rangle
+\tag{LS-9}
+$$
+
+At every other frequency $\hat{\mathbf P}_0$ is a projection, with eigenvalues 0 and 1, for any $\mathbf C_0$. Along an
+axis with an even element count, $\hat{\boldsymbol\Gamma}_0$ has no real-valued meaning at the highest frequency; there
+$\hat{\mathbf P}_0=\mathbf I$, Moulinec–Suquet's choice (1998, §2.4.2), which makes the stress there zero. Applying it
+to a field $\mathbf v$ is one FFT, a $6\times6$ product per frequency and one inverse FFT
+(`ls_model.apply_on_lattice`):
+
+$$
+\large
+\mathbf P_0\mathbf v=\operatorname{IFFT}\big[\hat{\mathbf P}_0(\boldsymbol\xi)\,\operatorname{FFT}(\mathbf v)(\boldsymbol\xi)\big]
+\tag{LS-17}
+$$
+
+#### B.2 The residual, Newton and conjugate gradients
+
+Stack the element strains as $\mathbf e$, their stresses as $\mathbf s(\mathbf e)$ and tangents as $\mathbf L_T$:
+
+$$
+\large
+\mathbf R(\mathbf e)=\mathbf e-\bar{\boldsymbol\varepsilon}-\mathbf P_0\big[\mathbf e-\mathbf C_0^{-1}\mathbf s(\mathbf e)\big]
+\tag{LS-18}
+$$
+
+$$
+\large
+\mathbf J\mathbf v=\mathbf v-\mathbf P_0\big[(\mathbf I-\mathbf C_0^{-1}\mathbf L_T)\,\mathbf v\big]
+\tag{LS-20}
+$$
+
+One load step is section 8's: start from the previous strain plus the macro strain increment, solve
+$\mathbf J\,\delta\mathbf e=-\mathbf R$, step with the line search, repeat. The correction is solved by conjugate
+gradients (CG), which keep one search direction at a fixed cost per iteration where GMRES keeps them all. CG needs a
+system symmetric and positive definite in some inner product, and Spectral LS's is, in the reference medium's
+(Zeman et al.'s strain-based CG, as presented in Schneider's review, 2021, §3):
+
+1. **The inner product:** $\langle\mathbf u,\mathbf v\rangle_0=\sum_\alpha\mathbf u(\alpha)^{\mathsf T}\mathbf C_0\,\mathbf v(\alpha)$,
+   the work of the stress $\mathbf C_0\mathbf u$ on $\mathbf v$.
+2. **$\mathbf P_0$ is a projection, orthogonal in it:** $\hat{\mathbf P}_0^2=\hat{\mathbf P}_0$ at every frequency, and
+   $\mathbf C_0\hat{\mathbf P}_0=\mathbf C_0\hat{\boldsymbol\Gamma}_0\mathbf C_0$ is symmetric. Call it $\mathbf Q$: it
+   keeps the compatible zero-mean strains.
+3. **The residual and every correction stay in its range:** a step starts from a compatible strain plus the uniform
+   increment, so LS-18 gives $\mathbf R=\mathbf Q\,\mathbf C_0^{-1}\mathbf s$.
+4. **There $\mathbf J$ is symmetric and positive definite:** for $\mathbf u=\mathbf Q\mathbf u$, $\mathbf v=\mathbf Q\mathbf v$,
+   LS-20 gives $\mathbf J\mathbf v=\mathbf Q\,\mathbf C_0^{-1}\mathbf L_T\mathbf v$, and with $\mathbf C_0\mathbf Q=\mathbf Q^{\mathsf T}\mathbf C_0$,
+
+$$
+\large
+\langle\mathbf J\mathbf u,\mathbf v\rangle_0=\mathbf u^{\mathsf T}\mathbf L_T\,\mathbf v
+\tag{LS-28}
+$$
+
+which is symmetric, and positive definite when every yielding phase hardens (Appendix A). The code stops at a direction
+of non-positive curvature. CG stops, as GMRES does, once $\lVert\mathbf R+\mathbf J\,\delta\mathbf e\rVert$ is below
+`krylov_tolerance` times $\lVert\mathbf R\rVert$.
+
+#### B.3 A stopping test that does not depend on the reference medium
+
+1. **What Newton checks.** A step stops when the relative residual is below `convergence_tolerance`. That is fair
+   across methods only if $\lVert\mathbf R\rVert$ measures the same thing for each. For TFA and FFT-TFA it does: their
+   residuals are plain strain errors, and FFT-TFA's reference medium is the matrix.
+2. **Spectral LS's residual depends on $\mathbf C_0$.** B.2 gave $\mathbf R=\mathbf Q\,\mathbf C_0^{-1}\mathbf s$: the
+   unbalanced stress, read through $\mathbf C_0$. The default $\mathbf C_0$, the midpoint of the phases, is much stiffer
+   than the matrix, so the same unbalanced stress reads as a much smaller residual than with $\mathbf C_0=\mathbf L_M$.
+   One tolerance would mean different accuracies for different $\mathbf C_0$.
+3. **The fix.** Ask instead how large a strain correction *a cell made only of matrix* would need to cancel this
+   residual. That cell's Jacobian is LS-20 with $\mathbf L_T=\mathbf L_M$ everywhere, one $6\times6$ block per
+   frequency:
+
+   $$
+   \large
+   \hat{\mathbf M}_M(\boldsymbol\xi)=\mathbf I-\hat{\mathbf P}_0(\boldsymbol\xi)\,(\mathbf I-\mathbf C_0^{-1}\mathbf L_M),
+   \qquad
+   \tilde{\mathbf R}=\mathbf M_M^{-1}\mathbf R
+   \tag{LS-24}
+   $$
+
+   Convergence and the line search judge $\tilde{\mathbf R}$ (`SpectralLSSolver.measure_residual`); the Newton
+   correction still solves $\mathbf J\,\delta\mathbf e=-\mathbf R$.
+4. **Why it works.** Take $\mathbf C_0=c\,\mathbf L_M$. $\hat{\mathbf P}_0$ does not depend on $c$ and acts as the
+   identity on the range of $\mathbf Q$, so $\mathbf M_M$ acts there as $1/c$, while $\mathbf R$ carries a factor
+   $1/c$: they cancel, and $\tilde{\mathbf R}$ does not depend on $c$. With $\mathbf C_0=\mathbf L_M$, $\mathbf M_M$ is
+   the identity and $\tilde{\mathbf R}=\mathbf R$, FFT-TFA's test.
+
+It costs one more convolution per residual and one more stored kernel. `C0` in `config.spectral_ls` picks the
+midpoint or the matrix; both stop equally accurately.
+
+### C. TFA (`tfa_model.py`)
+
+**Offline: $\mathbf E$ and $\mathbf P$ by finite elements.** With $\mathbf K$ the periodic FE stiffness of the
+composite, $\mathbf F_\mu$ the nodal loads per unit eigenstrain in each cluster and $\mathbf A_\varepsilon$ the map from
+nodal displacements to cluster-average strains:
+
+$$
+\large
+\mathbf K\,\mathbf d=\mathbf F_\mu\,\boldsymbol\mu,\qquad\mathbf P\boldsymbol\mu=\mathbf A_\varepsilon\mathbf d,
+\qquad\Longrightarrow\qquad
+\mathbf P=\mathbf A_\varepsilon\mathbf K^{-1}\mathbf F_\mu
+\tag{ER-24}
+$$
+
+$\mathbf E$ is the same with the macro strain as the load: the applied strain plus the fluctuation it causes. Both come
+from one factorization of $\mathbf K$, $6N_{\text{clust}}+6$ solves, and are cached.
+
+**Online: Newton on ER-1.** Stack the cluster strains and write ER-1 as a residual:
+
+$$
+\large
+\mathbf r(\boldsymbol\varepsilon)=\boldsymbol\varepsilon-\mathbf E\,\bar{\boldsymbol\varepsilon}-\mathbf P\,\boldsymbol\mu(\boldsymbol\varepsilon)
+\tag{ER-4}
+$$
+
+Each cluster's $\boldsymbol\mu$ depends only on its own strain, so the Jacobian is $\mathbf I$ minus $\mathbf P$ times
+the block-diagonal $\mathbf H_\mu$ of ER-8:
+
+$$
+\large
+\mathbf J=\mathbf I-\mathbf P\,\mathbf H_\mu,\qquad\mathbf J\,\delta\boldsymbol\varepsilon=-\mathbf r
+\tag{ER-18}
+$$
+
+$$
+\large
+\mathbf J\mathbf v=\mathbf v-\mathbf P\,(\mathbf H_\mu\mathbf v)
+\tag{ER-21}
+$$
+
+GMRES solves it with this product, never forming $\mathbf J$; $\mathbf H_\mu$ is zero outside the yielding clusters, so
+each product reads only their columns of $\mathbf P$. Each step starts from the exact elastic predictor
+$\mathbf E\bar{\boldsymbol\varepsilon}+\mathbf P\boldsymbol\mu_n$, the strain if no cluster yields further, and every
+evaluation sets each elastic cluster's strain so that its residual is zero (`TFASolver.evaluate`).
+
+### D. The equations in the code
 
 | Equation | Code |
 |---|---|
-| Material law, $\mathbf L_T$ | `material.radial_return`, `material.get_algorithmic_stiffness` |
-| LS-5 on the elements: kernel and FFT product (LS-21, LS-17) | `ls_model.get_moulinec_suquet_kernel`, `ls_model.apply_on_lattice` |
+| ER-3, ER-8: material law, $\mathbf H_\mu$, $\mathbf L_T$ | `material.radial_return`, `get_eigenstrain_sensitivity`, `get_algorithmic_stiffness` |
+| LS-5 on the elements: kernel and FFT product (LS-21, LS-17) | `ls_model.get_P0_transformed`, `ls_model.apply_on_lattice` |
+| LS-18, LS-20, LS-28, LS-24: Spectral LS | `ls_model.SpectralLSSolver`, `get_matrix_units_operator` |
+| ER-24, ER-1: TFA's $\mathbf E$ and $\mathbf P$ | `tfa_model.compute_E_and_P` |
+| ER-4, ER-18, ER-21: TFA's Newton | `tfa_model.TFASolver` |
 | Polynomials $\varphi$, cluster moments $m(a,\varphi)$ | `fft_tfa_model.get_polynomial_basis`, `get_cluster_moments` |
 | FT-1, FT-5: polarization, residual | `fft_tfa_model.FFTTFASolver.evaluate` |
 | FT-2: moment kernels, far field | `fft_tfa_model.get_moment_kernels`, `get_strain_change` |
@@ -1102,16 +1333,17 @@ far from its source, the discrete kernel's high-frequency content, and polynomia
 | Newton loop, line search, GMRES | `newton.Solver`, `newton.solve_by_gmres` |
 | Clusters | `cell.cluster_by_phase`, `cell.cluster_by_k_means`, `cell.get_clusters` |
 
-#### Names in the code and in the other notes
+### E. Names in the code
 
-| Here | Code | `notes/2_ls_model.md`, `notes/3_tfa_baseline.md` |
-|---|---|---|
-| $\mathbf C_0$, $\mathbf L_M$ | `C0`, `matrix_L` | $\mathbf C_0$, $\mathbf L_m$ |
-| $\boldsymbol\mu$ | `plastic_strain` | $\boldsymbol\mu$, the eigenstrain |
-| $v(a)$ | `Clusters.share` | $c_p$ |
-| $\boldsymbol\Gamma_0(\alpha\leftarrow\beta)$, $\hat{\boldsymbol\Gamma}(A\leftarrow B)$ | `element_Gamma`; the degree-0 moment kernel | $\mathbf D_0$, $\mathbf D_0^{BA}$ (LS-7) |
-| $\varphi$, $\psi$; $N_{\text{poly}}$ | columns of `basis`; `p` | |
-| $m(a,\varphi)$ | `moments` | |
-| $\mathbf K(A,\varphi\leftarrow B,\psi)$ | `kernels` ($K_{ji}$); in Fourier space `moment_kernels` | |
-| $\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)$ | `correction_blocks` | |
-| $\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$, its own blocks | `get_strain_change`, `own_strain_change` | |
+| Here | Code |
+|---|---|
+| $\mathbf C_0$, $\mathbf L_M$, $\mathbf L_T$ | `C0`, `matrix_L`, `L_t` |
+| $\boldsymbol\mu$; $\mathbf z_n$ | `plastic_strain`; `plastic_history` |
+| $v(a)$ | `Clusters.share` |
+| $\boldsymbol\Gamma_0(\alpha\leftarrow\beta)$, $\hat{\boldsymbol\Gamma}(A\leftarrow B)$ | `element_Gamma`; the degree-0 moment kernel |
+| $\hat{\mathbf P}_0$, $\hat{\mathbf M}_M^{-1}$ | `P0_transformed`; `get_matrix_units_operator` |
+| $\varphi$, $\psi$; $N_{\text{poly}}$ | columns of `basis`; `p` |
+| $m(a,\varphi)$ | `moments` |
+| $\mathbf K(A,\varphi\leftarrow B,\psi)$ | `kernels` ($K_{ji}$); in Fourier space `moment_kernels` |
+| $\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)$ | `correction_blocks` |
+| $\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$, its own blocks | `get_strain_change`, `own_strain_change` |

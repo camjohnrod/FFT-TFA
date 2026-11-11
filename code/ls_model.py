@@ -1,4 +1,4 @@
-"""The Lippmann–Schwinger (LS) equation (notes/2_ls_model.md, equations LS-*), and Spectral LS, which solves it.
+"""The Lippmann–Schwinger (LS) equation (notes/fft_tfa_lecture.md section 3 and appendix B, equations LS-*), and Spectral LS, which solves it.
 
 The LS equation replaces the composite by a homogeneous reference medium of stiffness C0, loaded by a polarization
 where the material differs from it. The strain the polarization causes is a convolution with a kernel P0, so on a
@@ -101,7 +101,7 @@ def get_P0_transformed(lattice_shape, C0):
 ## ------- Residual in Matrix Units (LS-24) ------- ##
 
 def get_matrix_units_operator(P0_transformed, C0, matrix_L):
-    """M̂_m⁻¹ per frequency, which turns Spectral LS's residual into matrix units (LS-24, LS note section 4.3).
+    """M̂_m⁻¹ per frequency, which turns Spectral LS's residual into matrix units (LS-24, lecture appendix B.3).
 
     The LS residual r is a strain of the reference medium, so its size depends on C0. Convergence is judged instead on
     the strain correction an all-matrix cell would need to cancel r, M_m⁻¹ r, with M_m the Newton Jacobian of a

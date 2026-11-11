@@ -46,8 +46,7 @@ def get_strain_norm(strain, average=np.mean):
 
 def get_relative_residual(residual, macro_strain, average):
     """The size of a strain residual relative to the imposed strain, never divided by less than
-    residual_strain_scale_floor, so that it stays meaningful where the imposed strain passes through zero
-    (notes/3_tfa_baseline.md section 12)."""
+    residual_strain_scale_floor, so that it stays meaningful where the imposed strain passes through zero."""
     strain_scale = max(get_strain_norm(macro_strain), config.residual_strain_scale_floor)
     return get_strain_norm(residual, average) / strain_scale
 

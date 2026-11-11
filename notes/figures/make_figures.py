@@ -1,4 +1,4 @@
-# The figures of notes/0_fft_tfa_lecture.md, computed with the code itself: python notes/figures/make_figures.py
+# The figures of notes/fft_tfa_lecture.md, computed with the code itself: python notes/figures/make_figures.py
 # (a few minutes). Inputs are pinned here in memory, as check.py does: glass/PA, a centred fiber, check.py's solver
 # settings; config.py, the cache and code/output are not touched.
 

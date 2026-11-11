@@ -1,4 +1,5 @@
-"""TFA, the baseline (transformation field analysis, notes/3_tfa_baseline.md, equations ER-*).
+"""TFA, the baseline (transformation field analysis; notes/fft_tfa_lecture.md section 4 and appendix C,
+equations ER-*).
 
 Each cluster has one uniform eigenstrain μ and one material update at its average strain ε. Offline, a finite-element
 model of the whole composite gives two influence functions on the clusters:

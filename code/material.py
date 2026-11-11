@@ -3,7 +3,7 @@
 Each cluster (cell.Clusters) has one strain and one plastic history. From them, radial_return gives the cluster's
 stress and its new plastic strain, which is its eigenstrain μ: the strain the material no longer resists elastically,
 σ = L (ε − μ). Newton's method also needs how μ changes with ε, the sensitivity H_μ = ∂μ/∂ε, which gives the
-algorithmic stiffness L_t = dσ/dε = L (I − H_μ). Equations ER-* are in notes/3_tfa_baseline.md.
+algorithmic stiffness L_t = dσ/dε = L (I − H_μ). Equations ER-* are in notes/fft_tfa_lecture.md, appendix A.
 
 Strains and stresses are rows of 6 Voigt components (11, 22, 33, 12, 23, 13), shears as engineering shear γ = 2ε (ER-2),
 one row per cluster.
