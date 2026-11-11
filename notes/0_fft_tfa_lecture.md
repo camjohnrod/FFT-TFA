@@ -8,47 +8,55 @@ states. An FFT on a grid of $N_{\text{part}}$ blocks costs $O(N_{\text{part}}\lo
 $O(N_{\text{part}})$, times a factor set by how finely each block is described (section 7), whatever the number of
 material states inside the blocks. That is what lets the model be refined.
 
-The lecture derives the method step by step and points to the code for each step. It assumes small-strain elasticity
-and knowing what an FFT does. The labels LS-\*, FT-\*, ER-\* are the ones the code's comments cite. Every figure is
-computed by the code (`notes/figures/make_figures.py`).
+**How to read it.** Every derivation is written out one move at a time: each step says what it does (substitute,
+rearrange, define, average) and then shows the result. Each section opens with its **Goal** and **Reason**. The
+lecture assumes small-strain elasticity and knowing what an FFT does. The labels LS-\*, FT-\*, ER-\* are the ones the
+code's comments cite. Every figure is computed by the code (`notes/figures/make_figures.py`).
 
-**Contents.** 1 The problem · 2 Three grids · 3 The Lippmann–Schwinger equation · 4 TFA and its cost · 5 The matrix as
-reference medium · 6 The clustered equation · 7 A fast interaction · 8 Solving a load step · 9 The methods side by side
-· 10 Known limits · Appendix
+**Contents.** 1 The problem · 2 Three grids · 3 The Lippmann–Schwinger equation · 4 TFA through the LS equation ·
+5 The matrix as reference medium · 6 The clustered equation · 7 A fast interaction (7.1 polynomials on a partition,
+7.2 the far field, 7.3 the near field, 7.4 the result, 7.5 offline, 7.6 checks) · 8 Solving a load step · 9 The methods
+side by side · 10 Known limits · Appendix
 
 ### Notation
 
 **Where things live.** One letter at three scales: element $\alpha$ lies in cluster $a$, which lies in partition $A$
 (and $\beta$ in $b$ in $B$). So Greek $\alpha, \beta$ are **elements**, lowercase $a, b$ are **clusters**, and capital
 $A, B$ are **partitions**. Every field is written as a function of where it lives: $\boldsymbol\varepsilon(\alpha)$ is
-the strain of element $\alpha$, $\boldsymbol\varepsilon(a)$ the strain of cluster $a$, $\boldsymbol\tau(B)$ the mean
-polarization of partition $B$; in section 7 also of which polynomial, $\boldsymbol\tau(B,\psi)$. Plain $x, y$ are
-coordinates: points of the cell in the continuous equation LS-5, positions inside a partition in section 7.
+the strain of element $\alpha$, $\boldsymbol\varepsilon(a)$ the strain of cluster $a$.
 
-**One interaction symbol.** $\boldsymbol\Gamma(\text{target}\leftarrow\text{source})$ is the strain at the target per
-unit polarization at the source, averaged over the target and summed over the source. The same symbol serves between
-elements, $\boldsymbol\Gamma(\alpha\leftarrow\beta)$; between clusters, $\boldsymbol\Gamma(a\leftarrow b)$; and between
-partitions, $\boldsymbol\Gamma(A\leftarrow B)$.
+**Two interaction symbols.** $\boldsymbol\Gamma_0(\alpha\leftarrow\beta)$ is the strain at element $\alpha$ per unit
+polarization at element $\beta$, in the reference medium: the **element kernel**. A **hat** marks an average of it over
+groups of elements: $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ between clusters (section 6),
+$\hat{\boldsymbol\Gamma}(A\leftarrow B)$ between partitions, and FFT-TFA's approximations
+$\hat{\boldsymbol\Gamma}_{\text{far}}$, $\hat{\boldsymbol\Gamma}_{\text{corr}}$, $\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$
+(section 7).
 
-**Labels.** A capital subscript is a name, not an index: $M$ matrix, $I$ inclusion, $0$ reference, $T$ tangent, $P$
-plastic. A word as a subscript is a name too: $\boldsymbol\Gamma_{\text{far}}$, $\boldsymbol\Gamma_{\text{corr}}$.
+**Labels.** A capital subscript is a name, not an index: $M$ matrix, $I$ inclusion, $T$ tangent; $0$ marks the
+reference medium.
 
 | Symbol | Meaning |
 |---|---|
 | $\boldsymbol\varepsilon,\ \boldsymbol\sigma$ | strain, stress (Voigt vectors of 6, engineering shear $\gamma_{12}=2\varepsilon_{12}$) |
-| $\boldsymbol\varepsilon_P$ | plastic strain |
+| $\boldsymbol\mu$ | eigenstrain: here the plastic strain |
 | $\boldsymbol\tau$ | polarization: the stress the reference medium gets wrong (section 3) |
-| $\bar{\boldsymbol\varepsilon},\ \bar{\boldsymbol\sigma}$ | macro strain and macro stress: cell averages, $\langle\cdot\rangle$ |
+| $\bar{\boldsymbol\varepsilon},\ \bar{\boldsymbol\sigma}$ | macro strain and macro stress: cell averages |
 | $\mathbf L,\ \mathbf L_M,\ \mathbf L_I$ | elastic stiffness: local, of the matrix, of the inclusion |
-| $\mathbf L_0,\ \mathbf L_T$ | stiffness of the reference medium; tangent stiffness $d\boldsymbol\sigma/d\boldsymbol\varepsilon$ |
+| $\mathbf C_0,\ \mathbf L_T$ | stiffness of the reference medium; tangent stiffness $d\boldsymbol\sigma/d\boldsymbol\varepsilon$ |
+| $\chi_a(\alpha)$ | indicator of cluster $a$: 1 if element $\alpha$ lies in $a$, else 0 |
 | $\lvert a\rvert,\ \lvert A\rvert$ | number of elements of cluster $a$, of partition $A$ (the same for every partition) |
 | $v(a)$ | volume fraction of cluster $a$ in its partition, $\lvert a\rvert/\lvert A\rvert$ |
-| $\varphi,\ \psi$ | polynomials on a partition (section 7): $\varphi$ at the target, $\psi$ at the source |
+| $\langle f\rangle_a$ | average over cluster $a$'s elements, $\frac1{\lvert a\rvert}\sum_{\alpha\text{ in }a}f(\alpha)$ |
+| $\langle f\rangle$ | cell average; over clusters, $\frac1{N_{\text{part}}}\sum_a v(a)\,f(a)$ |
+| $\varphi,\ \psi$ | polynomials on a partition (section 7.1): $\varphi$ at the target, $\psi$ at the source |
+| $m(a,\varphi)$ | moment of cluster $a$ along $\varphi$ (section 7.1) |
 | $N_{\text{elem}},\ N_{\text{part}},\ N_{\text{clust}},\ N_{\text{poly}}$ | numbers of elements, partitions, clusters, polynomials |
 
 ---
 
 ## 1. The problem
+
+**Goal.** State what is solved: one periodic cell of a composite, loaded by a macro strain.
 
 A composite: stiff elastic inclusions (fibers, a sphere, a layer) in a softer matrix that yields plastically. We study
 one periodic cubic cell under a **macro strain** $\bar{\boldsymbol\varepsilon}$ that follows a load path, and want
@@ -57,14 +65,14 @@ the **macro stress** $\bar{\boldsymbol\sigma}=\langle\boldsymbol\sigma\rangle$ a
 $$
 \large
 \begin{aligned}
-\text{equilibrium:}\quad & \nabla\cdot\boldsymbol\sigma=\mathbf 0\\[2pt]
+\text{material law:}\quad & \boldsymbol\sigma=\mathbf L\,(\boldsymbol\varepsilon-\boldsymbol\mu)\\[2pt]
 \text{compatibility:}\quad & \boldsymbol\varepsilon=\bar{\boldsymbol\varepsilon}+\nabla^s\mathbf u,\qquad \mathbf u\ \text{periodic}\\[2pt]
-\text{material law:}\quad & \boldsymbol\sigma=\mathbf L\,(\boldsymbol\varepsilon-\boldsymbol\varepsilon_P)
+\text{equilibrium:}\quad & \nabla\cdot\boldsymbol\sigma=\mathbf 0
 \end{aligned}
 $$
 
-$\mathbf L$ is $\mathbf L_M$ in the matrix and $\mathbf L_I$ in the inclusion. The plastic strain
-$\boldsymbol\varepsilon_P$ is zero in the elastic inclusion.
+$\mathbf L$ is $\mathbf L_M$ in the matrix and $\mathbf L_I$ in the inclusion. The eigenstrain $\boldsymbol\mu$ is the
+plastic strain, zero in the elastic inclusion.
 
 **The material law is a black box** (`material.py`; derivation in `notes/background_influence_functions_and_J2/`).
 At each load step, given a strain and the plastic history of the previous step, the radial return gives the plastic
@@ -72,21 +80,23 @@ strain and the stress, and its derivative gives the tangent:
 
 $$
 \large
-\boldsymbol\varepsilon\ \longmapsto\ \boldsymbol\varepsilon_P(\boldsymbol\varepsilon),\ \ \boldsymbol\sigma(\boldsymbol\varepsilon),
+\boldsymbol\varepsilon\ \longmapsto\ \boldsymbol\mu(\boldsymbol\varepsilon),\ \ \boldsymbol\sigma(\boldsymbol\varepsilon),
 \qquad\qquad
-\mathbf L_T=\frac{d\boldsymbol\sigma}{d\boldsymbol\varepsilon}=\mathbf L\Big(\mathbf I-\frac{d\boldsymbol\varepsilon_P}{d\boldsymbol\varepsilon}\Big)
+\mathbf L_T=\frac{d\boldsymbol\sigma}{d\boldsymbol\varepsilon}=\mathbf L\Big(\mathbf I-\frac{d\boldsymbol\mu}{d\boldsymbol\varepsilon}\Big)
 $$
 
 The rest of the lecture is about the other half: how the material points interact through equilibrium.
 
-> **Why a reduced model.** A full-field solve has unknowns at every element, $10^4$–$10^6$ of them, at every Newton
-> iteration of every load step. A reduced model keeps a few material states instead.
+**Why a reduced model.** A full-field solve has unknowns at every element, $10^4$–$10^6$ of them, at every Newton
+iteration of every load step. A reduced model keeps a few material states instead.
 
 ---
 
 ## 2. Three grids
 
 ![The three grids](figures/grids.png)
+
+*Figure 1. The three grids on a fiber: 32² elements, 4² partitions, three matrix clusters per partition's matrix part.*
 
 | Grid | What it is | What it decides |
 |---|---|---|
@@ -103,396 +113,898 @@ per cluster.
 
 ## 3. The Lippmann–Schwinger equation
 
-> **Why.** In a heterogeneous body, how one point responds to another depends on everything around them. In a
-> *homogeneous* periodic body, it depends only on the vector between them: the response is a convolution, which an FFT
-> turns into a product. So we move the heterogeneity into a source term.
+**Goal.** Rewrite the cell problem as one equation for the strain, in which the heterogeneity appears only as a source.
 
-#### Step 1 · Pick a homogeneous reference stiffness $\mathbf L_0$, and call the stress it gets wrong the polarization
+**Reason.** In a heterogeneous body, how one point responds to another depends on everything around them. In a
+*homogeneous* periodic body, it depends only on the vector between them: the response is a convolution, which an FFT
+turns into a product.
+
+#### Step 1 · Start from the three equations of section 1
 
 $$
 \large
-\boldsymbol\tau=\boldsymbol\sigma-\mathbf L_0\boldsymbol\varepsilon
-=\underbrace{(\mathbf L-\mathbf L_0)\,\boldsymbol\varepsilon}_{\text{elastic contrast}}\ \underbrace{-\ \mathbf L\,\boldsymbol\varepsilon_P}_{\text{plasticity}}
+\boldsymbol\sigma=\mathbf L\,(\boldsymbol\varepsilon-\boldsymbol\mu),
+\qquad
+\boldsymbol\varepsilon=\bar{\boldsymbol\varepsilon}+\nabla^s\mathbf u,
+\qquad
+\nabla\cdot\boldsymbol\sigma=\mathbf 0
+$$
+
+#### Step 2 · Define the polarization
+
+Pick a homogeneous reference stiffness $\mathbf C_0$, the same everywhere. The **polarization** is the stress it gets
+wrong:
+
+$$
+\large
+\boldsymbol\tau=\boldsymbol\sigma-\mathbf C_0\,\boldsymbol\varepsilon
+$$
+
+#### Step 3 · Plug in the material law
+
+$$
+\large
+\boldsymbol\tau=\mathbf L\,(\boldsymbol\varepsilon-\boldsymbol\mu)-\mathbf C_0\,\boldsymbol\varepsilon
+$$
+
+Collect the strain terms:
+
+$$
+\large
+\boxed{\ \boldsymbol\tau=\underbrace{(\mathbf L-\mathbf C_0)\,\boldsymbol\varepsilon}_{\text{elastic contrast}}\ \underbrace{-\ \mathbf L\,\boldsymbol\mu}_{\text{plasticity}}\ }
 \tag{LS-4}
 $$
 
 This is an identity, not an approximation.
 
-#### Step 2 · Substitute into equilibrium
+#### Step 4 · Rewrite equilibrium with the polarization
+
+From step 2, $\boldsymbol\sigma=\boldsymbol\tau+\mathbf C_0\boldsymbol\varepsilon$. Substitute into
+$\nabla\cdot\boldsymbol\sigma=\mathbf 0$:
 
 $$
 \large
-\nabla\cdot\big(\mathbf L_0\,\nabla^s\mathbf u\big)=-\nabla\cdot\boldsymbol\tau
+\nabla\cdot\big(\mathbf C_0\,\boldsymbol\varepsilon+\boldsymbol\tau\big)=\mathbf 0
 $$
 
-This is the homogeneous medium $\mathbf L_0$, loaded by the polarization.
-
-#### Step 3 · Solve the homogeneous problem with its Green operator
-
-$\boldsymbol\Gamma(x\leftarrow y)$ is the strain at $x$ per unit polarization at $y$, in the reference medium. In a
-homogeneous periodic medium it depends only on $x-y$. Then
+Move the polarization to the right-hand side:
 
 $$
 \large
-\boxed{\ \boldsymbol\varepsilon(x)=\bar{\boldsymbol\varepsilon}-\int\boldsymbol\Gamma(x\leftarrow y)\,\boldsymbol\tau(y)\,dy\ }
+\nabla\cdot\big(\mathbf C_0\,\boldsymbol\varepsilon\big)=-\nabla\cdot\boldsymbol\tau
+$$
+
+#### Step 5 · Plug in compatibility
+
+Substitute $\boldsymbol\varepsilon=\bar{\boldsymbol\varepsilon}+\nabla^s\mathbf u$. The term
+$\nabla\cdot(\mathbf C_0\bar{\boldsymbol\varepsilon})$ is zero, since $\mathbf C_0\bar{\boldsymbol\varepsilon}$ is
+uniform:
+
+$$
+\large
+\nabla\cdot\big(\mathbf C_0\,\nabla^s\mathbf u\big)=-\nabla\cdot\boldsymbol\tau
+$$
+
+This is the **homogeneous** medium $\mathbf C_0$, loaded by $\mathbf f=-\nabla\cdot\boldsymbol\tau$.
+
+#### Step 6 · Solve the homogeneous problem with its Green operator
+
+Let $\mathbf G_0$ be the periodic Green operator of $\mathbf C_0$: the periodic solution of
+$\nabla\cdot(\mathbf C_0\nabla^s\mathbf u)=\mathbf f$ is $\mathbf u=\mathbf G_0[\mathbf f]$. Then
+
+$$
+\large
+\mathbf u=\mathbf G_0\big[-\nabla\cdot\boldsymbol\tau\big]
+$$
+
+Plug this into compatibility, and pull the minus sign out:
+
+$$
+\large
+\boldsymbol\varepsilon=\bar{\boldsymbol\varepsilon}-\nabla^s\mathbf G_0\big[\nabla\cdot\boldsymbol\tau\big]
+$$
+
+#### Step 7 · Define the Green operator for strain
+
+Define, for any stress-like field $\mathbf v$,
+
+$$
+\large
+\boldsymbol\Gamma_0[\mathbf v]=\nabla^s\mathbf G_0\big[\nabla\cdot\mathbf v\big]
+$$
+
+Then we have
+
+$$
+\large
+\boxed{\ \boldsymbol\varepsilon=\bar{\boldsymbol\varepsilon}-\boldsymbol\Gamma_0[\boldsymbol\tau]\ }
 \tag{LS-5}
 $$
 
 This is the **Lippmann–Schwinger equation** (Moulinec–Suquet 1998, eq. 7).
 
-- It is **exact**, for any $\mathbf L_0$.
-- It is an **equation**, not a formula: $\boldsymbol\tau$ depends on $\boldsymbol\varepsilon$. We solve it by Newton.
-- The integral is a **convolution**. In Fourier space it becomes one $6\times6$ matrix per frequency, known in closed
-  form (Moulinec–Suquet 1998, eq. 4; `ls_model.get_moulinec_suquet_kernel`). At zero frequency it is zero, which keeps
-  $\langle\boldsymbol\varepsilon\rangle=\bar{\boldsymbol\varepsilon}$.
+- It is **exact**, for any $\mathbf C_0$.
+- It is an **equation**, not a formula: $\boldsymbol\tau$ depends on $\boldsymbol\varepsilon$ (LS-4). We solve it by
+  Newton.
+- $\boldsymbol\Gamma_0$ is a **convolution**, since the medium is homogeneous. In Fourier space it becomes one
+  $6\times6$ matrix per frequency, known in closed form (Moulinec–Suquet 1998, eq. 4;
+  `ls_model.get_moulinec_suquet_kernel`). At zero frequency it is zero: a uniform polarization causes no strain, which
+  keeps $\langle\boldsymbol\varepsilon\rangle=\bar{\boldsymbol\varepsilon}$.
 
-#### On the elements
+#### Step 8 · Write it on the elements
 
-With $\boldsymbol\tau$ uniform on each element, the integral becomes a sum over elements:
+With $\boldsymbol\tau$ uniform on each element, $\boldsymbol\Gamma_0[\boldsymbol\tau]$ becomes a sum over elements:
 
 $$
 \large
-\boldsymbol\varepsilon(\alpha)=\bar{\boldsymbol\varepsilon}-\sum_\beta\boldsymbol\Gamma(\alpha\leftarrow\beta)\,\boldsymbol\tau(\beta)
+\boldsymbol\varepsilon(\alpha)=\bar{\boldsymbol\varepsilon}-\sum_\beta\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\boldsymbol\tau(\beta)
 $$
 
-Applying it costs one FFT, a $6\times6$ product per frequency and one inverse FFT:
-$O(N_{\text{elem}}\log N_{\text{elem}})$ (LS-17, `ls_model.apply_on_lattice`). Solving it with one material state
-per element is **Spectral LS**, Moulinec–Suquet's method (`ls_model.SpectralLSSolver`; `notes/2_ls_model.md`
-section 4).
+$\boldsymbol\Gamma_0(\alpha\leftarrow\beta)$ is the element kernel: the strain at $\alpha$ per unit polarization on
+$\beta$. It depends only on the offset from $\beta$ to $\alpha$, it is symmetric,
+$\boldsymbol\Gamma_0(\alpha\leftarrow\beta)^{\mathsf T}=\boldsymbol\Gamma_0(\beta\leftarrow\alpha)$, and its sum over
+all sources is zero. Applying it costs one FFT, a $6\times6$ product per frequency and one inverse FFT:
+$O(N_{\text{elem}}\log N_{\text{elem}})$ (LS-17, `ls_model.apply_on_lattice`). Solving it with one material state per
+element is **Spectral LS**, Moulinec–Suquet's method (`ls_model.SpectralLSSolver`; `notes/2_ls_model.md` section 4).
 
 ---
 
-## 4. Fewer material states: TFA, and its cost
+## 4. TFA through the LS equation
 
-> **Why.** Spectral LS keeps one material state per element. TFA keeps one per cluster: one plastic strain
-> $\boldsymbol\varepsilon_P(a)$, updated at the cluster's average strain $\boldsymbol\varepsilon(a)$. The strain itself
-> still varies inside a cluster.
+**Goal.** Write TFA's equation with LS-5's operators, to see exactly where FFT-TFA will differ from it.
 
-From a finite-element model of the composite, TFA precomputes exact influence functions $\mathbf E$ and $\mathbf P$
-(`notes/3_tfa_baseline.md`):
+**Reason.** TFA keeps one material state per cluster: one eigenstrain $\boldsymbol\mu(b)$, updated at the cluster's
+average strain $\boldsymbol\varepsilon(b)$. The strain itself still varies inside a cluster.
+
+#### Step 1 · Start from LS-5 with LS-4
 
 $$
 \large
-\boldsymbol\varepsilon(a)=\mathbf E(a)\,\bar{\boldsymbol\varepsilon}+\sum_b\mathbf P(a\leftarrow b)\,\boldsymbol\varepsilon_P(b)
+\boldsymbol\varepsilon=\bar{\boldsymbol\varepsilon}-\boldsymbol\Gamma_0\big[(\mathbf L-\mathbf C_0)\,\boldsymbol\varepsilon-\mathbf L\,\boldsymbol\mu\big]
+$$
+
+#### Step 2 · Move the strain term to the left-hand side
+
+$\boldsymbol\Gamma_0$ is linear, so it splits over the two terms:
+
+$$
+\large
+\boldsymbol\varepsilon+\boldsymbol\Gamma_0\big[(\mathbf L-\mathbf C_0)\,\boldsymbol\varepsilon\big]=\bar{\boldsymbol\varepsilon}+\boldsymbol\Gamma_0\big[\mathbf L\,\boldsymbol\mu\big]
+$$
+
+#### Step 3 · Define the operator on the left
+
+$$
+\large
+\boldsymbol\Lambda_0[\mathbf v]=\mathbf v+\boldsymbol\Gamma_0\big[(\mathbf L-\mathbf C_0)\,\mathbf v\big]
+\qquad\Longrightarrow\qquad
+\boldsymbol\Lambda_0[\boldsymbol\varepsilon]=\bar{\boldsymbol\varepsilon}+\boldsymbol\Gamma_0\big[\mathbf L\,\boldsymbol\mu\big]
+$$
+
+#### Step 4 · Invert it
+
+$\boldsymbol\Lambda_0$ is the LS operator of the elastic composite; assume it is invertible. Then
+
+$$
+\large
+\boldsymbol\varepsilon=\boldsymbol\Lambda_0^{-1}\big[\bar{\boldsymbol\varepsilon}\big]+\boldsymbol\Lambda_0^{-1}\boldsymbol\Gamma_0\big[\mathbf L\,\boldsymbol\mu\big]
+$$
+
+#### Step 5 · Apply TFA's assumption: the eigenstrain is uniform on each cluster
+
+$$
+\large
+\boldsymbol\mu(\alpha)=\sum_b\chi_b(\alpha)\,\boldsymbol\mu(b)
+$$
+
+Substitute, and pull the sum out of the linear operators:
+
+$$
+\large
+\boldsymbol\varepsilon=\boldsymbol\Lambda_0^{-1}\big[\bar{\boldsymbol\varepsilon}\big]+\sum_b\boldsymbol\Lambda_0^{-1}\boldsymbol\Gamma_0\big[\mathbf L\,\chi_b\,\boldsymbol\mu(b)\big]
+$$
+
+#### Step 6 · Average over cluster $a$
+
+$$
+\large
+\boxed{\ \boldsymbol\varepsilon(a)=\mathbf E(a)\,\bar{\boldsymbol\varepsilon}+\sum_b\mathbf P(a\leftarrow b)\,\boldsymbol\mu(b)\ }
 \tag{ER-4}
 $$
 
-This is exact in elasticity. But $\mathbf P$ is **dense**: $(6N_{\text{clust}})^2$ numbers, every product touches all
-of them, and building it takes $6N_{\text{clust}}$ FE solves. It cannot be a convolution: moving a pair of clusters
-changes what lies around them.
+with the two influence tensors defined by what they do to any $\mathbf v$:
 
-**FFT-TFA's plan:** keep TFA's material model (clusters, one plastic strain each, updated at the cluster's average
-strain), and build the interaction from LS-5, whose kernel is a convolution whatever the geometry.
+$$
+\large
+\mathbf E(a)\,\mathbf v=\big\langle\boldsymbol\Lambda_0^{-1}[\mathbf v]\big\rangle_a,
+\qquad
+\mathbf P(a\leftarrow b)\,\mathbf v=\big\langle\boldsymbol\Lambda_0^{-1}\boldsymbol\Gamma_0[\mathbf L\,\chi_b\,\mathbf v]\big\rangle_a
+$$
+
+This is TFA's equation (`notes/3_tfa_baseline.md`; the code computes $\mathbf E$ and $\mathbf P$ by finite elements,
+the same quantities by another discretization). Note the order: TFA **solves the equation at every point first**
+(through $\boldsymbol\Lambda_0^{-1}$), **then averages** over the clusters.
+
+**The cost.** $\mathbf P$ is **dense**: $(6N_{\text{clust}})^2$ numbers, every product touches all of them, and building
+it takes $6N_{\text{clust}}$ solves of the full elastic problem. It cannot be a convolution:
+$\boldsymbol\Lambda_0^{-1}$ is the heterogeneous composite's response, so moving a pair of clusters changes what lies
+around them.
+
+**FFT-TFA's plan:** keep TFA's material model (clusters, one eigenstrain each, updated at the cluster's average
+strain), but **average first**: keep only $\boldsymbol\Gamma_0$, whose kernel is a convolution whatever the geometry,
+and never form $\boldsymbol\Lambda_0^{-1}$. Sections 5 and 6 do this.
 
 ---
 
 ## 5. The key choice: the matrix as reference medium
 
-> **Why.** To average LS-5 over clusters, we want $\boldsymbol\tau$ uniform on each cluster. The choice of
-> $\mathbf L_0$ decides how true that is.
+**Goal.** Choose $\mathbf C_0$ so that each cluster's polarization is uniform, exactly where possible.
 
-Take $\mathbf L_0=\mathbf L_M$ in LS-4:
+**Reason.** To average LS-5 over clusters (section 6), we want $\boldsymbol\tau$ uniform on each cluster. LS-4 shows
+that $\boldsymbol\tau$ follows the strain wherever $\mathbf L\neq\mathbf C_0$, and the strain is not uniform on a
+cluster.
+
+#### Step 1 · Set $\mathbf C_0=\mathbf L_M$ in LS-4
 
 $$
 \large
-\begin{aligned}
-\text{matrix:}\quad & \boldsymbol\tau=-\mathbf L_M\,\boldsymbol\varepsilon_P
-&& \text{one plastic strain per cluster}\ \Rightarrow\ \text{uniform, exactly}\\[4pt]
-\text{inclusion:}\quad & \boldsymbol\tau=(\mathbf L_I-\mathbf L_M)\,\boldsymbol\varepsilon
-&& \text{follows the strain}\ \Rightarrow\ \text{approximated as uniform}
-\end{aligned}
+\boldsymbol\tau=(\mathbf L-\mathbf L_M)\,\boldsymbol\varepsilon-\mathbf L\,\boldsymbol\mu
 $$
 
-The matrix's polarization is exact, whatever the cluster's shape. The inclusion's is taken uniform on each cluster,
-at the cluster's average strain: the method's one approximation on the material side. A yielding inclusion would add
-$-\mathbf L_I\boldsymbol\varepsilon_P$, uniform like the matrix's.
+#### Step 2 · Evaluate it in the matrix
+
+There $\mathbf L=\mathbf L_M$, so the strain term cancels:
+
+$$
+\large
+\boldsymbol\tau=(\mathbf L_M-\mathbf L_M)\,\boldsymbol\varepsilon-\mathbf L_M\,\boldsymbol\mu=-\mathbf L_M\,\boldsymbol\mu
+$$
+
+With one eigenstrain per cluster, this is **uniform on every matrix cluster, exactly**, whatever its shape.
+
+#### Step 3 · Evaluate it in the inclusion
+
+There $\mathbf L=\mathbf L_I$ and $\boldsymbol\mu=\mathbf 0$ (elastic):
+
+$$
+\large
+\boldsymbol\tau=(\mathbf L_I-\mathbf L_M)\,\boldsymbol\varepsilon
+$$
+
+This follows the strain, which varies inside an inclusion cluster. **FFT-TFA takes it uniform on each cluster, at the
+cluster's average strain**: the method's one approximation on the material side. (A yielding inclusion would add
+$-\mathbf L_I\boldsymbol\mu$, uniform like the matrix's.)
 
 ![Polarization with the matrix as reference medium](figures/polarization.png)
 
-*A fiber under $\bar\varepsilon_{11}$ and $\bar\gamma_{12}$ (Spectral LS on 64² elements,
+*Figure 2. A fiber under $\bar\varepsilon_{11}$ and $\bar\gamma_{12}$ (Spectral LS on 64² elements,
 $\boldsymbol\tau=\boldsymbol\sigma-\mathbf L_M\boldsymbol\varepsilon$). While elastic, the matrix has no polarization
 at all; once it yields, its polarization is its plastic strain. The inclusion's polarization varies with its strain.
 The speckle at the interface is the known ringing of the Moulinec–Suquet discretization.*
 
-So each cluster has one unknown, its strain $\boldsymbol\varepsilon(a)$. With $\mathbf L(a)$ the stiffness of its
-phase:
+#### Result · Each cluster has one unknown, its strain $\boldsymbol\varepsilon(a)$
+
+With $\mathbf L(a)$ the stiffness of its phase:
 
 $$
 \large
 \boxed{\
-\boldsymbol\tau(a)=\big(\mathbf L(a)-\mathbf L_M\big)\,\boldsymbol\varepsilon(a)-\mathbf L(a)\,\boldsymbol\varepsilon_P(a),
+\boldsymbol\tau(a)=\big(\mathbf L(a)-\mathbf L_M\big)\,\boldsymbol\varepsilon(a)-\mathbf L(a)\,\boldsymbol\mu(a),
 \qquad
-\boldsymbol\sigma(a)=\mathbf L(a)\big(\boldsymbol\varepsilon(a)-\boldsymbol\varepsilon_P(a)\big)\ }
+\boldsymbol\sigma(a)=\mathbf L(a)\big(\boldsymbol\varepsilon(a)-\boldsymbol\mu(a)\big)\ }
 \tag{FT-1}
 $$
 
-with $\boldsymbol\varepsilon_P(a)$ from the radial return at $\boldsymbol\varepsilon(a)$. With any other
-$\mathbf L_0$ the strain term would appear in the matrix too, and the matrix would be approximated as well.
+with $\boldsymbol\mu(a)$ from the radial return at $\boldsymbol\varepsilon(a)$. With any other $\mathbf C_0$ the strain
+term would appear in the matrix too, and the matrix would be approximated as well.
 
 ---
 
-## 6. Averaging over clusters: the clustered equation
+## 6. The clustered equation
 
-Insert a polarization uniform on each cluster into LS-5, and average over cluster $a$:
+**Goal.** Turn LS-5 into an equation for the cluster strains $\boldsymbol\varepsilon(a)$ alone.
+
+**Reason.** Section 5 gives one polarization per cluster. LS-5 needs to be written for them.
+
+#### Step 1 · Start from LS-5 on the elements
 
 $$
 \large
-\boldsymbol\varepsilon(a)=\bar{\boldsymbol\varepsilon}-\sum_b\boldsymbol\Gamma(a\leftarrow b)\,\boldsymbol\tau(b),
-\qquad
-\boldsymbol\Gamma(a\leftarrow b)=\text{mean over }\alpha\text{ in }a\text{ of }\sum_{\beta\text{ in }b}\boldsymbol\Gamma(\alpha\leftarrow\beta)
+\boldsymbol\varepsilon(\alpha)=\bar{\boldsymbol\varepsilon}-\sum_\beta\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\boldsymbol\tau(\beta)
 $$
 
-This has the same form as LS-5, one level up: clusters instead of elements. Given FT-1, it is exact. It is SCA's
-clustered equation (Liu–Bessa–Liu 2016, eqs. 16–17) with $\mathbf L_0=\mathbf L_M$. Schneider (2019, §4) compares it
-with TFA: the two differ only in whether the Green operator is averaged over the clusters. TFA leaves the strain free
-inside a cluster; SCA and FFT-TFA take it uniform.
+#### Step 2 · Apply the assumption: the polarization is uniform on each cluster
 
-> **The problem.** $\boldsymbol\Gamma(a\leftarrow b)$ is a dense table of $6\times6$ blocks, one per pair of clusters:
-> no cheaper than TFA's $\mathbf P$. Section 7 is the actual idea of FFT-TFA.
+$$
+\large
+\boldsymbol\tau(\beta)=\sum_b\chi_b(\beta)\,\boldsymbol\tau(b)
+$$
+
+Substitute, and swap the two sums:
+
+$$
+\large
+\boldsymbol\varepsilon(\alpha)=\bar{\boldsymbol\varepsilon}-\sum_b\Big(\sum_\beta\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\chi_b(\beta)\Big)\boldsymbol\tau(b)
+$$
+
+#### Problem · The equation cannot hold at every element
+
+The right-hand side varies from element to element inside a cluster $a$. But in an inclusion cluster
+$\boldsymbol\tau(a)=(\mathbf L_I-\mathbf L_M)\,\boldsymbol\varepsilon$ was assumed uniform, so the strain should be
+uniform too. A uniform polarization and the pointwise equation cannot both hold.
+
+#### Solution · Require the equation only on average over each cluster
+
+Average both sides over cluster $a$. The left-hand side becomes $\boldsymbol\varepsilon(a)$, the cluster's average
+strain, which is also the strain FT-1 is evaluated at:
+
+$$
+\large
+\boldsymbol\varepsilon(a)=\bar{\boldsymbol\varepsilon}-\sum_b\Big\langle\sum_\beta\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\chi_b(\beta)\Big\rangle_a\boldsymbol\tau(b)
+$$
+
+#### Step 3 · Define the averaged kernel
+
+Write the average over $a$ with $a$'s indicator, so that both clusters appear the same way:
+
+$$
+\large
+\boxed{\
+\hat{\boldsymbol\Gamma}(a\leftarrow b)=\frac1{\lvert a\rvert}\sum_\alpha\sum_\beta\chi_a(\alpha)\,\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\chi_b(\beta)\ }
+$$
+
+the strain averaged over $a$ per unit polarization on $b$. Then we have
+
+$$
+\large
+\boldsymbol\varepsilon(a)=\bar{\boldsymbol\varepsilon}-\sum_b\hat{\boldsymbol\Gamma}(a\leftarrow b)\,\boldsymbol\tau(b)
+$$
+
+This has the same form as LS-5, one level up: clusters instead of elements. It is SCA's clustered equation
+(Liu–Bessa–Liu 2016, eqs. 16–17) with $\mathbf C_0=\mathbf L_M$.
+
+**Two remarks.**
+
+- **The same functions describe the unknown and test the equation:** the polarization is built from the indicators
+  $\chi_b$, and the equation is averaged with the indicators $\chi_a$. This is a **Galerkin** approximation, as in
+  Brisard–Dormieux (2012, §4.1–4.2), whose functions are constants on each cell. Section 7 keeps this structure.
+- **Compare with TFA (section 4):** TFA solves the equation at every point and averages afterwards; here the equation
+  is averaged before it is solved, and only $\boldsymbol\Gamma_0$ appears. Schneider (2019, §4) compares the two: they
+  differ only in whether the Green operator is averaged over the clusters.
+
+> **The problem.** $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ is a dense table of $6\times6$ blocks, one per pair of
+> clusters: no cheaper than TFA's $\mathbf P$. Section 7 is the actual idea of FFT-TFA.
 
 ---
 
 ## 7. A fast interaction: polynomial moments by FFT, exact inside each partition
 
-**Goal.** Replace the dense table $\boldsymbol\Gamma(a\leftarrow b)$ of section 6 by something an FFT can apply, and
-that becomes exact as one setting, the **degree**, is raised.
+**Goal.** Replace the dense table $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ by something an FFT can apply, and that
+becomes exact as one setting, the **degree**, is raised.
 
-**Reason.** Partitions are translated copies of one block. Anything that depends only on the offset between two
-partitions is a convolution on the partitions, which one FFT applies. $\boldsymbol\Gamma(a\leftarrow b)$ is not of that
-form, since clusters have different shapes in different partitions. So we describe every partition's polarization with
-the same few functions.
+**Reason.** $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ is not a convolution: the indicators $\chi_a$, $\chi_b$ have
+different shapes in different partitions. Partitions, though, are translated copies of one block. If every cluster's
+indicator is described by **the same few functions on every partition**, everything that depends on two partitions
+depends only on their offset, and one FFT applies it.
 
-#### Step 1 · Choose the same functions on every partition: polynomials
+**The plan.** 7.1 picks the functions: polynomials, orthonormal on a partition. 7.2 replaces each indicator in
+$\hat{\boldsymbol\Gamma}(a\leftarrow b)$ by its polynomial approximation: the **far field**, by FFT. 7.3 restores the
+exact interaction where polynomials fall short, between the clusters of one partition: the **near field**. 7.4 states
+the result.
 
-Take the polynomials in the element positions up to a total degree (1, $x$, $y$, $xy$, $x^2$, …), made orthonormal over
-a partition's elements:
+### 7.1 Polynomials on a partition
 
-$$
-\large
-\sum_{\alpha\text{ in }A}\varphi(\alpha)\,\psi(\alpha)=
-\begin{cases}1 & \varphi=\psi\\ 0 & \varphi\neq\psi\end{cases}
-$$
+#### Step 1 · Define an inner product on a partition
 
-$\varphi(\alpha)$ is the polynomial's value at $\alpha$'s position *inside its own partition*, so every partition has
-the same polynomials. The first is the constant, $1/\sqrt{\lvert A\rvert}$ (`fft_tfa_model.get_polynomial_basis`, by
-Gram–Schmidt). Their number $N_{\text{poly}}$ is 1, 3, 6, 10 for degrees 0–3 in 2D, and 1, 4, 10, 20 in 3D.
-
-#### Step 2 · Summarize each partition's polarization by its moments
-
-Define the **moment** of partition $B$'s polarization along $\psi$:
+For two functions $f, g$ on the elements of partition $A$:
 
 $$
 \large
-\boldsymbol\tau(B,\psi)=\sum_{\beta\text{ in }B}\psi(\beta)\,\boldsymbol\tau(\beta)
-$$
-
-Since the polynomials are orthonormal, the polynomial that fits $\boldsymbol\tau$ best on $B$ (least squares) is
-$\sum_\psi\psi(\beta)\,\boldsymbol\tau(B,\psi)$: the **summary** of $B$'s polarization. With $\boldsymbol\tau$ uniform
-on each cluster, the moment is a sum over $B$'s clusters:
-
-$$
-\large
-\boldsymbol\tau(B,\psi)=\sum_{b\text{ in }B}m(b,\psi)\,\boldsymbol\tau(b),
+(f,g)_A=\sum_{\alpha\text{ in }A}f(\alpha)\,g(\alpha),
 \qquad
-m(b,\psi)=\sum_{\beta\text{ in }b}\psi(\beta)
+\lVert f\rVert_A=\sqrt{(f,f)_A}
 $$
 
-$m(b,\psi)$ is the moment of cluster $b$ itself: a number fixed by the geometry, computed once
-(`fft_tfa_model.get_cluster_moments`).
+#### Step 2 · Start from the monomials in the element positions
 
-![A partition's polarization and its summaries](figures/summary.png)
-
-*FFT-TFA's polarization, its shear component, at the end of the load of figure 2 (4² partitions, two matrix clusters
-per partition's matrix part, solved at degree 1), and each partition's summary. Degree 0 keeps each partition's mean,
-higher degrees follow the field across it. A step at the fiber's edge needs many polynomials: at degree 3 the summary
-still overshoots there.*
-
-#### Step 3 · Let the summaries interact
-
-Put every partition's summary into LS-5 on the elements. The strain change it causes at the elements of partition $A$,
-$\Delta\boldsymbol\varepsilon(\alpha)$, has moments defined like the polarization's,
-$\Delta\boldsymbol\varepsilon(A,\varphi)=\sum_{\alpha\text{ in }A}\varphi(\alpha)\,\Delta\boldsymbol\varepsilon(\alpha)$:
+Let $(x,y,z)$ be an element's position *inside its own partition*, measured from the partition's centre. The monomials
+up to a total degree $d$ are
 
 $$
 \large
-\Delta\boldsymbol\varepsilon(A,\varphi)=\sum_B\sum_\psi\boldsymbol\Gamma(A,\varphi\leftarrow B,\psi)\,\boldsymbol\tau(B,\psi),
+x^i\,y^j\,z^l,\qquad i+j+l\le d
+$$
+
+In 2D, degree 1 gives $1, x, y$; degree 2 adds $x^2, xy, y^2$. Their number $N_{\text{poly}}$ is 1, 3, 6, 10 for degrees
+0–3 in 2D, and 1, 4, 10, 20 in 3D. Since positions are measured inside the partition, **every partition has the same
+monomials**.
+
+#### Step 3 · Make them orthonormal by Gram–Schmidt
+
+Take the monomials in order of degree, constant first. For each, subtract its components along the polynomials already
+made, then normalize:
+
+$$
+\large
+\tilde\psi_n=x^{i_n}y^{j_n}z^{l_n}-\sum_{m<n}\big(x^{i_n}y^{j_n}z^{l_n},\,\psi_m\big)_A\,\psi_m,
 \qquad
-\boldsymbol\Gamma(A,\varphi\leftarrow B,\psi)=\sum_{\alpha\text{ in }A}\ \sum_{\beta\text{ in }B}\varphi(\alpha)\,\boldsymbol\Gamma(\alpha\leftarrow\beta)\,\psi(\beta)
+\psi_n=\frac{\tilde\psi_n}{\lVert\tilde\psi_n\rVert_A}
 $$
 
-$\boldsymbol\Gamma(A,\varphi\leftarrow B,\psi)$ is the strain in $A$ along $\varphi$ per unit polarization in $B$
-along $\psi$: the **moment kernel**.
-
-Why summarize the strain too: the strain at every element would need the FFT on the elements, which is what we avoid.
-A cluster needs only its average strain. Using the same functions for the polarization and for reading the strain is a
-Galerkin approximation, as in Brisard–Dormieux (2012, §4.1–4.2), whose functions are constants on each cell.
-
-#### Step 4 · Read each cluster's strain from its partition's summary
-
-$A$'s strain change is summarized as $\sum_\varphi\varphi(\alpha)\,\Delta\boldsymbol\varepsilon(A,\varphi)$, and
-cluster $a$ takes its average over $a$'s elements:
+The result is **orthonormal**:
 
 $$
 \large
-\Delta\boldsymbol\varepsilon_{\text{far}}(a)=\sum_\varphi\frac{m(a,\varphi)}{\lvert a\rvert}\,\Delta\boldsymbol\varepsilon(A,\varphi)
+(\varphi,\psi)_A=\begin{cases}1 & \varphi=\psi\\ 0 & \varphi\neq\psi\end{cases}
 $$
 
-#### Step 5 · It is a convolution
+The first polynomial is the constant, $1/\sqrt{\lvert A\rvert}$ (`fft_tfa_model.get_polynomial_basis`).
 
-$\boldsymbol\Gamma(\alpha\leftarrow\beta)$ depends only on the offset between the elements, and the polynomials are the
-same in every partition, so $\boldsymbol\Gamma(A,\varphi\leftarrow B,\psi)$ depends only on the offset between $A$ and
-$B$. The sum over $B$ in step 3 is then a convolution on the partitions: one FFT of every partition's moments, one
-$6N_{\text{poly}}\times6N_{\text{poly}}$ block product per frequency, one inverse FFT (`ls_model.apply_on_lattice`). Steps 2–4 together give the **far field**:
+**Example: one row of 4 elements.** Positions $x=-\tfrac32,-\tfrac12,\tfrac12,\tfrac32$. Gram–Schmidt gives, as values
+at the four elements:
+
+$$
+\large
+\begin{aligned}
+\text{from }1:\quad & \psi_1=\tfrac12\,(1,\ 1,\ 1,\ 1)\\
+\text{from }x:\quad & \psi_2=\tfrac1{\sqrt5}\,(-\tfrac32,\ -\tfrac12,\ \tfrac12,\ \tfrac32)\\
+\text{from }x^2:\quad & x^2-\tfrac54=(1,-1,-1,1)\ \ \Rightarrow\ \ \psi_3=\tfrac12\,(1,\ -1,\ -1,\ 1)\\
+\text{from }x^3:\quad & x^3-\tfrac{41}{20}x=\tfrac3{10}(-1,3,-3,1)\ \ \Rightarrow\ \ \psi_4=\tfrac1{\sqrt{20}}\,(-1,\ 3,\ -3,\ 1)
+\end{aligned}
+$$
+
+(for $x^2$, the component along $\psi_1$ is $\tfrac54\cdot2$ and along $\psi_2$ zero by symmetry; for $x^3$, the component
+along $\psi_2$ is $\tfrac{41}{4}/\sqrt5$). Four polynomials on four elements: they span every function there.
+
+![The orthonormal polynomials, and a cluster's indicator projected onto them](figures/basis.png)
+
+*Figure 3. Top: the six orthonormal polynomials of degree at most 2 on a partition of 8 × 8 elements, each labelled by
+the monomial it comes from. Bottom: the indicator $\chi_b$ of one matrix cluster in a partition the fiber's edge
+crosses, and its projection $\Pi_d\chi_b$ (step 5) at increasing degree, with the share of $\lVert\chi_b\rVert_A$ it
+misses. The projection follows the cluster's shape more closely with each degree; a step needs many polynomials.*
+
+#### Step 4 · Define the moments of a function
+
+The **moment** of $f$ along polynomial $\psi$ is its inner product with it:
+
+$$
+\large
+f(B,\psi)=(f,\psi)_B=\sum_{\beta\text{ in }B}\psi(\beta)\,f(\beta)
+$$
+
+For a cluster's indicator, it is the polynomial summed over the cluster's elements. This number, fixed by the geometry
+and computed once, is the **cluster's moment** (`fft_tfa_model.get_cluster_moments`):
+
+$$
+\large
+m(b,\psi)=(\chi_b,\psi)_B=\sum_{\beta\text{ in }b}\psi(\beta)
+$$
+
+#### Step 5 · Why orthonormal: the moments are the best fit's coefficients
+
+**Claim.** Among all polynomials of degree at most $d$, the one closest to $f$ on $B$ (least squares) is
+
+$$
+\large
+\Pi_d f=\sum_\psi f(B,\psi)\,\psi
+$$
+
+**Proof.** Write a candidate as $\sum_\psi c_\psi\,\psi$ and expand the squared error with the inner product:
+
+$$
+\large
+\Big\lVert f-\sum_\psi c_\psi\psi\Big\rVert_B^2
+=\lVert f\rVert_B^2-2\sum_\psi c_\psi\,(f,\psi)_B+\sum_\varphi\sum_\psi c_\varphi c_\psi\,(\varphi,\psi)_B
+$$
+
+Orthonormality turns the double sum into $\sum_\psi c_\psi^2$. Complete the square:
+
+$$
+\large
+\Big\lVert f-\sum_\psi c_\psi\psi\Big\rVert_B^2=\lVert f\rVert_B^2-\sum_\psi f(B,\psi)^2+\sum_\psi\big(c_\psi-f(B,\psi)\big)^2
+$$
+
+The last sum is the only one that depends on the $c_\psi$, and it is smallest, zero, at $c_\psi=f(B,\psi)$. $\square$
+
+What this buys, read off the last equation:
+
+1. **No system to solve.** Without orthonormality the best fit needs the normal equations, a $N_{\text{poly}}\times
+   N_{\text{poly}}$ solve per partition. With it, each coefficient is one inner product, computed on its own.
+2. **Raising the degree never undoes the lower ones.** Adding polynomials leaves every earlier coefficient as it was.
+   The squared error of the best fit is $\lVert f\rVert_B^2-\sum_\psi f(B,\psi)^2$: it can only fall as polynomials are
+   added (figure 3, bottom).
+3. **At full degree the fit is exact.** With $k$ elements per partition side, the monomials up to power $k-1$ in each
+   coordinate span every function on a partition's elements (as in the example); their total degree is $2(k-1)$ in 2D,
+   $3(k-1)$ in 3D (`degree = "full"`). Then $\Pi_d f=f$ for every $f$.
+4. **Uniform fields are exact at every degree.** The constant is one of the polynomials, so $\Pi_d$ of a uniform field
+   is that field. This matters in 7.3.
+5. **The same on every partition.** The polynomials, and so the cluster moments' definition, are the same in every
+   partition. This is what makes 7.2 a convolution.
+
+**In the example.** A cluster covering the left half of the row, $\chi_b=(1,1,0,0)$, has moments $m(b,\psi_1)=1$,
+$m(b,\psi_2)=-2/\sqrt5$, $m(b,\psi_3)=0$, $m(b,\psi_4)=2/\sqrt{20}$. Its projections:
+
+$$
+\large
+\begin{aligned}
+\Pi_0\chi_b&=(0.5,\ 0.5,\ 0.5,\ 0.5) && \text{squared error }\ 2-1=1\\
+\Pi_1\chi_b=\Pi_2\chi_b&=(1.1,\ 0.7,\ 0.3,\ -0.1) && \text{squared error }\ 2-1-0.8=0.2\\
+\Pi_3\chi_b&=(1,\ 1,\ 0,\ 0) && \text{squared error }\ 0
+\end{aligned}
+$$
+
+### 7.2 The far field: approximate the indicators by polynomials
+
+#### Step 1 · Start from the averaged kernel of section 6
+
+$$
+\large
+\hat{\boldsymbol\Gamma}(a\leftarrow b)=\frac1{\lvert a\rvert}\sum_\alpha\sum_\beta\chi_a(\alpha)\,\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\chi_b(\beta)
+$$
+
+#### Step 2 · Approximate both indicators by their projections on their own partitions
+
+Cluster $b$ lies in partition $B$ and $a$ in $A$. By 7.1 step 5:
+
+$$
+\large
+\begin{aligned}
+\chi_b(\beta)&\approx\Pi_d\chi_b(\beta)=\sum_\psi m(b,\psi)\,\psi(\beta) && (\beta\text{ in }B)\\[4pt]
+\chi_a(\alpha)&\approx\Pi_d\chi_a(\alpha)=\sum_\varphi m(a,\varphi)\,\varphi(\alpha) && (\alpha\text{ in }A)
+\end{aligned}
+$$
+
+Each projection lives on its own partition only. Substitute both:
+
+$$
+\large
+\hat{\boldsymbol\Gamma}(a\leftarrow b)\approx\frac1{\lvert a\rvert}\sum_{\alpha\text{ in }A}\ \sum_{\beta\text{ in }B}\Big(\sum_\varphi m(a,\varphi)\,\varphi(\alpha)\Big)\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\Big(\sum_\psi m(b,\psi)\,\psi(\beta)\Big)
+$$
+
+#### Step 3 · Pull the sums over polynomials out
+
+The moments do not depend on $\alpha$ or $\beta$:
+
+$$
+\large
+\hat{\boldsymbol\Gamma}(a\leftarrow b)\approx\sum_\varphi\sum_\psi\frac{m(a,\varphi)}{\lvert a\rvert}\Big(\sum_{\alpha\text{ in }A}\ \sum_{\beta\text{ in }B}\varphi(\alpha)\,\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\psi(\beta)\Big)m(b,\psi)
+$$
+
+#### Step 4 · Define the moment kernel
+
+The bracket depends on the two partitions and the two polynomials, not on the clusters:
+
+$$
+\large
+\mathbf K(A,\varphi\leftarrow B,\psi)=\sum_{\alpha\text{ in }A}\ \sum_{\beta\text{ in }B}\varphi(\alpha)\,\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\psi(\beta)
+$$
+
+the strain in $A$ along $\varphi$ per unit polarization in $B$ along $\psi$. Then we have the **far field**:
 
 $$
 \large
 \boxed{\
-\Delta\boldsymbol\varepsilon_{\text{far}}(a)=\sum_b\boldsymbol\Gamma_{\text{far}}(a\leftarrow b)\,\boldsymbol\tau(b),
-\qquad
-\boldsymbol\Gamma_{\text{far}}(a\leftarrow b)=\sum_\varphi\sum_\psi\frac{m(a,\varphi)}{\lvert a\rvert}\,\boldsymbol\Gamma(A,\varphi\leftarrow B,\psi)\,m(b,\psi)\ }
+\hat{\boldsymbol\Gamma}_{\text{far}}(a\leftarrow b)=\sum_\varphi\sum_\psi\frac{m(a,\varphi)}{\lvert a\rvert}\,\mathbf K(A,\varphi\leftarrow B,\psi)\,m(b,\psi)\ }
 \tag{FT-2}
 $$
 
-$\boldsymbol\Gamma_{\text{far}}(a\leftarrow b)$ is never formed. It names, pair by pair, what the FFT computes.
+#### Step 5 · Apply it to the polarization: the moments of $\boldsymbol\tau$ appear
 
-#### Step 6 · Keep the exact interaction inside each partition
+$$
+\large
+\sum_b\hat{\boldsymbol\Gamma}_{\text{far}}(a\leftarrow b)\,\boldsymbol\tau(b)
+=\sum_\varphi\frac{m(a,\varphi)}{\lvert a\rvert}\sum_B\sum_\psi\mathbf K(A,\varphi\leftarrow B,\psi)\Big(\sum_{b\text{ in }B}m(b,\psi)\,\boldsymbol\tau(b)\Big)
+$$
 
-How good is the far field? Compare it with the exact $\boldsymbol\Gamma(a\leftarrow b)$, pair by pair:
+The bracket is the moment of the polarization field of 6 step 2, $\boldsymbol\tau=\sum_b\chi_b\boldsymbol\tau(b)$, since
+the moment is linear:
+
+$$
+\large
+\boldsymbol\tau(B,\psi)=\sum_{b\text{ in }B}m(b,\psi)\,\boldsymbol\tau(b)=\sum_{\beta\text{ in }B}\psi(\beta)\,\boldsymbol\tau(\beta)
+$$
+
+So **approximating the indicators is the same as approximating the polarization** by its best-fitting polynomial on
+each partition, $\Pi_d\boldsymbol\tau=\sum_\psi\boldsymbol\tau(B,\psi)\,\psi$: its **summary** (figure 4).
+
+![A partition's polarization and its summaries](figures/summary.png)
+
+*Figure 4. FFT-TFA's polarization, its shear component, at the end of the load of figure 2 (4² partitions, two matrix
+clusters per partition's matrix part, solved at degree 1), and each partition's summary $\Pi_d\boldsymbol\tau$. Degree 0
+keeps each partition's mean, higher degrees follow the field across it. A step at the fiber's edge needs many
+polynomials: at degree 3 the summary still overshoots there.*
+
+#### Step 6 · Why approximate the target's indicator too
+
+Approximating only $\chi_b$ would leave $\langle\boldsymbol\Gamma_0[\Pi_d\boldsymbol\tau]\rangle_a$: the strain caused
+by the summaries, needed at every element to average it over $a$. That is an FFT on the elements, the cost we avoid.
+Approximating $\chi_a$ the same way needs only the moments of that strain along each $\varphi$, which is what
+$\mathbf K$ gives. It is the Galerkin structure of section 6 again, with polynomials in place of indicators: the same
+functions describe the polarization and test the equation. It keeps a property of the exact kernel: since
+$\boldsymbol\Gamma_0$ is symmetric, $\mathbf K(A,\varphi\leftarrow B,\psi)^{\mathsf T}=\mathbf K(B,\psi\leftarrow A,\varphi)$,
+and $\lvert a\rvert\,\hat{\boldsymbol\Gamma}_{\text{far}}(a\leftarrow b)$ is the transpose of
+$\lvert b\rvert\,\hat{\boldsymbol\Gamma}_{\text{far}}(b\leftarrow a)$, as for $\hat{\boldsymbol\Gamma}$.
+
+#### Step 7 · The moment kernel is a convolution on the partitions
+
+Write the element positions as partition plus position inside it: $\alpha$ at $k\,A+\mathbf r$ and $\beta$ at
+$k\,B+\mathbf s$, with $k$ elements per partition side. The element kernel depends only on the offset:
+
+$$
+\large
+\boldsymbol\Gamma_0(\alpha\leftarrow\beta)=\boldsymbol\Gamma_0\big(k(A-B)+\mathbf r-\mathbf s\big)
+$$
+
+and $\varphi$, $\psi$ depend only on $\mathbf r$, $\mathbf s$, the same in every partition. Substitute into
+$\mathbf K$:
+
+$$
+\large
+\mathbf K(A,\varphi\leftarrow B,\psi)=\sum_{\mathbf r}\sum_{\mathbf s}\varphi(\mathbf r)\,\boldsymbol\Gamma_0\big(k(A-B)+\mathbf r-\mathbf s\big)\,\psi(\mathbf s)
+$$
+
+It depends on $A$ and $B$ only through their offset $\mathbf D=A-B$, so the sum over $B$ in step 5 is a **convolution on
+the partition lattice**. The far field is then three stages (`fft_tfa_model.get_strain_change`):
+
+1. **Summarize:** every partition's moments $\boldsymbol\tau(B,\psi)$, from the cluster polarizations;
+2. **Interact:** one FFT of the moments, one $6N_{\text{poly}}\times6N_{\text{poly}}$ product with $\mathbf K$ per
+   frequency, one inverse FFT (`ls_model.apply_on_lattice`). This gives, for every partition $A$ and polynomial
+   $\varphi$, $\sum_B\sum_\psi\mathbf K(A,\varphi\leftarrow B,\psi)\,\boldsymbol\tau(B,\psi)$: the moments along
+   $\varphi$ of the strain the summaries cause;
+3. **Read back:** cluster $a$ weights its partition's moments by $m(a,\varphi)/\lvert a\rvert$.
+
+$\hat{\boldsymbol\Gamma}_{\text{far}}(a\leftarrow b)$ is never formed. It names, pair by pair, what these three stages
+compute.
+
+### 7.3 The near field: exact inside each partition
+
+#### Step 1 · Measure the far field against the exact kernel
 
 ![The far field's error](figures/far_field.png)
 
-*A fiber on 64² elements, 8² partitions, two matrix clusters per partition's matrix part. The error is a volume-weighted
-rms over all cluster pairs at each distance, as a share of the exact interaction within a partition.*
+*Figure 5. $\hat{\boldsymbol\Gamma}_{\text{far}}(a\leftarrow b)$ against $\hat{\boldsymbol\Gamma}(a\leftarrow b)$,
+pair by pair: a fiber on 64² elements, 8² partitions, two matrix clusters per partition's matrix part. The error is a
+volume-weighted rms over all cluster pairs at each distance, as a share of the exact interaction within a partition.*
 
 Between partitions, the far field converges with the degree: one partition apart it is 8 % off at degree 0 and 0.3 % at
-degree 4. Within a partition it is not good enough: 54 % off at degree 0, still 9 % at degree 4. There the kernel is
-at its sharpest and the polarization steps at every interface, and polynomials follow neither (the overshoot in the
-summary figure).
+degree 4. Within a partition it is not good enough: 54 % off at degree 0, still 9 % at degree 4. There the kernel is at
+its sharpest and the indicators step at every interface, and polynomials follow neither (figures 3 and 4).
 
-So, inside each partition, replace the far field's share by the exact interaction. The **correction** is what the far
-field misses:
+#### Step 2 · Define the correction: what the far field misses
+
+For every pair of clusters,
 
 $$
 \large
-\boldsymbol\Gamma_{\text{corr}}(a\leftarrow b)=\boldsymbol\Gamma(a\leftarrow b)-\boldsymbol\Gamma_{\text{far}}(a\leftarrow b),
-\qquad a\text{ and }b\text{ in the same partition}
+\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)=\hat{\boldsymbol\Gamma}(a\leftarrow b)-\hat{\boldsymbol\Gamma}_{\text{far}}(a\leftarrow b)
 \tag{FT-3}
 $$
 
-The split $\boldsymbol\Gamma=\boldsymbol\Gamma_{\text{far}}+\boldsymbol\Gamma_{\text{corr}}$ is exact for every pair.
-The approximation is to drop the corrections between different partitions, and the degree controls how much that
-drops.
-
-#### Step 7 · Make a uniform polarization cause no strain
-
-A polarization that is the same everywhere must cause no strain, since $\boldsymbol\Gamma$ is zero at zero frequency
-(section 3). The far field passes this test exactly: the constant is one of the polynomials, so the summary of a uniform
-polarization is exact, and $\boldsymbol\Gamma$ turns it into zero. The corrections of one partition do not: only their
-sum over *all* partitions vanishes. So they act on the polarization's deviation from its cell mean,
-$\boldsymbol\tau(b)-\langle\boldsymbol\tau\rangle$, with
+so that, exactly,
 
 $$
 \large
-\langle\boldsymbol\tau\rangle=\frac1{N_{\text{part}}}\sum_b v(b)\,\boldsymbol\tau(b)
+\sum_b\hat{\boldsymbol\Gamma}(a\leftarrow b)\,\boldsymbol\tau(b)=\sum_b\hat{\boldsymbol\Gamma}_{\text{far}}(a\leftarrow b)\,\boldsymbol\tau(b)+\sum_b\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)\,\boldsymbol\tau(b)
 $$
 
-#### Step 8 · Keep the mean strain
+#### Step 3 · Show that the corrections of a uniform polarization add up to zero
 
-The exact interaction changes no cell average, so $\langle\boldsymbol\varepsilon\rangle=\bar{\boldsymbol\varepsilon}$.
-The far field keeps this; the corrections do not quite. So subtract the cell mean of the strain change.
+Sum the exact kernel over **all** sources $b$. The indicators add up to 1 everywhere, $\sum_b\chi_b=1$, so
 
-#### Result · FFT-TFA's interaction (`fft_tfa_model.get_strain_change`)
+$$
+\large
+\sum_b\hat{\boldsymbol\Gamma}(a\leftarrow b)=\frac1{\lvert a\rvert}\sum_\alpha\chi_a(\alpha)\sum_\beta\boldsymbol\Gamma_0(\alpha\leftarrow\beta)=\mathbf 0
+$$
+
+since the element kernel sums to zero over its sources (section 3: a uniform polarization causes no strain). The far
+field does the same: summed over the clusters of $B$, the moments are those of $\chi_B=1$ on $B$, which only the constant
+polynomial sees (7.1, point 4), and the constant moment of every partition gives a uniform polarization, which
+$\boldsymbol\Gamma_0$ turns into zero. So $\sum_b\hat{\boldsymbol\Gamma}_{\text{far}}(a\leftarrow b)=\mathbf 0$, and
+subtracting:
+
+$$
+\large
+\sum_b\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)=\mathbf 0\qquad\text{(over all clusters }b\text{, in every partition)}
+$$
+
+#### Step 4 · Rewrite the corrections on the polarization's deviation from its mean
+
+Split $\boldsymbol\tau(b)=\langle\boldsymbol\tau\rangle+\big(\boldsymbol\tau(b)-\langle\boldsymbol\tau\rangle\big)$,
+with $\langle\boldsymbol\tau\rangle=\frac1{N_{\text{part}}}\sum_bv(b)\,\boldsymbol\tau(b)$ the cell mean. By step 3 the
+mean drops out:
+
+$$
+\large
+\sum_b\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)\,\boldsymbol\tau(b)=\underbrace{\Big(\sum_b\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)\Big)}_{=\ \mathbf 0}\langle\boldsymbol\tau\rangle+\sum_b\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)\,\big(\boldsymbol\tau(b)-\langle\boldsymbol\tau\rangle\big)
+$$
+
+Still exact. Nothing has been dropped yet.
+
+#### Step 5 · Approximate: keep the corrections inside each partition only
+
+Drop the corrections between clusters of different partitions, where the far field is already accurate (step 1):
+
+$$
+\large
+\sum_b\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)\,\big(\boldsymbol\tau(b)-\langle\boldsymbol\tau\rangle\big)\ \approx\sum_{b\text{ in }A}\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)\,\big(\boldsymbol\tau(b)-\langle\boldsymbol\tau\rangle\big)
+$$
+
+This is FFT-TFA's one approximation of the interaction, and the degree controls what it drops.
+
+**Why step 4 comes before step 5.** The corrections of one partition do **not** add up to zero: only their sum over all
+partitions does. Truncated without step 4, a uniform polarization would cause a strain through the corrections kept,
+which the exact equation forbids. Truncated after step 4, a uniform polarization reaches the corrections as zero, and
+causes no strain at every degree: the **patch test**, passed by construction.
+
+#### Step 6 · Keep the mean strain
+
+The exact kernel changes no cell average: by the same argument as step 3, summed over all **targets** $a$ with weights
+$v(a)$, $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ adds up to zero, so $\langle\boldsymbol\varepsilon\rangle=
+\bar{\boldsymbol\varepsilon}$. The far field keeps this; the corrections kept in step 5 do not quite. So subtract the
+cell mean of the interaction from each cluster's. For the exact kernel this subtracts zero.
+
+### 7.4 The result: FFT-TFA's interaction
+
+Assemble 7.2 (far field) and 7.3 steps 5 and 6 (near field, cell mean). Define, for every cluster,
 
 $$
 \large
 \boxed{\
 \begin{aligned}
-\boldsymbol\varepsilon(a)&=\bar{\boldsymbol\varepsilon}-\big(\Delta\boldsymbol\varepsilon(a)-\langle\Delta\boldsymbol\varepsilon\rangle\big)\\[6pt]
-\Delta\boldsymbol\varepsilon(a)&=\underbrace{\sum_b\boldsymbol\Gamma_{\text{far}}(a\leftarrow b)\,\boldsymbol\tau(b)}_{\text{far field, by FFT}}
-\ +\underbrace{\sum_{b\text{ in }A}\boldsymbol\Gamma_{\text{corr}}(a\leftarrow b)\,\big(\boldsymbol\tau(b)-\langle\boldsymbol\tau\rangle\big)}_{\text{corrections inside }a\text{'s partition}}
+\boldsymbol\varepsilon(a)&=\bar{\boldsymbol\varepsilon}-\big(\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}\boldsymbol\tau\big)(a)\\[6pt]
+\big(\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}\boldsymbol\tau\big)(a)&=\underbrace{\sum_b\hat{\boldsymbol\Gamma}_{\text{far}}(a\leftarrow b)\,\boldsymbol\tau(b)}_{\text{far field, by FFT}}
+\ +\underbrace{\sum_{b\text{ in }A}\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)\,\big(\boldsymbol\tau(b)-\langle\boldsymbol\tau\rangle\big)}_{\text{near field, in }a\text{'s partition}}\\[4pt]
+&\qquad-\ \big\langle\,\text{the same two terms}\,\big\rangle
 \end{aligned}\ }
 \tag{FT-4}
 $$
 
-We write this as
-$\boldsymbol\varepsilon=\bar{\boldsymbol\varepsilon}-\boldsymbol\Gamma_{\text{FFT-TFA}}\,\boldsymbol\tau$:
-$\boldsymbol\Gamma_{\text{FFT-TFA}}$ is FFT-TFA's approximation of $\boldsymbol\Gamma(a\leftarrow b)$.
+$\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$ is FFT-TFA's approximation of the clustered equation's
+$\hat{\boldsymbol\Gamma}$ (`fft_tfa_model.get_strain_change`). It is linear in $\boldsymbol\tau$: the two means are
+linear too.
 
-#### Computing it offline (`fft_tfa_model.get_interaction`, once)
+### 7.5 Computing it offline (`fft_tfa_model.get_interaction`, once)
 
-Both tables are sums of the element kernel, which depends only on the offset between two elements, so write it
-$\boldsymbol\Gamma(\text{offset})$. For $\alpha$ in $A$ and $\beta$ in $B$, with $k$ elements per partition side:
+Both tables are sums of the element kernel, which depends only on the offset between two elements. For $\alpha$ in $A$
+and $\beta$ in $B$:
 
 $$
 \large
 \text{offset from }\beta\text{ to }\alpha\;=\;k\,\mathbf D+\boldsymbol\delta,
 \qquad
 \begin{aligned}
-\mathbf D&=\text{offset from }B\text{ to }A,\ \text{in partitions}\\
-\boldsymbol\delta&=\text{offset of }\alpha\text{ inside }A\text{ minus that of }\beta\text{ inside }B,\ \text{in elements}
+\mathbf D&=A-B,\ \text{in partitions}\\
+\boldsymbol\delta&=\mathbf r-\mathbf s,\ \text{in elements}
 \end{aligned}
 $$
 
-Grouping the element pairs by $\boldsymbol\delta$:
+$\boldsymbol\delta$ is the offset between the two elements' positions inside their partitions.
+
+**The moment kernels.** In 7.2 step 7, group the pairs of positions by $\boldsymbol\delta$:
 
 $$
 \large
-\begin{aligned}
-\boldsymbol\Gamma(A,\varphi\leftarrow B,\psi)&=\sum_{\boldsymbol\delta}w(\varphi,\psi,\boldsymbol\delta)\ \boldsymbol\Gamma\big(k\mathbf D+\boldsymbol\delta\big),
-&w(\varphi,\psi,\boldsymbol\delta)&=\sum_{\text{positions }\alpha,\beta\text{ with offset }\boldsymbol\delta}\varphi(\alpha)\,\psi(\beta)\\[6pt]
-\boldsymbol\Gamma(a\leftarrow b)&=\frac{1}{\lvert a\rvert}\sum_{\boldsymbol\delta}\text{pairs}(a,b,\boldsymbol\delta)\ \boldsymbol\Gamma(\boldsymbol\delta),
-&&a\text{ and }b\text{ in the same partition}
-\end{aligned}
+\mathbf K(\mathbf D,\varphi\leftarrow\psi)=\sum_{\boldsymbol\delta}w(\varphi,\psi,\boldsymbol\delta)\ \boldsymbol\Gamma_0\big(k\mathbf D+\boldsymbol\delta\big),
+\qquad
+w(\varphi,\psi,\boldsymbol\delta)=\sum_{\mathbf r-\mathbf s=\boldsymbol\delta}\varphi(\mathbf r)\,\psi(\mathbf s)
 $$
 
-The first gives the moment kernels at every offset $\mathbf D$ (`get_moment_kernels`). In the second,
+for every offset $\mathbf D$ at once (`get_moment_kernels`), then transformed to Fourier space.
+
+**The corrections.** Inside one partition ($\mathbf D=\mathbf 0$), group the element pairs of section 6 step 3 the same
+way:
+
+$$
+\large
+\hat{\boldsymbol\Gamma}(a\leftarrow b)=\frac{1}{\lvert a\rvert}\sum_{\boldsymbol\delta}\text{pairs}(a,b,\boldsymbol\delta)\ \boldsymbol\Gamma_0(\boldsymbol\delta)
+$$
+
 $\text{pairs}(a,b,\boldsymbol\delta)$ counts the element pairs of $a$ and $b$ with offset $\boldsymbol\delta$; for every
-offset at once, that is the cross-correlation of the two clusters' indicator arrays, one FFT padded to twice the
-partition (`get_correction_blocks`, which subtracts FT-2's share to give FT-3).
+offset at once, that is the cross-correlation of the two clusters' indicators, one FFT padded to twice the partition.
+Subtracting FT-2's share gives FT-3 (`get_correction_blocks`).
 
 **Memory.** The moment kernels hold one $6N_{\text{poly}}\times6N_{\text{poly}}$ block per frequency of the partition
 grid, the corrections one $6\times6$ block per pair of clusters in the same partition. The kernels grow with
 $N_{\text{poly}}^2$, not with the clusters: in 3D, degree 3 stores 25 times as much as degree 1.
 
-#### Three checks of the derivation
+### 7.6 Three checks of the derivation
 
-- **Degree 0.** The one polynomial is the constant, and FT-2 becomes
-  $\boldsymbol\Gamma_{\text{far}}(a\leftarrow b)=v(b)\,\boldsymbol\Gamma(A\leftarrow B)$, with
-  $\boldsymbol\Gamma(A\leftarrow B)$ section 6's average one level up: each partition acts through its mean
-  polarization, like Brisard and Dormieux's cells (2010, §3.2).
-- **Full degree.** With $k$ elements per partition side, polynomials up to degree $k-1$ in each coordinate span every
-  function on a partition's elements; their total degree is $2(k-1)$ in 2D, $3(k-1)$ in 3D (`degree = "full"`).
-  The summaries are exact, $\boldsymbol\Gamma_{\text{far}}=\boldsymbol\Gamma(a\leftarrow b)$, the corrections vanish, and FT-4 is the exact
-  clustered equation of section 6. `check.py` confirms this to round-off on every problem (`get_interaction_error`),
-  and that a uniform polarization causes no strain at the problem's degree (`get_patch_test_error`).
-- **One element per partition.** Every degree is full, and FFT-TFA is Spectral LS with $\mathbf L_0=\mathbf L_M$.
+- **Degree 0.** The one polynomial is the constant $1/\sqrt{\lvert A\rvert}$, so $m(b,1)=\lvert b\rvert/\sqrt{\lvert
+  A\rvert}$ and $m(a,1)/\lvert a\rvert=1/\sqrt{\lvert A\rvert}$. Substitute into FT-2:
+
+  $$
+  \large
+  \begin{aligned}
+  \hat{\boldsymbol\Gamma}_{\text{far}}(a\leftarrow b)
+  &=\frac{1}{\sqrt{\lvert A\rvert}}\Big(\sum_{\alpha\text{ in }A}\ \sum_{\beta\text{ in }B}\frac{1}{\sqrt{\lvert A\rvert}}\,\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\frac{1}{\sqrt{\lvert A\rvert}}\Big)\frac{\lvert b\rvert}{\sqrt{\lvert A\rvert}}\\[4pt]
+  &=\frac{\lvert b\rvert}{\lvert A\rvert}\cdot\frac{1}{\lvert A\rvert}\sum_{\alpha\text{ in }A}\ \sum_{\beta\text{ in }B}\boldsymbol\Gamma_0(\alpha\leftarrow\beta)
+  \;=\;v(b)\,\hat{\boldsymbol\Gamma}(A\leftarrow B)
+  \end{aligned}
+  $$
+
+  with $\hat{\boldsymbol\Gamma}(A\leftarrow B)$ section 6's average one level up, over partitions: each partition acts
+  through its mean polarization, like Brisard and Dormieux's cells (2010, §3.2).
+- **Full degree.** The projections are exact (7.1, point 3): $\Pi_d\chi_b=\chi_b$, so
+  $\hat{\boldsymbol\Gamma}_{\text{far}}=\hat{\boldsymbol\Gamma}$, the corrections vanish, and FT-4 is the exact clustered
+  equation of section 6. `check.py` confirms this to round-off on every problem (`get_interaction_error`), and that a
+  uniform polarization causes no strain at the problem's degree (`get_patch_test_error`).
+- **One element per partition.** Every degree is full, and FFT-TFA is Spectral LS with $\mathbf C_0=\mathbf L_M$.
 
 ---
 
 ## 8. Solving a load step
 
-Newton's method needs a residual, the linear system for a correction $\delta\boldsymbol\varepsilon$, and a
-preconditioner for that system:
+**Goal.** Find the cluster strains that satisfy FT-4 with FT-1, at each load step.
+
+**Reason.** $\boldsymbol\tau$ depends on $\boldsymbol\varepsilon$ through the material law, so FT-4 is nonlinear.
+Newton's method needs a residual, the linear system for a correction, and a preconditioner for that system.
+
+#### Step 1 · Define the residual
+
+Move everything in FT-4 to one side:
 
 $$
 \large
-\begin{aligned}
-\text{residual:}\quad & \mathbf r=\boldsymbol\varepsilon-\bar{\boldsymbol\varepsilon}+\boldsymbol\Gamma_{\text{FFT-TFA}}\,\boldsymbol\tau(\boldsymbol\varepsilon) && \text{(FT-5)}\\[6pt]
-\text{Newton system:}\quad & \delta\boldsymbol\varepsilon+\boldsymbol\Gamma_{\text{FFT-TFA}}\,(\mathbf L_T-\mathbf L_M)\,\delta\boldsymbol\varepsilon=-\mathbf r && \text{(FT-6)}\\[6pt]
-\text{preconditioner:}\quad & \text{invert each cluster's own }6\times6\text{ block}\quad \mathbf I+\boldsymbol\Gamma_{\text{FFT-TFA}}(a\leftarrow a)\,\big(\mathbf L_T(a)-\mathbf L_M\big) && \text{(FT-7)}
-\end{aligned}
+\mathbf r(\boldsymbol\varepsilon)=\boldsymbol\varepsilon-\bar{\boldsymbol\varepsilon}+\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}\,\boldsymbol\tau(\boldsymbol\varepsilon)
+\tag{FT-5}
 $$
 
-- **FT-5** is a strain error, like TFA's. Convergence is judged on it directly: with $\mathbf L_0=\mathbf L_M$ it is
-  already the "matrix units" measure that Spectral LS has to compute (LS-24, `notes/2_ls_model.md` section 4.3).
-- **FT-6**: $\mathbf L_T-\mathbf L_M$ is how each cluster's polarization changes with its strain. The system is never
-  assembled: each product is one FFT on the partitions and one sparse product for the corrections. It is not
-  symmetric, so GMRES solves it.
-- **FT-7** (block-Jacobi) cuts GMRES's iterations. Its blocks, $\boldsymbol\Gamma_{\text{FFT-TFA}}(a\leftarrow a)$, are
-  each cluster's effect on itself: the far field's self-term, the cluster's own correction, less what the two cell
-  means of steps 7 and 8 take back. They are built once (`fft_tfa_model.get_own_strain_change`).
+with $\boldsymbol\tau(\boldsymbol\varepsilon)$ from FT-1, cluster by cluster. The strains solve the step when
+$\mathbf r=\mathbf 0$.
+
+#### Step 2 · Linearize it
+
+Change the strains by $\delta\boldsymbol\varepsilon$. To first order, the polarization changes by its derivative:
+
+$$
+\large
+\boldsymbol\tau(\boldsymbol\varepsilon+\delta\boldsymbol\varepsilon)\approx\boldsymbol\tau(\boldsymbol\varepsilon)+\frac{d\boldsymbol\tau}{d\boldsymbol\varepsilon}\,\delta\boldsymbol\varepsilon
+$$
+
+From $\boldsymbol\tau=\boldsymbol\sigma-\mathbf L_M\boldsymbol\varepsilon$ and $d\boldsymbol\sigma/d\boldsymbol\varepsilon=\mathbf L_T$:
+
+$$
+\large
+\frac{d\boldsymbol\tau(a)}{d\boldsymbol\varepsilon(a)}=\mathbf L_T(a)-\mathbf L_M
+$$
+
+how each cluster's polarization changes with its own strain. $\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$ is linear, so
+
+$$
+\large
+\mathbf r(\boldsymbol\varepsilon+\delta\boldsymbol\varepsilon)\approx\mathbf r(\boldsymbol\varepsilon)+\delta\boldsymbol\varepsilon+\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}\,(\mathbf L_T-\mathbf L_M)\,\delta\boldsymbol\varepsilon
+$$
+
+#### Step 3 · Set the linearized residual to zero
+
+$$
+\large
+\delta\boldsymbol\varepsilon+\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}\,(\mathbf L_T-\mathbf L_M)\,\delta\boldsymbol\varepsilon=-\mathbf r
+\tag{FT-6}
+$$
+
+The system is never assembled: each product with its left-hand side is one FFT on the partitions and one sparse product
+for the corrections. It is not symmetric, so GMRES solves it.
+
+#### Step 4 · Precondition with each cluster's own block
+
+The left-hand side's $6\times6$ block from a cluster to itself is
+
+$$
+\large
+\mathbf I+\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}(a\leftarrow a)\,\big(\mathbf L_T(a)-\mathbf L_M\big)
+\tag{FT-7}
+$$
+
+Inverting these blocks (block-Jacobi) cuts GMRES's iterations. $\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}(a\leftarrow a)$
+is each cluster's effect on itself: the far field's self-term, the cluster's own correction, less what the two cell
+means of FT-4 take back. They are built once (`fft_tfa_model.get_own_strain_change`).
+
+**Convergence** is judged on FT-5 directly. It is a strain error, like TFA's, and with $\mathbf C_0=\mathbf L_M$ it is
+already the "matrix units" measure that Spectral LS has to compute (LS-24, `notes/2_ls_model.md` section 4.3).
 
 **One load step** (`newton.Solver.solve_step`):
+
 1. Start from the previous strains plus the macro strain increment.
 2. Evaluate FT-1 and FT-5.
 3. Solve FT-6 for $\delta\boldsymbol\varepsilon$ by GMRES, and step with a backtracking line search.
@@ -503,11 +1015,21 @@ $$
 ## 9. The methods side by side
 
 | | Material states | Uniform per state | Interaction | Stored | Cost per product |
-|---|---|---|---|---|---|
-| **FFT-TFA** | clusters | $\boldsymbol\varepsilon_P$, $\boldsymbol\varepsilon$ | polynomial moments by partition FFT + exact inside each partition | moment kernels on the partitions + blocks inside each partition | $O(N_{\text{poly}}N_{\text{part}}\log N_{\text{part}}+N_{\text{poly}}^2N_{\text{part}})$ + blocks |
+|-------|------|-------|---------|---------|------------|
+| **FFT-TFA** | clusters | $\boldsymbol\mu$, $\boldsymbol\varepsilon$ | polynomial moments by partition FFT + exact inside each partition | moment kernels on the partitions + blocks inside each partition | $O(N_{\text{poly}}N_{\text{part}}\log N_{\text{part}})$ + $O(N_{\text{poly}}^2N_{\text{part}})$ + blocks |
 | **Spectral LS** | elements | everything | element FFT | kernel and fields on the elements | $O(N_{\text{elem}}\log N_{\text{elem}})$ |
-| **TFA** | clusters | $\boldsymbol\varepsilon_P$ | exact FE influence functions | dense, $(6N_{\text{clust}})^2$ | $O(N_{\text{clust}}^2)$ |
-| SCA (not in the code) | clusters | $\boldsymbol\varepsilon_P$, $\boldsymbol\varepsilon$ | clustered LS operator | dense, $(6N_{\text{clust}})^2$ | $O(N_{\text{clust}}^2)$ |
+| **TFA** | clusters | $\boldsymbol\mu$ | exact FE influence functions | dense, $(6N_{\text{clust}})^2$ | $O(N_{\text{clust}}^2)$ |
+| SCA (not in the code) | clusters | $\boldsymbol\mu$, $\boldsymbol\varepsilon$ | clustered LS operator | dense, $(6N_{\text{clust}})^2$ | $O(N_{\text{clust}}^2)$ |
+
+**TFA and FFT-TFA, equation by equation.**
+
+| | TFA (section 4) | FFT-TFA (sections 5–7) |
+|---|---|---|
+| Unknowns | $\boldsymbol\varepsilon(a)$ | $\boldsymbol\varepsilon(a)$ |
+| Uniform per cluster | $\boldsymbol\mu$ | $\boldsymbol\mu$, and $\boldsymbol\tau$ (exact in the matrix) |
+| Equation | $\boldsymbol\varepsilon(a)=\mathbf E(a)\,\bar{\boldsymbol\varepsilon}+\sum_b\mathbf P(a\leftarrow b)\,\boldsymbol\mu(b)$ | $\boldsymbol\varepsilon(a)=\bar{\boldsymbol\varepsilon}-\big(\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}\boldsymbol\tau\big)(a)$ |
+| Order | solve at every point, then average | average, then solve |
+| Operator | $\boldsymbol\Lambda_0^{-1}$: the composite's response | $\boldsymbol\Gamma_0$: the matrix's, a convolution |
 
 **Where FFT-TFA's error against TFA on the same clusters comes from.** It has three parts, each measurable with the
 code:
@@ -517,11 +1039,12 @@ code:
 3. the Moulinec–Suquet kernel against TFA's finite elements.
 
 **Relation to the literature.**
+
 - **Moulinec–Suquet (1998):** the reference-medium equation and its FFT solution.
-- **SCA (Liu–Bessa–Liu 2016):** the clustered equation, with $\boldsymbol\Gamma(a\leftarrow b)$ built as a dense matrix
-  on the fine grid (their eq. 27). They found a reference medium equal to the matrix too stiff once the matrix yields
-  (§3.2, Fig. 5), and update it self-consistently at every increment. FFT-TFA keeps $\mathbf L_M$ fixed, which makes
-  the matrix's polarization exact (section 5) and leaves one kernel, built once.
+- **SCA (Liu–Bessa–Liu 2016):** the clustered equation, with $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ built as a dense
+  matrix on the fine grid (their eq. 27). They found a reference medium equal to the matrix too stiff once the matrix
+  yields (§3.2, Fig. 5), and update it self-consistently at every increment. FFT-TFA keeps $\mathbf L_M$ fixed, which
+  makes the matrix's polarization exact (section 5) and leaves one kernel, built once.
 - **Brisard–Dormieux (2010, 2012):** the same regular cells, in linear elasticity, with a polarization constant on each
   cell, used both to approximate the polarization and to test the equation (2012, §4.1–4.2). FFT-TFA's far field uses
   polynomials up to a degree in place of constants, and adds clusters inside the cells, with the exact interaction
@@ -538,7 +1061,7 @@ code:
 #### The far field converges with the degree, not with the partitions alone
 
 At degree 0 each partition acts through its mean, and refining the partitions can stall: the far field's error between
-neighbours stays near 8 % whatever their size (figure above). Raising the degree is what converges.
+neighbours stays near 8 % whatever their size (figure 5). Raising the degree is what converges.
 
 **Structures that cut through partitions in a line** show it most. A layer whose interfaces cut partitions 6 elements
 across (`check.py`'s cut laminate, on 54² elements) has its worst cluster 24 % off at degree 0, 8.5 % at degree 1,
@@ -553,9 +1076,8 @@ degree follows it. Partitions at most about half an inclusion across work best (
 #### A floor far away
 
 Beyond two partitions, from degree 2 on, the far field's error levels off at a few hundredths of a percent instead of
-falling with the degree (figure above). Our
-reading, not verified: the element kernel varies from element to element even far from its source, the discrete
-kernel's high-frequency content, and polynomials smooth that over.
+falling with the degree (figure 5). Our reading, not verified: the element kernel varies from element to element even
+far from its source, the discrete kernel's high-frequency content, and polynomials smooth that over.
 
 #### Other limits
 
@@ -586,12 +1108,12 @@ kernel's high-frequency content, and polynomials smooth that over.
 
 | Here | Code | `notes/2_ls_model.md`, `notes/3_tfa_baseline.md` |
 |---|---|---|
-| $\mathbf L_0$, $\mathbf L_M$ | `C0`, `matrix_L` | $\mathbf C_0$, $\mathbf L_m$ |
-| $\boldsymbol\varepsilon_P$ | `plastic_strain` | $\boldsymbol\mu$, the eigenstrain |
+| $\mathbf C_0$, $\mathbf L_M$ | `C0`, `matrix_L` | $\mathbf C_0$, $\mathbf L_m$ |
+| $\boldsymbol\mu$ | `plastic_strain` | $\boldsymbol\mu$, the eigenstrain |
 | $v(a)$ | `Clusters.share` | $c_p$ |
-| $\boldsymbol\Gamma(\alpha\leftarrow\beta)$, $\boldsymbol\Gamma(A\leftarrow B)$ | `element_Gamma`; the degree-0 moment kernel | $\mathbf D_0$, $\mathbf D_0^{BA}$ (LS-7) |
+| $\boldsymbol\Gamma_0(\alpha\leftarrow\beta)$, $\hat{\boldsymbol\Gamma}(A\leftarrow B)$ | `element_Gamma`; the degree-0 moment kernel | $\mathbf D_0$, $\mathbf D_0^{BA}$ (LS-7) |
 | $\varphi$, $\psi$; $N_{\text{poly}}$ | columns of `basis`; `p` | |
 | $m(a,\varphi)$ | `moments` | |
-| $\boldsymbol\Gamma(A,\varphi\leftarrow B,\psi)$ | `kernels`; in Fourier space `moment_kernels` | |
-| $\boldsymbol\Gamma_{\text{corr}}(a\leftarrow b)$ | `correction_blocks` | |
-| $\boldsymbol\Gamma_{\text{FFT-TFA}}$, its own blocks | `get_strain_change`, `own_strain_change` | |
+| $\mathbf K(A,\varphi\leftarrow B,\psi)$ | `kernels` ($K_{ji}$); in Fourier space `moment_kernels` | |
+| $\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)$ | `correction_blocks` | |
+| $\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$, its own blocks | `get_strain_change`, `own_strain_change` | |

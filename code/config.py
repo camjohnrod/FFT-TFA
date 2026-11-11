@@ -22,7 +22,7 @@ def strain(e11=0, e22=0, e33=0, g12=0, g23=0, g13=0):
 # One name from each list in section 4, where you can add your own.
 geometry                    = "100 fibers"
 materials                   = "glass/PA"
-load_path                   = "biaxial cyclic"
+load_path                   = "biaxial cyclic"  # a list of turning points, each a strain; the first must not be zero
 
 steps_to_first_turning_point = 25      # the load path's other lines keep the same step length
 
@@ -46,14 +46,16 @@ clustered_mesh              = 256       # elements per side
 fft_tfa     = [dict(partitions=4,   matrix_clusters=4, inclusion_clusters=1, degree=3), 
                dict(partitions=8,   matrix_clusters=4, inclusion_clusters=1, degree=3), 
                dict(partitions=16,  matrix_clusters=4, inclusion_clusters=1, degree=3), 
-               dict(partitions=32,  matrix_clusters=4, inclusion_clusters=1, degree=3)]
+               dict(partitions=32,  matrix_clusters=4, inclusion_clusters=1, degree=3), 
+               dict(partitions=64,  matrix_clusters=4, inclusion_clusters=1, degree=3)]
     
 # Spectral LS, the standard Moulinec–Suquet method, one cluster per element.
 #   elements            per side: its own mesh, coarser or finer than clustered_mesh
 #   C0                  its reference stiffness, which does not change its answer: "midpoint" of the phases, or "matrix"
 #                       (about as fast at contrast 34, 17 % slower at contrast 100)
-spectral_ls = [dict(elements=64,   C0="midpoint"), 
-               dict(elements=128,  C0="midpoint")]
+spectral_ls = [dict(elements=64,    C0="midpoint"), 
+               dict(elements=128,   C0="midpoint"), 
+               dict(elements=256,   C0="midpoint")]
 
 # TFA, the baseline (notes/3_tfa_baseline.md): clusters interacting through FE influence functions, built once and
 # cached. Its settings mean the same as FFT-TFA's. It stores (6 × clusters)² doubles, which preview reports.
@@ -111,6 +113,7 @@ all_load_paths = {
     "uniaxial cyclic":     [strain(e11=0.02), strain(e11=-0.02), strain()],
     "along the fibers":    [strain(e33=0.02, g13=0.03)],
     "tension, then shear": [strain(e11=0.02), strain(e11=0.02, g12=0.03)],
+    "uniaxial, then biaxial": [strain(e11=0.02), strain(e11=-0.02, e22=0.02), strain()],
 }
 
 ## ======= 5. Solver Details (rarely changed) ======= ##
