@@ -60,6 +60,38 @@ def get_line_styles(labels):
                              'label': get_display_label(label)}
     return styles
 
+def plot_lines(axis, x_values, values_per_label, line_styles):
+    """Each label's curve against x_values from the unloaded state, as far as it was solved, with an x where it stopped
+    early."""
+    for label, values in values_per_label.items():
+        axis.plot(x_values[:len(values)], values, **line_styles[label])
+        mark_method_failure(axis, x_values[1:], values[1:], len(values) - 1, line_styles[label]['color'])
+
+def style_panel(axis, ylabel, x_locator):
+    axis.set_ylabel(ylabel)
+    axis.xaxis.set_major_locator(x_locator)
+    axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
+    axis.grid(True, color='0.9', linewidth=0.8)
+    axis.set_axisbelow(True)
+
+def add_legend(figure, axis):
+    """One legend above the figure for the lines of the given axis, wrapping past legend_columns entries."""
+    handles, labels = axis.get_legend_handles_labels()
+    figure.legend(handles, labels, ncols=min(len(handles), legend_columns), columnspacing=2.4, **legend_style)
+
+def save_panel_figure(row_count, draw_panels, xlabel, plot_path):
+    """A figure of panels three to a row on a shared x axis, drawn by draw_panels(axes), with one legend above."""
+    with plt.rc_context(load_path_style):
+        figure, axes = plt.subplots(row_count, 3, squeeze=False, sharex=True, layout='constrained',
+                                    figsize=(stress_strain_figure_width, 0.6 + stress_strain_row_height * row_count))
+        figure.get_layout_engine().set(w_pad=0.12, h_pad=0.1)
+        draw_panels(axes)
+        figure.supxlabel(xlabel, fontsize=13)
+        figure.align_ylabels(axes)
+        add_legend(figure, axes.flat[0])
+        figure.savefig(plot_path)
+    plt.close(figure)
+
 def mark_method_failure(axis, x_values, values, completed_step_count, color):
     """An x at the step the method gave up on, drawn level with the last value it produced so it reads as the curve
     stopping rather than as a data point."""
@@ -115,32 +147,21 @@ def plot_stress_strain(stress_MPa_per_method, completed_step_count_per_method, a
                    for stress in solved_stress_MPa.values())
 
     panel_rows = [row for row in stress_panel_rows if not is_zero([component for component, _ in row])]
-    with plt.rc_context(load_path_style):
-        figure_height = 0.6 + stress_strain_row_height * len(panel_rows)
-        figure, axes = plt.subplots(len(panel_rows), 3, squeeze=False, sharex=True, layout='constrained',
-                                    figsize=(stress_strain_figure_width, figure_height))
-        figure.get_layout_engine().set(w_pad=0.12, h_pad=0.1)
+
+    def draw_panels(axes):
         for axis, (component, subscript) in zip(axes.flat, [panel for row in panel_rows for panel in row]):
-            axis.set_ylabel(rf"$\bar{{\sigma}}_{{{subscript}}}$ (MPa)")
-            axis.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(5, steps=[1, 2, 2.5, 5, 10]))
-            axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
+            style_panel(axis, rf"$\bar{{\sigma}}_{{{subscript}}}$ (MPa)",
+                        matplotlib.ticker.MaxNLocator(5, steps=[1, 2, 2.5, 5, 10]))
             if is_zero([component]):
+                axis.grid(False)
                 axis.text(0.5, 0.5, "0", transform=axis.transAxes, ha='center', va='center', fontsize=20, color='0.6')
                 axis.set_yticks([])
                 axis.spines['left'].set_color('0.8')
                 continue
-            axis.grid(True, color='0.9', linewidth=0.8)
-            axis.set_axisbelow(True)
-            for method, method_stress in solved_stress_MPa.items():
-                stress = method_stress[:, component]
-                axis.plot(load_axis[:len(stress)], stress, **line_styles[method])
-                mark_method_failure(axis, load_axis[1:], stress[1:], len(stress) - 1, line_styles[method]['color'])
-        figure.supxlabel(load_axis_label, fontsize=13)
-        figure.align_ylabels(axes)
-        handles, labels = axes.flat[0].get_legend_handles_labels()
-        figure.legend(handles, labels, ncols=min(len(handles), legend_columns), columnspacing=2.4, **legend_style)
-        figure.savefig(plot_path)
-    plt.close(figure)
+            plot_lines(axis, load_axis, {label: stress[:, component] for label, stress in solved_stress_MPa.items()},
+                       line_styles)
+
+    save_panel_figure(len(panel_rows), draw_panels, load_axis_label, plot_path)
 
 ## ------- Macroscopic Stress Errors ------- ##
 
@@ -155,32 +176,19 @@ def plot_macro_stress_errors(error_percent_per_method, components, step_count, p
     a cyclic path unrolls instead of folding back on itself."""
     load_steps = np.arange(step_count + 1)
     line_styles = get_line_styles(error_percent_per_method)
-    row_count = -(-len(components) // 3)
-    with plt.rc_context(load_path_style):
-        figure, axes = plt.subplots(row_count, 3, squeeze=False, sharex=True, layout='constrained',
-                                    figsize=(stress_strain_figure_width, 0.6 + stress_strain_row_height * row_count))
-        figure.get_layout_engine().set(w_pad=0.12, h_pad=0.1)
+
+    def draw_panels(axes):
         for axis in axes.flat[len(components):]:
             axis.set_visible(False)
         for column, (axis, component) in enumerate(zip(axes.flat, components)):
             subscript = stress_component_subscripts[component]
-            axis.set_ylabel(rf"$\Delta\bar{{\sigma}}_{{{subscript}}}\,/\,\max|\bar{{\sigma}}_{{{subscript}}}^{{\,"
-                            rf"\mathrm{{ref}}}}|$ (%)")
-            axis.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(5, integer=True))
-            axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
-            axis.grid(True, color='0.9', linewidth=0.8)
-            axis.set_axisbelow(True)
+            style_panel(axis, rf"$\Delta\bar{{\sigma}}_{{{subscript}}}\,/\,\max|\bar{{\sigma}}_{{{subscript}}}^{{\,"
+                              rf"\mathrm{{ref}}}}|$ (%)", matplotlib.ticker.MaxNLocator(5, integer=True))
             axis.axhline(0, **error_zero_line_style)
-            for method, error_percent in error_percent_per_method.items():
-                error = np.concatenate([[0], error_percent[:, column]])
-                axis.plot(load_steps[:len(error)], error, **line_styles[method])
-                mark_method_failure(axis, load_steps[1:], error[1:], len(error) - 1, line_styles[method]['color'])
-        figure.supxlabel("Load step", fontsize=13)
-        figure.align_ylabels(axes)
-        handles, labels = axes.flat[0].get_legend_handles_labels()
-        figure.legend(handles, labels, ncols=min(len(handles), legend_columns), columnspacing=2.4, **legend_style)
-        figure.savefig(plot_path)
-    plt.close(figure)
+            plot_lines(axis, load_steps, {method: np.concatenate([[0], error[:, column]])
+                                          for method, error in error_percent_per_method.items()}, line_styles)
+
+    save_panel_figure(-(-len(components) // 3), draw_panels, "Load step", plot_path)
 
 ## ------- Error Against Time ------- ##
 
@@ -390,7 +398,6 @@ def plot_field_profiles(field_maps, profile_height, inclusion_map, label, title,
         axis.set_axisbelow(True)
         axis.set_ylabel(label)
         axis.set_xlabel(f"x (mm), along the middle element row at mid-thickness. {title}")
-        handles, labels = axis.get_legend_handles_labels()
-        figure.legend(handles, labels, ncols=min(len(handles), legend_columns), columnspacing=2.4, **legend_style)
+        add_legend(figure, axis)
         figure.savefig(plot_path)
     plt.close(figure)

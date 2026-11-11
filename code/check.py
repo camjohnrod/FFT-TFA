@@ -280,10 +280,9 @@ def check_polynomial_basis():
         full = int(np.sum(np.array(block_shape) - 1))
         for degree in (0, 2, full):
             error = get_basis_error(block_shape, degree)
-            all_passed &= report(error <= config.interaction_check_tolerance,
-                                 f"polynomial basis on {block_shape} elements at degree {degree}: orthonormal, constant "
-                                 f"first, complete (largest error {error:.1e}, tolerance "
-                                 f"{config.interaction_check_tolerance:.0e})")
+            all_passed &= report_error(f"polynomial basis on {block_shape} elements at degree {degree}: "
+                                       "orthonormal, constant first, complete", error,
+                                       config.interaction_check_tolerance)
     return all_passed
 
 def solve_at_full_degree(clusters):
@@ -324,6 +323,11 @@ def report(passed, description):
     print(f"[{'PASS' if passed else 'FAIL'}] {description}")
     return passed
 
+def report_error(description, error, tolerance):
+    """PASS when the error is within the tolerance."""
+    return report(error <= tolerance, f"{description} (largest relative difference {error:.1e}, tolerance "
+                                      f"{tolerance:.0e})")
+
 def check_laminate(problem_name, results):
     """Every method, and FFT-TFA at full degree, against the laminate's exact solution."""
     clusters = run.get_partition_clusters(config.fft_tfa[0])
@@ -336,17 +340,14 @@ def check_laminate(problem_name, results):
             print(f"[INFO] {problem_name}: {method} differs from the exact solution by {error:.1e} (not exact by "
                   "design)")
             continue
-        all_passed &= report(error <= tolerance, f"{problem_name}: {method} matches the exact solution (largest "
-                                                 f"relative difference {error:.1e}, tolerance {tolerance:.0e})")
+        all_passed &= report_error(f"{problem_name}: {method} matches the exact solution", error, tolerance)
     error = get_laminate_error(solve_at_full_degree(clusters), exact_phase_stress)
-    all_passed &= report(error <= tolerance, f"{problem_name}: FFT-TFA at full degree matches the exact solution "
-                                             f"(largest relative difference {error:.1e}, tolerance {tolerance:.0e})")
+    all_passed &= report_error(f"{problem_name}: FFT-TFA at full degree matches the exact solution", error, tolerance)
     if problem_name == "laminate":
         for method, result in solve_on_split_clusters(clusters.mesh).items():
             error = get_laminate_error(result, exact_phase_stress)
-            all_passed &= report(error <= tolerance,
-                                 f"{problem_name}: {method} on clusters dividing a partition's matrix part matches the "
-                                 f"exact solution (largest relative difference {error:.1e}, tolerance {tolerance:.0e})")
+            all_passed &= report_error(f"{problem_name}: {method} on clusters dividing a partition's matrix part "
+                                       "matches the exact solution", error, tolerance)
     return all_passed
 
 def check_reference(problem_name, spectral_ls_result):
@@ -372,9 +373,8 @@ def check_stopping_accuracy(problem_name, problem_inputs, results, cache_folder)
     for method, result in results.items():
         tight = tight_results[method]
         error = get_stress_error(result, tight.macro_stress, tight.cluster_stress)
-        all_passed &= report(error <= config.stopping_accuracy_tolerance,
-                             f"{problem_name}: {method} stops within {error:.1e} of its solution at tolerance "
-                             f"{tolerance:.0e} (tolerance {config.stopping_accuracy_tolerance:.0e})")
+        all_passed &= report_error(f"{problem_name}: {method} at convergence_tolerance against its solution at "
+                                   f"{tolerance:.0e}", error, config.stopping_accuracy_tolerance)
     return all_passed
 
 def get_result_arrays(problem_name, results):
@@ -399,15 +399,12 @@ def check_problem(problem_name, problem_inputs, saved_results, cache_folder):
         all_passed &= check_reference(problem_name, results["Spectral LS"])
     clusters = run.get_partition_clusters(config.fft_tfa[0])
     interaction_error = get_interaction_error(clusters)
-    all_passed &= report(interaction_error <= config.interaction_check_tolerance,
-                         f"{problem_name}: FFT-TFA's interaction at full degree matches the element-level LS operator "
-                         f"(largest relative difference {interaction_error:.1e}, tolerance "
-                         f"{config.interaction_check_tolerance:.0e})")
+    all_passed &= report_error(f"{problem_name}: FFT-TFA's interaction at full degree matches the element-level LS "
+                               "operator", interaction_error, config.interaction_check_tolerance)
     degree = config.fft_tfa[0]["degree"]
     patch_error = get_patch_test_error(clusters, degree)
-    all_passed &= report(patch_error <= config.interaction_check_tolerance,
-                         f"{problem_name}: FFT-TFA at degree {degree} gives a uniform polarization no strain (largest "
-                         f"{patch_error:.1e}, tolerance {config.interaction_check_tolerance:.0e})")
+    all_passed &= report_error(f"{problem_name}: FFT-TFA at degree {degree} gives a uniform polarization no strain",
+                               patch_error, config.interaction_check_tolerance)
     arrays = get_result_arrays(problem_name, results)
     if problem_name in stopping_check_problems:
         all_passed &= check_stopping_accuracy(problem_name, problem_inputs, results, cache_folder)
