@@ -72,22 +72,58 @@ correction (`get_newton_correction`). Equation labels in the comments (FT-, LS-,
 Working: FFT-TFA, Spectral LS and TFA on 2D and 3D cells, partitions holding both phases, k-means clusters inside
 partitions, and the checks.
 
-1. **Gold-standard reference.** A full-field FE solution on a conforming (body-fitted) mesh with plasticity at the Gauss
-   points (a gmsh mesh, our own solver reusing `material.py`), so that errors become absolute rather than relative to
-   another method. Spectral LS on a fine voxel mesh, the reference until then, shares every method's staircase geometry.
-2. **TFA–LS study.** Derive the exact relation between TFA's P and the LS operator, and compare FFT-TFA with TFA on the
-   same clusters: their difference splits into the inclusion's polarization taken uniform per cluster (FFT-TFA at full
-   degree against TFA), the far-field summary (FFT-TFA against itself at full degree) and the Moulinec–Suquet kernel
-   against TFA's FE. Against the reference, each method adds the error of one eigenstrain per cluster, which FFT-TFA and
-   TFA share; the two errors can have opposite signs and cancel, so a method measured only against the reference can
-   look better than its interaction is.
-3. **Cost at equal accuracy.** Time and memory against resolution for each method, at the same error, in 2D and 3D. An
-   FFT on n lattice points costs about n log n, with n the elements for Spectral LS and the partitions for FFT-TFA, so
-   Spectral LS on a mesh as coarse as FFT-TFA's partitions costs about as much per iteration: the two differ in accuracy,
-   FFT-TFA seeing the fine geometry through each partition's clusters and its corrections. Memory counts as much as
-   time: FFT-TFA's case rests on needing less than SCA and TFA, whose interaction is dense in the clusters, and than
-   Spectral LS, which stores every element. Spectral LS here keeps several 6 × 6 arrays per element (its kernel, the
-   LS-24 operator, stiffness, tangent); a fair comparison counts a leaner one.
+**The goal: a paper (CMAME or IJNME).** Its claim: an interaction for clustered models that is exact inside each
+partition and summarizes every other partition by polynomial moments carried by one FFT, converging with the degree to
+SCA's clustered equation with C0 = L_m, at a cost and memory that grow with the partitions × p², never with the clusters
+squared. TFA, SCA, Spectral LS and FFT-TFA become one family with three dials: the material states, the inclusion's
+polarization and the degree. Shown so far: convergence with the degree (the cut laminate is exact from degree 5), local
+fields about 2–3× faster than Spectral LS at equal error in 2D, less memory than TFA and SCA. Not yet: macroscopic
+stress beats Spectral LS only at moderate accuracy in 2D, and not on a single 3D sphere; the reference is Spectral LS
+itself; 3D with many inclusions, where FFT-TFA should win, is untested. In order:
+
+1. **Literature.** The scheme is the precorrected-FFT idea (and kin of the fast multipole method and particle–mesh
+   Ewald) applied to clusters. Find and read, cover to cover, those methods' foundational papers and any use of them for
+   SCA, TFA or LS homogenization, before claiming anything new. The cheapest step, and it decides the paper's framing.
+2. **Error measure.** The macroscopic error as the relative tensor norm ‖Σ − Σ_ref‖ / ‖Σ_ref‖ (shears counted twice),
+   Schneider 2019's eq. (5.1) extended to the whole tensor, at the turning points and the first (elastic) step. It
+   replaces today's per-component rms, which depends on the axes and inflates small components.
+3. **A modern element kernel.** Every method here uses Moulinec–Suquet's original discretization of the LS equation,
+   which rings at high-contrast interfaces and has been superseded (Willot's rotated staggered grid, the staggered grid
+   of Schneider, Ospald and Kabel, finite-element-based kernels; Schneider 2021's review). FFT-TFA works with any
+   element kernel Γ0, so the paper can give FFT-TFA and Spectral LS the same modern one, a fair comparison, and show
+   that FFT-TFA does not depend on the discretization. Wanted: a drop-in scheme that changes only the kernel's formula
+   per frequency, chosen by a setting in `config.py`, with Moulinec–Suquet kept as the other choice. Willot 2015's
+   rotated scheme may be one (a modified frequency vector in the same closed form); read it before deciding.
+4. **Gold-standard reference.** A full-field FE solution on a conforming (body-fitted) mesh with plasticity at the Gauss
+   points (a gmsh mesh, our own solver reusing `material.py`), in generalized plane strain for z-constant cells, since
+   their loads include ε33, with a convergence study showing its own error is well below the errors compared. Until
+   then the reference is Spectral LS on a fine voxel mesh, which shares every method's staircase geometry and kernel and
+   favours Spectral LS, which converges to it.
+5. **Error decomposition.** Derive the exact relation between TFA's P and the LS operator, and split FFT-TFA's error
+   into its parts: one eigenstrain per cluster (stiff, shared with TFA: TFA against the reference), the inclusion's
+   polarization uniform per cluster (soft: FFT-TFA at full degree against TFA), the far-field summary (FFT-TFA against
+   itself at full degree) and the element kernel against TFA's FE. The stiff and soft parts cancel in part, so a method
+   measured only against the reference can look better than its interaction is: the paper shows that.
+6. **Cost at equal accuracy, in 3D.** Online time against error for each method, in 2D and 3D, on many inclusions: a
+   random-spheres shape, and `get_correction_blocks` built a chunk of partitions at a time ("Memory" below). Spectral LS
+   over a range of resolutions answers "why not a full-field solve?"; TFA (and SCA, if added) on the same clusters
+   isolate the interaction. An FFT on n lattice points costs about n log n, with n the elements for Spectral LS and the
+   partitions for FFT-TFA, so Spectral LS on a mesh as coarse as FFT-TFA's partitions costs about as much per
+   iteration: the two differ in accuracy, FFT-TFA seeing the fine geometry through each partition's clusters and its
+   corrections. Also: offline cost reported apart, the number of load paths after which a method's offline cost pays
+   off, and load paths other than the one the clusters were built from. **Memory** (proposed, the user leaning this
+   way): a short discussion with a table of what each method stores, by formula and counted for the examples (TFA and
+   SCA dense in the clusters, FFT-TFA partitions × p², Spectral LS a few fields per element with Γ̂0 evaluated on the
+   fly as production codes do), not a measured comparison: a measured one would have to count a leaner Spectral LS than
+   ours, which stores several 6 × 6 arrays per element.
+
+The paper's examples: the cut laminate (an exact solution, so the interaction's error alone), random fibers in 2D (error
+against cost, field maps), random spheres in 3D. Undecided: SCA as a fourth method (reviewers will ask for it). With C0
+= L_m its accuracy is already FFT-TFA's at full degree, so a dense implementation would add only its cost; a reviewer
+may call that a weak SCA, since Liu–Bessa–Liu update C0 self-consistently, a different method and a new module; whether
+the inclusion polarization below is fixed first or reported as a limitation (proposed: reported); the journal (CMAME
+would want an error estimate for the far field in the degree, which might also explain the floor far away, lecture
+section 10).
 
 Open for FFT-TFA (the lecture's section 10):
 

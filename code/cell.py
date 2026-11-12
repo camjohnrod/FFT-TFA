@@ -195,7 +195,7 @@ class Clusters(NamedTuple):
     clusters are consecutive. Clusters have unequal volumes, so every cell average goes through average."""
     mesh: Mesh                         # the elements the clusters group
     materials: Materials               # one row per cluster
-    share: np.ndarray                  # each cluster's share of its partition's volume (c_p)
+    share: np.ndarray                  # each cluster's share of its partition's volume, v(a)
     element_cluster: np.ndarray        # the cluster of every element
     cluster_partition: np.ndarray      # the partition of each cluster
 

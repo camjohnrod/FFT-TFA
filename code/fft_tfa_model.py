@@ -87,7 +87,7 @@ def get_cluster_moments(clusters, basis):
 def get_moment_kernels(element_Gamma, mesh, basis):
     """How each partition's moments act on every other's, at every partition offset D = A − B, shape
     (partition lattice, p, 6, p, 6): the strain in A's polynomial j per unit polarization in B's polynomial i,
-      K_ji(D) = Σ_{α in A, β in B} φ_j(α) Γ(α←β) φ_i(β) = Σ_d w_ji(d) Γ(k D + d),   w_ji(d) = Σ_r φ_j(r) φ_i(r − d),
+      K_ji(D) = Σ_{α in A, β in B} ψ_j(α) Γ(α←β) ψ_i(β) = Σ_d w_ji(d) Γ(k D + d),   w_ji(d) = Σ_r ψ_j(r) ψ_i(r − d),
     with d the offset between the two elements' positions inside their partitions."""
     block, element_shape, partition_shape = mesh.partition_size, mesh.element_shape, mesh.partition_shape
     p = basis.shape[-1]

@@ -10,7 +10,6 @@ Translation-invariant operators are stored as one block per lattice frequency, r
 (N_z, N, N//2 + 1, b, b), lattices indexed [z, y, x] and square in-plane; b = 6 here, 6 per polynomial in FFT-TFA.
 """
 
-from typing import NamedTuple
 import numpy as np
 import scipy.fft
 

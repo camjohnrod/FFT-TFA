@@ -13,7 +13,7 @@ material model (clusters, eigenstrains, update at the average strain) and differ
 averages the LS operator over its clusters with the matrix as C0, exact in the matrix but with the inclusion's
 polarization uniform per cluster (TFA resolves it), summarizes the other partitions by polynomial moments up to a
 `degree`, and uses the Moulinec–Suquet kernel instead of FE. At full degree FFT-TFA is SCA's clustered LS equation with
-C0 = L_m (`notes/fft_tfa_lecture.md`, sections 6–7). Neither difference is a bug.
+C0 = L_m (`notes/fft_tfa_lecture.md`, sections 5–7). Neither difference is a bug.
 
 The theory is one note, `notes/fft_tfa_lecture.md`: FFT-TFA in its body, the material law, Spectral LS and TFA in its
 appendix. Read the relevant section before changing solver math; keep it one file. Code names map onto its symbols and
@@ -66,14 +66,16 @@ should communicate what it does").
 
 ## Running the code
 
+From the repository root:
+
 ```bash
 python code/run.py                # solve config.py's entries; a new folder in code/output/
 python code/run.py preview        # what that would need, and the cross-section; solves nothing
-python code/run.py replot latest  # redraw a saved run with config.py's Figures settings
+python code/run.py replot latest  # redraw a saved run with config.py's figure settings (section 3)
 python code/run.py cache          # list code/cache/
 python code/check.py              # the test, under a minute
 python code/check.py save         # the same, then save the results
-python notes/figures/make_figures.py  # the lecture's figures (a few minutes)
+python notes/figures/make_figures.py  # the lecture's figures (under a minute)
 ```
 
 There is no pytest suite and no way to run one check problem alone; check.py's docstring lists its checks. Its last
@@ -122,7 +124,7 @@ layer (cluster, partition, phase; stress and accumulated plastic strain at the t
 - **Naming:** an element is matrix or inclusion, its `phase` (0, 1), never "material id" or "fiber". Arrays named
   `<owner>_<what>` hold the `<what>` of every `<owner>`: `element_phase`, `element_partition`, `element_cluster`,
   `cluster_partition`. Cell averages are `macro_strain`, `macro_stress`. `Clusters.share` is each cluster's share of its
-  partition's volume (c_p). Entry labels write `m=` and `i=` for the matrix's and inclusion's clusters per partition.
+  partition's volume, the lecture's v(a). Entry labels write `m=` and `i=` for the matrix's and inclusion's clusters per partition.
 - **Cache keys and cached arrays keep old names:** the key strings in `cell.get_geometry_parameters`,
   `run.get_reference_parameters` and `tfa_model.get_E_and_P` (`"domain_side_length"`, `"elements_per_side"`, ...) are
   hashed into the cache file names, and the cached reference stores `material_ids` and `macroscopic_stress`. Renaming
@@ -165,7 +167,9 @@ layer (cluster, partition, phase; stress and accumulated plastic strain at the t
 
 ## Status
 
-The roadmap is in the README's "Status and roadmap"; keep the two in step. Mixed partitions must stay O(M log M).
+The roadmap and FFT-TFA's open points live in the README's "Status and roadmap" only; read them there rather than
+repeating them here. Below are the constraints and verdicts the README does not hold. Mixed partitions must stay
+O(M log M).
 Memory matters as much as time: FFT-TFA must keep needing less than SCA, TFA and Spectral LS, which holds only for
 clusters local to partitions (README, "Memory"); weigh new features by how their memory scales, in 3D too.
 Tried and rejected, not to redo without the user asking: for FFT-TFA (README, open points), one fiber part per fiber in
@@ -173,7 +177,7 @@ each partition (stiffer and less accurate). Not worth it: a per-partition block-
 iterations, slower overall); removing the exact corrections inside each partition (polynomials cannot follow the sharp
 near field: 14–68 % off at practical partition sizes). Declined: polarization shapes from the elastic strain
 concentration plus one polarization per cluster (needs offline fine-mesh solves, and a near/far split of the interaction
-to be fast); the user wants a richer polarization that needs neither (README, "Open").
+to be fast); the user wants a richer polarization that needs neither (README, "Inclusion polarization").
 
 Known behaviour, model error rather than bugs: FFT-TFA's far field converges with the degree, not with the partitions
 alone, and partitions should be at most about half an inclusion across (lecture, section 10). Also:

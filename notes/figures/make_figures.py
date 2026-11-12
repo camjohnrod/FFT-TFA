@@ -1,5 +1,5 @@
 # The figures of notes/fft_tfa_lecture.md, computed with the code itself: python notes/figures/make_figures.py
-# (a few minutes). Inputs are pinned here in memory, as check.py does: glass/PA, a centred fiber, check.py's solver
+# (under a minute). Inputs are pinned here in memory, as check.py does: glass/PA, a centred fiber, check.py's solver
 # settings; config.py, the cache and code/output are not touched.
 
 import pathlib
@@ -31,7 +31,7 @@ config.all_materials, config.materials, config.geometry = {"glass/PA": glass_PA}
 config.cache_folder = pathlib.Path(tempfile.mkdtemp())
 style = {**plots.figure_style, 'font.size': 11, 'axes.titlesize': 12}
 phase_colors = matplotlib.colors.ListedColormap(['0.92', '0.62'])
-# The load of figures 2 and 3: tension and shear together, out to 2 % in 20 steps.
+# The load of figures 2 and 4: tension and shear together, out to 2 % in 20 steps.
 load_path = np.linspace(0, 1, 21)[1:, None] * np.array(strain(e11=0.02, g12=0.02))
 
 def get_clusters(clustered_mesh, partitions, matrix_clusters):
@@ -70,121 +70,74 @@ def draw_grids():
         figure.savefig(folder / "grids.png")
     plt.close(figure)
 
-## ------- Figure 2: the polarization with the matrix as reference medium ------- ##
+## ------- Figures 2 and 4: FFT-TFA's polarization, and its polynomial fits ------- ##
 
-def get_tensor_norm(stress):
-    # The norm of a stress-like Voigt row (shear components count twice in the double contraction).
-    return np.sqrt(np.sum(stress[:, :3]**2, axis=1) + 2 * np.sum(stress[:, 3:]**2, axis=1))
-
-def draw_polarization():
-    elements = 64
-    clusters = ls_model.get_element_clusters(elements)
-    solver = ls_model.SpectralLSSolver(clusters, "midpoint")
-    matrix_L = cell.get_matrix_L()
-    history = get_unloaded_plastic_state(clusters.cluster_count)
-    maps = {}
-    for step, macro_strain in enumerate(load_path):
-        result = solver.solve_step(macro_strain, history)
-        history = result.plastic_state
-        if step in (0, len(load_path) - 1):
-            polarization = result.stress - result.strain @ matrix_L.T
-            maps[step] = get_tensor_norm(polarization).reshape(elements, elements) / 1e6
-    with plt.rc_context(style):
-        figure, axes = plt.subplots(1, 2, figsize=(8.4, 3.9), layout='constrained')
-        titles = {0: r"Elastic: $\bar\varepsilon_{11}=\bar\gamma_{12}=0.1$ %",
-                  len(load_path) - 1: r"Plastic: $\bar\varepsilon_{11}=\bar\gamma_{12}=2$ %"}
-        for axis, (step, values) in zip(axes, maps.items()):
-            image = axis.imshow(values, origin='lower', extent=(0, 1, 0, 1), cmap=plots.field_map_colormap)
-            axis.set_title(titles[step])
-            axis.set_axis_off()
-            figure.colorbar(image, ax=axis, label=r"$|\boldsymbol{\tau}|$ (MPa)", shrink=0.85)
-        figure.savefig(folder / "polarization.png")
-    plt.close(figure)
-
-## ------- Figure 3: a partition's polarization summarized by polynomials ------- ##
-
-def draw_summary():
-    """FFT-TFA's cluster polarizations at the end of figure 2's load, and each partition's best-fitting polynomial of
-    degree 0, 1 and 3: τ(β) ≈ Σ_ψ ψ(β) τ(B, ψ)."""
+def get_shear_polarization():
+    """FFT-TFA's polarization τ12 on every cluster at the end of the load: 64² elements, 4² partitions, two matrix
+    clusters per partition's matrix part, solved at degree 1."""
     mesh, clusters = get_clusters(64, 4, 2)
     solver = fft_tfa_model.FFTTFASolver(clusters, 1)
     history = get_unloaded_plastic_state(clusters.cluster_count)
     for macro_strain in load_path:
         result = solver.solve_step(macro_strain, history)
         history = result.plastic_state
-    matrix_L = cell.get_matrix_L()
-    polarization = result.stress - result.strain @ matrix_L.T
-    component, shape = 3, mesh.element_shape
-    maps = {"Polarization: uniform\non each cluster": polarization[clusters.element_cluster, component]}
+    polarization = result.stress - result.strain @ cell.get_matrix_L().T
+    return mesh, clusters, polarization[:, 3]
+
+def get_polynomial_fit(mesh, clusters, values, degree):
+    """At every element, its partition's best-fitting polynomial of the given degree to a field uniform on each
+    cluster: Σ_i τ_i(B) ψ_i, with the moments τ_i(B) = Σ_b m_i(b) τ(b) (section 7.1)."""
     block = mesh.partition_size
-    z, y, x = np.unravel_index(np.arange(mesh.element_count), shape)
-    for degree in (0, 1, 3):
-        basis = fft_tfa_model.get_polynomial_basis(block, degree)
-        element_basis = basis[z % block[0], y % block[1], x % block[2]]
-        moments = fft_tfa_model.get_cluster_moments(clusters, basis)
-        partition_moments = np.zeros((clusters.partition_count, basis.shape[-1]))
-        np.add.at(partition_moments, clusters.cluster_partition,
-                  moments * polarization[:, component, None])
-        maps[f"Its summary,\ndegree {degree}"] = np.sum(element_basis * partition_moments[mesh.element_partition],
-                                                         axis=1)
+    z, y, x = np.unravel_index(np.arange(mesh.element_count), mesh.element_shape)
+    basis = fft_tfa_model.get_polynomial_basis(block, degree)
+    moments = fft_tfa_model.get_cluster_moments(clusters, basis)
+    partition_moments = np.zeros((clusters.partition_count, basis.shape[-1]))
+    np.add.at(partition_moments, clusters.cluster_partition, moments * values[:, None])
+    return np.sum(basis[z % block[0], y % block[1], x % block[2]] * partition_moments[mesh.element_partition], axis=1)
+
+def draw_polarization_maps(maps, mesh, file_name, figure_width, outlined_partition=None):
+    """One map per entry, on one shared colour scale, with the partitions drawn, and optionally one partition
+    outlined."""
+    shape = mesh.element_shape[1:]
     largest = max(np.abs(values).max() for values in maps.values()) / 1e6
-    partition = mesh.element_partition.reshape(shape[1:])
+    partition = mesh.element_partition.reshape(shape)
     with plt.rc_context(style):
-        figure, axes = plt.subplots(1, 4, figsize=(12, 3.6), layout='constrained')
+        figure, axes = plt.subplots(1, len(maps), figsize=(figure_width, 3.6), layout='constrained')
         for axis, (title, values) in zip(axes, maps.items()):
-            image = axis.imshow(values.reshape(shape[1:]) / 1e6, origin='lower', extent=(0, 1, 0, 1),
+            image = axis.imshow(values.reshape(shape) / 1e6, origin='lower', extent=(0, 1, 0, 1),
                                 cmap='RdBu_r', vmin=-largest, vmax=largest)
             plots.draw_boundaries(axis, partition, plots.boundary_styles["partition"])
             axis.plot([0, 1, 1, 0, 0], [0, 0, 1, 1, 0], **plots.frame_style)
+            if outlined_partition is not None:
+                rows, columns = np.nonzero(partition == outlined_partition)
+                x0, y0 = columns.min() / shape[1], rows.min() / shape[0]
+                width, height = (columns.max() + 1) / shape[1] - x0, (rows.max() + 1) / shape[0] - y0
+                axis.add_patch(matplotlib.patches.Rectangle((x0, y0), width, height, fill=False, edgecolor='0.1',
+                                                            linewidth=2.2))
+                axis.text(x0 + width / 2, y0 + height / 2, "A", ha='center', va='center', fontsize=14)
             axis.set_title(title)
             axis.set_axis_off()
         figure.colorbar(image, ax=axes, label=r"$\tau_{12}$ (MPa)", shrink=0.85)
-        figure.savefig(folder / "summary.png")
+        figure.savefig(folder / file_name)
     plt.close(figure)
 
-## ------- Figure 4: the orthonormal polynomials, and a cluster's indicator projected onto them ------- ##
+## ------- Figure 2: what one partition sees ------- ##
 
-def draw_basis():
-    """The six orthonormal polynomials of degree at most 2 on a partition of 8 × 8 elements, and one cluster's indicator
-    χ_b with its projection Σ_ψ m(b, ψ) ψ at increasing degree, with the share of χ_b the projection misses."""
-    mesh, clusters = get_clusters(64, 8, 2)
-    block = mesh.partition_size
-    basis = fft_tfa_model.get_polynomial_basis(block, 2)[0]
-    # A partition the fiber's edge crosses, and its larger matrix cluster.
-    inclusion_share = np.bincount(mesh.element_partition, weights=mesh.element_phase) / np.prod(block)
-    partition = int(np.argmin(np.abs(inclusion_share - 0.4)))
-    in_partition = np.flatnonzero(clusters.cluster_partition == partition)
-    matrix_clusters = in_partition[clusters.materials.phase[in_partition] == 0]
-    cluster = matrix_clusters[np.argmax(np.bincount(clusters.element_cluster)[matrix_clusters])]
-    elements = np.flatnonzero(mesh.element_partition == partition)
-    _, y, x = np.unravel_index(elements, mesh.element_shape)
-    indicator = np.zeros(block[1:])
-    indicator[y % block[1], x % block[2]] = clusters.element_cluster[elements] == cluster
-    titles = ["$1$", "$x$", "$y$", "$x^2$", "$xy$", "$y^2$"]
-    with plt.rc_context(style):
-        figure, axes = plt.subplots(2, 6, figsize=(12, 4.6), layout='constrained')
-        largest = np.abs(basis).max()
-        for axis, values, title in zip(axes[0], np.moveaxis(basis, -1, 0), titles):
-            image = axis.imshow(values, origin='lower', cmap='RdBu_r', vmin=-largest, vmax=largest)
-            axis.set_title(f"from {title}")
-            axis.set_axis_off()
-        figure.colorbar(image, ax=axes[0], label="value", shrink=0.85)
-        axes[1, 0].imshow(indicator, origin='lower', cmap='RdBu_r', vmin=-1, vmax=1)
-        axes[1, 0].set_title(r"$\chi_b$, one cluster")
-        for axis, degree in zip(axes[1, 1:], (0, 1, 2, 4, 6)):
-            polynomials = fft_tfa_model.get_polynomial_basis(block, degree)[0]
-            moments = np.einsum('yxp,yx->p', polynomials, indicator)
-            projection = polynomials @ moments
-            missed = np.linalg.norm(indicator - projection) / np.linalg.norm(indicator)
-            image = axis.imshow(projection, origin='lower', cmap='RdBu_r', vmin=-1, vmax=1)
-            axis.set_title(f"degree {degree}: misses {100 * missed:.0f} %")
-        for axis in axes[1]:
-            axis.set_axis_off()
-        figure.colorbar(image, ax=axes[1], label="value", shrink=0.85)
-        figure.savefig(folder / "basis.png")
-    plt.close(figure)
+def draw_split():
+    """FFT-TFA's polarization, and the same as seen from one partition A the fiber's edge crosses: A's own clusters
+    exactly, every other partition through its mean (degree 0)."""
+    mesh, clusters, polarization = get_shear_polarization()
+    element_values = polarization[clusters.element_cluster]
+    inclusion_share = (np.bincount(mesh.element_partition, weights=mesh.element_phase)
+                       / mesh.elements_per_partition)
+    partition = int(np.argmin(np.abs(inclusion_share - 0.5)))
+    seen = np.where(mesh.element_partition == partition, element_values,
+                    get_polynomial_fit(mesh, clusters, polarization, 0))
+    draw_polarization_maps({"The polarization,\nuniform on each cluster": element_values,
+                            "As partition A sees it:\nits own exactly, the others by their means": seen},
+                           mesh, "split.png", 7.6, outlined_partition=partition)
 
-## ------- Figure 5: where the far field is accurate enough ------- ##
+## ------- Figure 3: where the far field is accurate enough ------- ##
 
 def get_partition_distance(clusters, partition_shape):
     # Every cluster pair's distance in partitions along the farthest axis, periodic.
@@ -241,21 +194,7 @@ def draw_far_field():
         errors[degree] = np.array([get_rms(far - exact, distance == r) for r in distances]) / own_scale
     green = np.array(matplotlib.colors.to_rgb(plots.method_styles["FFT-TFA"]['color']))
     with plt.rc_context(style):
-        figure, axes = plt.subplots(1, 2, figsize=(10, 3.8), layout='constrained', width_ratios=(1, 1.6))
-        axis = axes[0]
-        for i in range(-3, 4):
-            for j in range(-3, 4):
-                own = i == 0 and j == 0
-                axis.add_patch(matplotlib.patches.Rectangle((i - 0.5, j - 0.5), 1, 1,
-                                                            facecolor='#56B4E9' if own else '0.88',
-                                                            edgecolor='white', linewidth=2))
-        axis.text(0, 0, "A", ha='center', va='center', fontsize=14, color='white')
-        axis.set_xlim(-3.5, 3.5)
-        axis.set_ylim(-3.5, 3.5)
-        axis.set_aspect('equal')
-        axis.set_axis_off()
-        axis.set_title("Seen from partition A: its own clusters exactly,\nevery other partition through its moments")
-        axis = axes[1]
+        figure, axis = plt.subplots(figsize=(6.4, 3.8), layout='constrained')
         axis.axvspan(-0.3, 0.3, color='#56B4E9', alpha=0.25, linewidth=0)
         axis.text(0.35, 0.03, "replaced by the\nexact interaction", transform=axis.get_xaxis_transform(), fontsize=10,
                   va='bottom')
@@ -274,10 +213,20 @@ def draw_far_field():
     plt.close(figure)
     return errors
 
+## ------- Figure 4: a partition's polarization summarized by polynomials ------- ##
+
+def draw_summary():
+    """FFT-TFA's cluster polarizations, and each partition's best-fitting polynomial of degree 0, 1 and 3:
+    τ ≈ Σ_i τ_i(B) ψ_i."""
+    mesh, clusters, polarization = get_shear_polarization()
+    maps = {"Polarization: uniform\non each cluster": polarization[clusters.element_cluster]}
+    for degree in (0, 1, 3):
+        maps[f"Its summary,\ndegree {degree}"] = get_polynomial_fit(mesh, clusters, polarization, degree)
+    draw_polarization_maps(maps, mesh, "summary.png", 12)
+
 if __name__ == "__main__":
     draw_grids()
-    draw_polarization()
-    draw_summary()
-    draw_basis()
+    draw_split()
     errors = draw_far_field()
+    draw_summary()
     print("far field's error by distance (%):", {degree: np.round(100 * error, 3) for degree, error in errors.items()})

@@ -1,4 +1,4 @@
-"""TFA, the baseline (transformation field analysis; notes/fft_tfa_lecture.md section 4 and appendix C,
+"""TFA, the baseline (transformation field analysis; notes/fft_tfa_lecture.md appendix C,
 equations ER-*).
 
 Each cluster has one uniform eigenstrain μ and one material update at its average strain ε. Offline, a finite-element

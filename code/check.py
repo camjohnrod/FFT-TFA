@@ -106,8 +106,8 @@ check_problems = {
     # side, the layer 3 of them thick: the only test of Spectral LS coarser than the mesh.
     "laminate": {"geometry": "laminate", **get_cyclic_load(strain(e11=0.015, e22=0.020, g12=0.03, g13=0.01)),
                  **get_check_entries(partitions=9, spectral_elements=9)},
-    # A layer 7 elements thick, so each interface cuts a partition (2/3 fiber), so partitions there hold both phases. In
-    # transverse shear γ12 both phases carry the same stress. FFT-TFA represents the exact polarization, but at degree 1
+    # A layer 7 elements thick, so each interface cuts a partition (2/3 inclusion): partitions there hold both phases.
+    # In transverse shear γ12 both phases carry the same stress. FFT-TFA represents the exact polarization, but at degree 1
     # its far field cannot follow the polarization's step across a cut partition (degree 2 can, on 3 elements), and the
     # cut partitions line up along the layer, so their far-field error adds up instead of decaying.
     "cut laminate": {"geometry": "cut laminate", **get_cyclic_load(strain(g12=0.03))},
