@@ -2,9 +2,10 @@
 
 The LS equation replaces the composite by a homogeneous reference medium of stiffness C0, loaded by a polarization
 where the material differs from it. The strain the polarization causes is a convolution with a kernel P0, so on a
-regular lattice it is one FFT, a 6 × 6 product at every frequency and an inverse FFT (apply_on_lattice). Spectral LS
-(Moulinec–Suquet) solves the equation on the elements by Newton, each correction by conjugate gradients. FFT-TFA
-(fft_tfa_model) uses this file's kernel and apply_on_lattice.
+regular lattice it is one FFT, a 6 × 6 product at every frequency and an inverse FFT (apply_on_lattice); its
+discretization, Moulinec–Suquet's or Willot's, is config.element_kernel. Spectral LS (Moulinec–Suquet) solves the
+equation on the elements by Newton, each correction by conjugate gradients. FFT-TFA (fft_tfa_model) uses this file's
+kernel and apply_on_lattice.
 
 Translation-invariant operators are stored as one block per lattice frequency, rfftn's non-redundant half: shape
 (N_z, N, N//2 + 1, b, b), lattices indexed [z, y, x] and square in-plane; b = 6 here, 6 per polynomial in FFT-TFA.
@@ -44,7 +45,7 @@ def get_spectral_C0(name):
         return (get_matrix_L() + get_inclusion_L()) / 2
     return get_matrix_L()
 
-## ------- Moulinec–Suquet Kernel P0 ------- ##
+## ------- The Element Kernel P0 ------- ##
 
 def to_fourier_blocks(offset_blocks, lattice_shape):
     """An operator's b × b blocks by lattice offset (stacked as offsets × b rows of b) to its blocks by frequency
@@ -66,34 +67,48 @@ def get_direction_strain_matrix(directions):
     rows = [(n1, zero, zero), (zero, n2, zero), (zero, zero, n3), (n2, n1, zero), (zero, n3, n2), (n3, zero, n1)]
     return np.stack([np.stack(row, axis=-1) for row in rows], axis=-2)
 
-def get_moulinec_suquet_kernel(lattice_shape, C0):
-    """The Moulinec–Suquet kernel on a lattice of the given shape [z, y, x] over the cubic cell, as offset blocks: at
-    every frequency ξ, P̂0(ξ) = Γ̂0(ξ) C0 (LS-21), with the continuum Green operator Γ̂0 = B (Bᵀ C0 B)⁻¹ Bᵀ and
-    B = B(ξ / |ξ|). P̂0(0) = 0 (LS-9).
+def get_element_kernel(lattice_shape, C0):
+    """The element kernel P0 = Γ0 C0 on a lattice of the given shape [z, y, x] over the cubic cell, as offset blocks,
+    discretized as config.element_kernel says. Both discretizations take the continuum form at every frequency ξ,
+    P̂0 = Γ̂0 C0 (LS-21) with Γ̂0 = B (Bᵀ C0 B)⁻¹ Bᵀ and B = B(n), and P̂0(0) = 0 (LS-9). They differ in the direction n
+    and at a few of the highest frequencies, with q = 2π ξ / N the frequency per element along each axis:
 
-    Along an axis with an even count N, Γ̂0 is not even in a component equal to N / 2, so it has no real-valued meaning
-    there; P̂0 is then the identity, Moulinec–Suquet's Γ̂0 = C0⁻¹ (1998, section 2.4.2), which makes the stress at those
-    frequencies zero. The cell is a cube, so frequencies in units of 2π / side compare across axes whatever each axis's
-    count."""
+    - "Moulinec-Suquet" (1998): n = ξ / |ξ|. Along an axis with an even count N, Γ̂0 is not even in a component equal
+      to N / 2, so it has no real-valued meaning there; P̂0 is then the identity, Moulinec–Suquet's Γ̂0 = C0⁻¹ (1998,
+      section 2.4.2), which makes the stress at those frequencies zero.
+    - "Willot" (2015), the rotated staggered grid: displacements at the elements' corners, strains at their centres.
+      Its discrete gradient (his eq. 36) is a complex multiple of w_i = sin(q_i / 2) Π_{j≠i} cos(q_j / 2), and Γ̂0
+      depends only on its direction (his eq. 39), so n = w / |w|, real and even. Where two or more components of q
+      equal π, w = 0 and P̂0 = 0 (his eq. 41).
+
+    The cell is a cube, so frequencies in units of 2π / side compare across axes whatever each axis's count."""
     frequencies = [np.fft.fftfreq(count, 1 / count) for count in lattice_shape[:2]]
     frequencies.append(np.fft.rfftfreq(lattice_shape[2], 1 / lattice_shape[2]))
     frequency_z, frequency_y, frequency_x = np.meshgrid(*frequencies, indexing="ij")
-    wave_vectors = np.stack([frequency_x, frequency_y, frequency_z], axis=-1)
-    wave_vectors[0, 0, 0] = [1, 0, 0]  # any direction at ξ = 0, whose block is set to zero below
-    B = get_direction_strain_matrix(wave_vectors / np.linalg.norm(wave_vectors, axis=-1, keepdims=True))
+    frequencies_xyz, counts_xyz = (frequency_x, frequency_y, frequency_z), lattice_shape[::-1]
+    highest = [(count % 2 == 0) & (np.abs(frequency) == count / 2)
+               for frequency, count in zip(frequencies_xyz, counts_xyz)]
+    if config.element_kernel == "Moulinec-Suquet":
+        directions = np.stack(frequencies_xyz, axis=-1)
+    else:
+        half_angles = [np.pi * frequency / count for frequency, count in zip(frequencies_xyz, counts_xyz)]
+        cosines = [np.where(is_highest, 0.0, np.cos(angle)) for is_highest, angle in zip(highest, half_angles)]
+        directions = np.stack([np.sin(half_angles[i]) * cosines[(i + 1) % 3] * cosines[(i + 2) % 3]
+                               for i in range(3)], axis=-1)
+    norms = np.linalg.norm(directions, axis=-1, keepdims=True)
+    is_zero = norms[..., 0] == 0     # ξ = 0, and for Willot where two or more components are the highest
+    directions = np.where(is_zero[..., None], [1.0, 0.0, 0.0], directions)   # any direction: set to zero below
+    B = get_direction_strain_matrix(directions / np.where(is_zero[..., None], 1.0, norms))
     B_transposed = np.swapaxes(B, -1, -2)
     P0_transformed = B @ np.linalg.inv(B_transposed @ C0 @ B) @ B_transposed @ C0
-    P0_transformed[0, 0, 0] = 0
-    highest_frequencies = np.zeros(frequency_x.shape, dtype=bool)
-    for frequency, count in zip((frequency_z, frequency_y, frequency_x), lattice_shape):
-        if count % 2 == 0:
-            highest_frequencies |= np.abs(frequency) == count / 2
-    P0_transformed[highest_frequencies] = np.eye(6)
+    P0_transformed[is_zero] = 0
+    if config.element_kernel == "Moulinec-Suquet":
+        P0_transformed[highest[0] | highest[1] | highest[2]] = np.eye(6)
     return to_offset_blocks(P0_transformed)
 
 def get_P0_transformed(lattice_shape, C0):
-    """P̂0 at every frequency of a lattice of the given shape: the Moulinec–Suquet kernel, as Spectral LS applies it."""
-    return to_fourier_blocks(get_moulinec_suquet_kernel(lattice_shape, C0), lattice_shape)
+    """P̂0 at every frequency of a lattice of the given shape: the element kernel, as Spectral LS applies it."""
+    return to_fourier_blocks(get_element_kernel(lattice_shape, C0), lattice_shape)
 
 ## ------- Residual in Matrix Units (LS-24) ------- ##
 

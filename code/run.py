@@ -42,12 +42,13 @@ import tqdm
 
 import plots
 from cell import (Clusters, cluster_by_k_means, cluster_by_phase, get_cache_entries, get_cache_path, get_cached,
-                  get_clusters, get_fiber_radius, get_geometry, get_geometry_parameters, get_inclusion_L, get_matrix_L,
-                  get_memory_MB, get_mesh, is_shape_constant_along_z)
+                  get_clusters, get_geometry, get_geometry_parameters, get_inclusion_L, get_matrix_L,
+                  get_memory_MB, get_mesh, get_random_radius, is_shape_constant_along_z, random_shape_dimensions)
 from fft_tfa_model import FFTTFASolver, get_polynomial_basis, resolve_degree
 from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_element_clusters
 from material import get_unloaded_plastic_state
 from newton import SolverDidNotConverge
+from sca_model import SCASolver
 from tfa_model import TFASolver
 
 ## ------- Commands ------- ##
@@ -79,13 +80,14 @@ def preview():
     """Prints what config.py asks for and what each entry would store, and draws the cross-section, solving nothing but
     the elastic k-means features."""
     load_path = get_load_path()
-    if get_geometry()["shape"] == "random fibers":
-        diameter = 2 * get_fiber_radius() * config.clustered_mesh / config.cell_side
-        print(f"Geometry {config.geometry!r}: {diameter:.3g} elements per fiber diameter")
+    if get_geometry()["shape"] in random_shape_dimensions:
+        diameter = 2 * get_random_radius() * config.clustered_mesh / config.cell_side
+        print(f"Geometry {config.geometry!r}: {diameter:.3g} elements per inclusion diameter")
     phases = config.all_materials[config.materials]
     print(f"Materials {config.materials!r}: contrast {phases['inclusion']['E'] / phases['matrix']['E']:.3g}")
     print(f"Load path {config.load_path!r}: {len(load_path.applied_macro_strain)} steps, turning points at steps "
           f"{', '.join(str(step + 1) for step in load_path.turning_steps)}")
+    print(f"Element kernel of the LS methods: {config.element_kernel}")
     entries, arrays = [], {}
     for entry in get_entries():
         clusters = get_entry_clusters(entry)
@@ -95,7 +97,7 @@ def preview():
                         "cluster_count": clusters.cluster_count})
     if config.reference is not None:
         is_cached = get_cache_path("reference", get_reference_parameters(load_path)).exists()
-        print(f"Reference {config.reference['elements']} per side: "
+        print(f"Reference {config.reference['elements']} per side, {config.element_kernel} kernel: "
               f"{'cached' if is_cached else 'NOT cached, a run would solve it first'}")
     config.output_folder.mkdir(parents=True, exist_ok=True)
     path = config.output_folder / "preview_cross_section.png"
@@ -104,16 +106,17 @@ def preview():
 
 def describe_storage(entry, clusters):
     """What an entry stores, in MB: FFT-TFA's moment kernels (one 6p × 6p block per frequency, p the polynomials of its
-    degree) and one 6 × 6 block per pair of clusters in the same partition (FT-3), TFA's dense P, Spectral LS's kernel
-    and LS-24's operator."""
+    degree) and one 6 × 6 block per pair of clusters in the same partition (FT-3), SCA's dense D and TFA's dense P,
+    Spectral LS's kernel and LS-24's operator."""
     mesh = clusters.mesh
     partition_shape = mesh.partition_shape
     frequencies = partition_shape[0] * partition_shape[1] * (partition_shape[2] // 2 + 1)     # rfftn's half
     kernel_MB = 36 * 16 * frequencies / 1024**2                     # one complex 6 × 6 block per frequency
     if entry.method == "Spectral LS":
         return f"kernels {2 * kernel_MB:.0f} MB"
-    if entry.method == "TFA":
-        return f"P {(6 * clusters.cluster_count)**2 * 8 / 1024**2:.0f} MB"
+    if entry.method in ("SCA", "TFA"):
+        name = "D" if entry.method == "SCA" else "P"
+        return f"{name} {(6 * clusters.cluster_count)**2 * 8 / 1024**2:.0f} MB"
     block = mesh.partition_size
     polynomials = get_polynomial_basis(block, resolve_degree(entry.settings["degree"], mesh)).shape[-1]
     counts = np.bincount(clusters.cluster_partition, minlength=clusters.partition_count)
@@ -172,7 +175,8 @@ def get_entries():
     settings its entries share that differ between the method's schemes; an entry within it, by the settings that
     differ among the scheme's entries. A method with one scheme is named by the method alone."""
     entries = []
-    for method, listed in (("FFT-TFA", config.fft_tfa), ("Spectral LS", config.spectral_ls), ("TFA", config.tfa)):
+    for method, listed in (("FFT-TFA", config.fft_tfa), ("SCA", config.sca), ("Spectral LS", config.spectral_ls),
+                           ("TFA", config.tfa)):
         schemes = config.get_schemes(listed)
         shared = [{name: value for name, value in scheme[0].items() if all(entry[name] == value for entry in scheme)}
                   for scheme in schemes]
@@ -190,8 +194,9 @@ def get_entries():
     return entries
 
 def get_element_cluster(mesh, settings):
-    """Every element's cluster for an FFT-TFA or TFA entry: k-means on each element's elastic strain concentration (36
-    numbers, from elastic Spectral LS on the same elements), or with one cluster per part, the parts themselves."""
+    """Every element's cluster for an entry with clusters (FFT-TFA, SCA, TFA): k-means on each element's elastic strain
+    concentration (36 numbers, from elastic Spectral LS on the same elements), or with one cluster per part, the parts
+    themselves."""
     if settings["matrix_clusters"] == settings["inclusion_clusters"] == 1:
         return cluster_by_phase(mesh)
     features = get_elastic_strain_concentration(get_element_clusters(mesh.element_shape[2]),
@@ -200,14 +205,17 @@ def get_element_cluster(mesh, settings):
                               settings["inclusion_clusters"])
 
 def get_partition_clusters(settings):
-    """The clusters of an FFT-TFA or TFA entry's settings, on the shared clustered mesh."""
+    """The clusters of an FFT-TFA or TFA entry's settings, on the shared clustered mesh, inside its partitions."""
     mesh = get_mesh(config.clustered_mesh, settings["partitions"])
     return get_clusters(mesh, get_element_cluster(mesh, settings))
 
 def get_entry_clusters(entry):
-    """An entry's clusters: one per element for Spectral LS, partition clusters for FFT-TFA and TFA."""
+    """An entry's clusters: one per element for Spectral LS, partition clusters for FFT-TFA and TFA, and for SCA
+    clusters over the whole cell, which is one partition."""
     if entry.method == "Spectral LS":
         return get_element_clusters(entry.settings["elements"])
+    if entry.method == "SCA":
+        return get_partition_clusters({**entry.settings, "partitions": 1})
     return get_partition_clusters(entry.settings)
 
 def get_solver(entry):
@@ -215,6 +223,8 @@ def get_solver(entry):
     clusters = get_entry_clusters(entry)
     if entry.method == "FFT-TFA":
         return FFTTFASolver(clusters, entry.settings["degree"])
+    if entry.method == "SCA":
+        return SCASolver(clusters, entry.settings["C0"])
     if entry.method == "Spectral LS":
         return SpectralLSSolver(clusters, entry.settings["C0"])
     return TFASolver(clusters)
@@ -380,7 +390,7 @@ def get_reference_parameters(load_path):
     """Every input that changes the reference's answer, its cache key. The keys' names are hashed into the cache file's
     name, so they keep their names even where the inputs were renamed."""
     elements = config.reference["elements"]
-    return {"cache_version": reference_cache_version, "discretization": "Moulinec-Suquet",
+    return {"cache_version": reference_cache_version, "discretization": config.element_kernel,
             **get_geometry_parameters(), "elements_per_side": elements, "constant_along_z": is_shape_constant_along_z(),
             "L_matrix": get_matrix_L(), "L_inclusion": get_inclusion_L(),
             "yield_stress": [phase["yield_stress"] for phase in config.all_materials[config.materials].values()],
@@ -452,7 +462,8 @@ def save_run(load_path, results, entries, reference):
     shutil.copy(config.__file__, folder / "config.py")
     info = {"results_name": config.results_name, "date": date.isoformat(timespec="seconds"),
             "geometry": config.geometry, "materials": config.materials, "load_path": config.load_path,
-            "clustered_mesh": config.clustered_mesh, "side_length_mm": 1e3 * config.cell_side,
+            "clustered_mesh": config.clustered_mesh, "element_kernel": config.element_kernel,
+            "side_length_mm": 1e3 * config.cell_side,
             "reference": reference, "entries": entries}
     (folder / "run.json").write_text(json.dumps(info, indent=1))
 
@@ -591,6 +602,9 @@ def get_cell_map(entry, arrays):
     if entry["method"] == "Spectral LS":
         return plots.CellMap(label, f"{settings['elements']} voxels per side, C0: {settings['C0']}",
                              {"voxel": cluster_ids}, element_phase)
+    if entry["method"] == "SCA":
+        return plots.CellMap(label, f"over the whole cell, C0: {settings['C0']}\n{clusters_line}",
+                             {"cluster": cluster_ids}, element_phase, fill)
     if entry["method"] == "TFA":
         return plots.CellMap(label, f"{settings['partitions']} partitions per side\n{clusters_line}",
                              {"cluster": cluster_ids}, element_phase, fill)
@@ -685,7 +699,10 @@ def draw_run(folder):
     """Every table and figure of a saved run, from what it saved, with config.py's figure settings: the tables printed
     and written to summary.txt."""
     info, arrays = get_saved_run(folder)
-    tables = [get_timing_table(info, len(arrays["applied_macro_strain"]))]
+    # Runs saved before element_kernel existed all used Moulinec–Suquet's.
+    problem = (f"{info['geometry']}, {info['materials']}, {info['load_path']}; element kernel "
+               f"{info.get('element_kernel', 'Moulinec-Suquet')}")
+    tables = [problem, get_timing_table(info, len(arrays["applied_macro_strain"]))]
     drawn = [entry for entry in info["entries"] if entry["completed_step_count"] > 0]
     if drawn:
         tables.append(draw_load_path_figures(folder, info, arrays, drawn))

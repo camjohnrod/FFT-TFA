@@ -33,58 +33,68 @@ def get_geometry():
 def is_shape_constant_along_z():
     return get_geometry()["shape"] in shapes_constant_along_z
 
-def get_fiber_radius():
-    """The radius of each of the "random fibers": equal fibers that together fill volume_fraction of the section."""
+# The shapes of equal inclusions at random positions, and the dimension they are placed in: fibers by their (x, y)
+# centres, spheres by their (x, y, z) centres.
+random_shape_dimensions = {"random fibers": 2, "random spheres": 3}
+
+def get_random_radius():
+    """The radius of each inclusion of a random shape: equal fibers that together fill volume_fraction of the
+    section, or equal spheres that fill it of the cell."""
     geometry = get_geometry()
-    return config.cell_side * np.sqrt(geometry["volume_fraction"] / (np.pi * geometry["count"]))
+    share = geometry["volume_fraction"] / geometry["count"]
+    if random_shape_dimensions[geometry["shape"]] == 2:
+        return config.cell_side * np.sqrt(share / np.pi)
+    return config.cell_side * np.cbrt(3 * share / (4 * np.pi))
 
 def get_periodic_offsets(points, centre):
-    """Each (x, y) point's offset from centre, to the nearest of the centre's periodic images."""
+    """Each point's offset from centre, to the nearest of the centre's periodic images."""
     offsets = points - centre
     return offsets - config.cell_side * np.round(offsets / config.cell_side)
 
-def get_fiber_centres():
-    """The (x, y) centres of the "random fibers", one row each (config.py): by random sequential addition, and if that
-    jams, the rest at random and every overlap pushed apart."""
+def get_random_centres():
+    """The centres of a random shape's inclusions, one row each, (x, y) for fibers and (x, y, z) for spheres
+    (config.py): by random sequential addition, and if that jams, the rest at random and every overlap pushed apart."""
     geometry = get_geometry()
-    fiber_count = geometry["count"]
-    minimum_distance = 2 * get_fiber_radius() + geometry["gap"] * config.cell_side
+    dimension = random_shape_dimensions[geometry["shape"]]
+    count = geometry["count"]
+    minimum_distance = 2 * get_random_radius() + geometry["gap"] * config.cell_side
     random_generator = np.random.default_rng(geometry["seed"])
-    fiber_centres = np.empty((0, 2))
-    for _ in range(config.fiber_placement_attempts):
-        candidate = random_generator.uniform(0, config.cell_side, 2)
-        if np.all(np.sum(get_periodic_offsets(fiber_centres, candidate)**2, axis=1) >= minimum_distance**2):
-            fiber_centres = np.vstack([fiber_centres, candidate])
-            if len(fiber_centres) == fiber_count:
-                return fiber_centres
-    fiber_centres = np.vstack([fiber_centres, random_generator.uniform(0, config.cell_side,
-                                                                       (fiber_count - len(fiber_centres), 2))])
-    # Each pass moves both fibers of every pair closer than minimum_distance apart by half the shortfall from
-    # (1 + fiber_push_margin) × minimum_distance, all pairs at once: pushing to minimum_distance itself would only
+    centres = np.empty((0, dimension))
+    for _ in range(config.placement_attempts):
+        candidate = random_generator.uniform(0, config.cell_side, dimension)
+        if np.all(np.sum(get_periodic_offsets(centres, candidate)**2, axis=1) >= minimum_distance**2):
+            centres = np.vstack([centres, candidate])
+            if len(centres) == count:
+                return centres
+    centres = np.vstack([centres, random_generator.uniform(0, config.cell_side, (count - len(centres), dimension))])
+    # Each pass moves both inclusions of every pair closer than minimum_distance apart by half the shortfall from
+    # (1 + push_margin) × minimum_distance, all pairs at once: pushing to minimum_distance itself would only
     # approach it.
-    for _ in range(config.fiber_push_passes):
-        offsets = get_periodic_offsets(fiber_centres[None, :, :], fiber_centres[:, None, :])
+    for _ in range(config.push_passes):
+        offsets = get_periodic_offsets(centres[None, :, :], centres[:, None, :])
         distances = np.sqrt(np.sum(offsets**2, axis=2))
         np.fill_diagonal(distances, np.inf)
         if np.all(distances >= minimum_distance):
-            return fiber_centres
-        shortfalls = np.maximum((1 + config.fiber_push_margin) * minimum_distance - distances, 0)
-        fiber_centres = ((fiber_centres - np.sum((shortfalls / (2 * distances))[:, :, None] * offsets, axis=1))
-                         % config.cell_side)
-    padded_fraction = fiber_count * np.pi * (minimum_distance / 2)**2 / config.cell_side**2
-    raise ValueError(f"Pushing the fibers apart left some overlapping after {config.fiber_push_passes} passes. The "
-                     f"fibers with half the gap around each would fill {padded_fraction:.3g} of the cell (at most "
-                     "0.907, hexagonal packing): lower volume_fraction or gap, or raise "
-                     "fiber_push_passes.")
+            return centres
+        shortfalls = np.maximum((1 + config.push_margin) * minimum_distance - distances, 0)
+        centres = (centres - np.sum((shortfalls / (2 * distances))[:, :, None] * offsets, axis=1)) % config.cell_side
+    if dimension == 2:
+        padded_fraction, densest = count * np.pi * (minimum_distance / 2)**2 / config.cell_side**2, 0.907
+    else:
+        padded_fraction, densest = count * 4 / 3 * np.pi * (minimum_distance / 2)**3 / config.cell_side**3, 0.740
+    raise ValueError(f"Pushing the inclusions apart left some overlapping after {config.push_passes} passes. "
+                     f"The inclusions with half the gap around each would fill {padded_fraction:.3g} of the cell (at "
+                     f"most {densest}, the densest packing): lower volume_fraction or gap, or raise "
+                     "push_passes.")
 
 def is_inside_inclusion(centres):
     """Whether each point, one (x, y, z) row each, lies inside the inclusion. A new shape goes here, in
     config.check_geometry and in get_geometry_parameters (and in shapes_constant_along_z if it is constant along z)."""
     geometry = get_geometry()
-    if geometry["shape"] == "random fibers":
-        radius = get_fiber_radius()
-        return np.any([np.sum(get_periodic_offsets(centres[:, :2], fiber_centre)**2, axis=1) < radius**2
-                       for fiber_centre in get_fiber_centres()], axis=0)
+    if geometry["shape"] in random_shape_dimensions:
+        radius, dimension = get_random_radius(), random_shape_dimensions[geometry["shape"]]
+        return np.any([np.sum(get_periodic_offsets(centres[:, :dimension], centre)**2, axis=1) < radius**2
+                       for centre in get_random_centres()], axis=0)
     offsets_from_centre = centres - config.cell_side / 2
     if geometry["shape"] == "laminate":
         return np.abs(offsets_from_centre[:, 0]) < geometry["thickness"] / 2
@@ -315,8 +325,11 @@ def get_geometry_parameters():
         parameters["layer_thickness"] = geometry["thickness"]
     elif geometry["shape"] == "random fibers":
         # The centres stand for the count, volume fraction, gap and seed that placed them.
-        parameters["fiber_radius"] = get_fiber_radius()
-        parameters["fiber_centres"] = get_fiber_centres()
+        parameters["fiber_radius"] = get_random_radius()
+        parameters["fiber_centres"] = get_random_centres()
+    elif geometry["shape"] == "random spheres":
+        parameters["sphere_radius"] = get_random_radius()
+        parameters["sphere_centres"] = get_random_centres()
     else:
         parameters["inclusion_radius"] = geometry["radius"]
     return parameters

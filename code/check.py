@@ -1,5 +1,5 @@
-"""Checks the code on small problems, each solved by every method (FFT-TFA, Spectral LS, TFA). Run it after any change
-to the code:
+"""Checks the code on small problems, each solved by every method (FFT-TFA, SCA, Spectral LS, TFA). Run it after any
+change to the code:
 
   python code/check.py         run the checks (under a minute)
   python code/check.py save    run the checks (except the comparison with the saved results) and, if they all pass,
@@ -10,19 +10,26 @@ Each check prints PASS or FAIL with the number it judged. The problems are in ch
   bit.
 - On every problem, FFT-TFA's interaction at full degree (FT-2, FT-3), whose polynomials span every function on a
   partition, must equal the element-level LS operator averaged over its clusters, computed here from the elements: a
-  wrong kernel, moment, pair count, correction block or average fails. And at the problem's own degree, a uniform
+  wrong kernel, moment, pair count, correction block or average fails. So must SCA's D (SC-2), on its clusters over
+  the whole cell, which makes SCA with C0 = L_m FFT-TFA on one partition. And at FFT-TFA's own degree, a uniform
   polarization must cause no strain (the patch test).
 - On every laminate, every method must reproduce its exact solution in every cluster, except where inexact_methods
   says its model is not exact there, and FFT-TFA at full degree must too: that separates its far-field summary, a model
   error, from a wrong law or Newton solve.
 - On the laminate, FFT-TFA at full degree and TFA must also reproduce it with each partition's matrix part cut into two
   clusters, since each phase's exact state is uniform: that tests clusters dividing a partition's phase.
+- On every laminate, where SCA is exact whatever its C0, its self-consistent c after each load step must be SC-3
+  applied to the exact solution's macroscopic increments. And SC-3 itself must match its definition, a least-squares
+  fit on the 3 × 3 tensors, for random increments.
+- On every problem, SCA with C0 = L_m and FFT-TFA on one partition, two codes for the same clustered equation, must
+  agree along the load path to stopping_accuracy_tolerance.
 - On the fiber and the sphere, every method must stop at the same accuracy: its stresses at convergence_tolerance
   within stopping_accuracy_tolerance of its own solution at tight_convergence_tolerance. (Not with k-means clusters
   of a few elements: there a cluster on the verge of yielding can converge elastic at one tolerance and plastic at the
   other, for TFA too.)
 - On the fiber, the reference, solved at the working resolution, must equal Spectral LS bit for bit, and load back
   from its cache unchanged.
+Every problem runs on Willot's element kernel, and the laminate and the fiber once more on Moulinec–Suquet's.
 So a change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
 results, then save them anew. They are in code/check_saved_results.npz, and hold bit for bit only at the
 config.thread_count they were saved with.
@@ -47,6 +54,7 @@ import cell
 import fft_tfa_model
 import ls_model
 import run
+import sca_model
 import tfa_model
 from material import get_eigenstrain_sensitivity, radial_return, get_unloaded_plastic_state
 
@@ -61,6 +69,7 @@ def get_check_entries(partitions, spectral_elements, matrix_clusters=1, degree=1
     """One entry of each method."""
     return {"fft_tfa": [dict(partitions=partitions, matrix_clusters=matrix_clusters, inclusion_clusters=1,
                              degree=degree)],
+            "sca": [dict(matrix_clusters=matrix_clusters, inclusion_clusters=1, C0="self-consistent")],
             "spectral_ls": [dict(elements=spectral_elements, C0="midpoint")],
             "tfa": [dict(partitions=partitions, matrix_clusters=matrix_clusters, inclusion_clusters=1)]}
 
@@ -81,22 +90,25 @@ check_geometries = {
     "cut laminate": dict(shape="laminate", thickness=(7 / 27) * 1e-3),
     "z laminate": dict(shape="laminate_z", thickness=(3 / 9) * 1e-3),
     "random fibers": dict(shape="random fibers", count=6, volume_fraction=0.3, gap=1 / 27, seed=1),
+    "random spheres": dict(shape="random spheres", count=4, volume_fraction=0.2, gap=1 / 12, seed=1),
 }
 
 # Every config.py input that shapes the problems or the solvers, pinned to a fixed value: a 27 × 27 element mesh, a
 # yielding and hardening matrix.
 pinned_inputs = {
     "cell_side": 1e-3, "all_geometries": check_geometries, "geometry": "fiber", "clustered_mesh": 27,
+    "element_kernel": "Willot",
     "all_materials": {"check": check_materials}, "materials": "check", "load_path": "check",
     **get_check_entries(partitions=9, spectral_elements=27),
     **get_monotonic_load(strain(e11=0.015, e22=0.020, g12=0.03)),
     "convergence_tolerance": 1e-6, "residual_strain_scale_floor": 1e-4, "newton_max_iterations": 50,
     "krylov_tolerance": 1e-3, "gmres_restart": 50, "gmres_max_restarts": None, "cg_max_iterations": None,
     "divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "tfa_columns_per_solve": 100,
+    "sca_reference_tolerance": 1e-3, "sca_max_reference_updates": 10,
     "tfa_factorization_ordering": "MMD_AT_PLUS_A",
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
-    "k_means_iterations": 50, "k_means_seed": 0, "k_means_start": "++", "fiber_placement_attempts": 100000,
-    "fiber_push_margin": 1e-3, "fiber_push_passes": 10000, "reference": None, "k_means_features_C0": "midpoint",
+    "k_means_iterations": 50, "k_means_seed": 0, "k_means_start": "++", "placement_attempts": 100000,
+    "push_margin": 1e-3, "push_passes": 10000, "reference": None, "k_means_features_C0": "midpoint",
     "memory_limit_GB": None, "map_turning_point": "last"}
 
 # What each problem changes from pinned_inputs.
@@ -133,7 +145,16 @@ check_problems = {
     # The shape config.py sets up by default: fibers at random positions, with k-means clusters.
     "random fibers": {"geometry": "random fibers",
                       **get_check_entries(partitions=9, spectral_elements=27, matrix_clusters=2)},
+    # Spheres at random positions on a 12³ mesh, with k-means clusters: the only test of random placement in 3D.
+    "random spheres": {"geometry": "random spheres", "clustered_mesh": 12,
+                       **get_monotonic_load(strain(e11=0.015, e33=0.020, g13=0.03)),
+                       **get_check_entries(partitions=4, spectral_elements=12, matrix_clusters=2)},
 }
+
+# Two problems once more on Moulinec–Suquet's kernel, so both kernels stay tested: a laminate's exact solution, and
+# the reference against Spectral LS.
+for name in ("laminate", "fiber"):
+    check_problems[f"{name}, Moulinec-Suquet"] = {**check_problems[name], "element_kernel": "Moulinec-Suquet"}
 
 # The methods whose model is not exact on a problem: compared with the exact solution, but not judged by it.
 inexact_methods = {"cut laminate": ("FFT-TFA",)}
@@ -224,16 +245,15 @@ def get_laminate_error(result, exact_phase_stress):
     return get_stress_error(result, result.clusters.average(np.moveaxis(exact_cluster_stress, 1, 0)),
                             exact_cluster_stress)
 
-## ------- FFT-TFA at Full Degree, and the Patch Test ------- ##
+## ------- Interactions, and the Patch Test ------- ##
 
-def get_interaction_error(clusters):
-    """FFT-TFA's interaction at full degree (FT-2 to FT-4), against the element-level LS operator: random polarizations,
-    one per cluster, spread over its elements, strains −Γ0 * τ = −D0 τ by FFT on the element lattice (Moulinec–Suquet
-    kernel, C0 = L_m), averaged over each cluster's elements. The largest relative difference. At full degree the
-    polynomials represent every partition's polarization exactly, so the two must agree to round-off; FT-4 then removes
-    a mean that is zero to round-off."""
+def get_interaction_error(clusters, get_strain_change):
+    """A method's interaction, get_strain_change(polarization) with C0 = L_m, against the element-level LS operator:
+    random polarizations, one per cluster, spread over its elements, strains Γ0 * τ by FFT on the element lattice (the
+    element kernel), averaged over each cluster's elements. The largest relative difference. FFT-TFA at full degree
+    represents every partition's polarization exactly (FT-4 then removes a mean that is zero to round-off), and SCA's D
+    is this operator averaged, so both must agree with it to round-off."""
     shape, matrix_L = clusters.mesh.element_shape, cell.get_matrix_L()
-    interaction = fft_tfa_model.get_interaction(clusters, "full")
     polarization = 1e6 * np.random.default_rng(0).standard_normal((clusters.cluster_count, 6))
     kernel = ls_model.get_P0_transformed(shape, matrix_L)
     element_strain = ls_model.apply_on_lattice(
@@ -241,7 +261,7 @@ def get_interaction_error(clusters):
     element_average = np.zeros((clusters.cluster_count, 6))
     np.add.at(element_average, clusters.element_cluster, element_strain)
     element_average /= np.bincount(clusters.element_cluster)[:, None]
-    return get_relative_difference(fft_tfa_model.get_strain_change(interaction, polarization), element_average)
+    return get_relative_difference(get_strain_change(polarization), element_average)
 
 def solve_load_path(solver):
     load_path = run.get_load_path()
@@ -303,6 +323,57 @@ def solve_on_split_clusters(mesh):
     return {"FFT-TFA at full degree": solve_at_full_degree(clusters),
             "TFA": solve_load_path(tfa_model.TFASolver(clusters))}
 
+## ------- SCA: its Reference Stiffness, and FFT-TFA on One Partition ------- ##
+
+def get_sca_clusters():
+    """The clusters of the problem's SCA entry, over the whole cell."""
+    return run.get_entry_clusters(next(entry for entry in run.get_entries() if entry.method == "SCA"))
+
+def to_tensor(voigt, shear_factor):
+    """A symmetric 3 × 3 tensor from Voigt components (11, 22, 33, 12, 23, 13), the shears times shear_factor: ½ for an
+    engineering strain (ER-2), 1 for a stress."""
+    (xx, yy, zz), (xy, yz, xz) = voigt[:3], shear_factor * voigt[3:]
+    return np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]])
+
+def get_reference_fit_error():
+    """SC-3 against its definition, for random macroscopic increments: fit_reference_scale's c against the c of
+    Δσ ≈ c Δε solved by least squares on the 3 × 3 tensors themselves, where every component counts once and no Voigt
+    weight enters. The largest relative difference."""
+    rng = np.random.default_rng(0)
+    errors = []
+    for _ in range(10):
+        strain_increment, stress_increment = rng.standard_normal(6), rng.standard_normal(6)
+        strain_tensor, stress_tensor = to_tensor(strain_increment, 0.5), to_tensor(stress_increment, 1.0)
+        (scale,), *_ = np.linalg.lstsq(strain_tensor.reshape(-1, 1), stress_tensor.reshape(-1), rcond=None)
+        errors.append(abs(sca_model.fit_reference_scale(strain_increment, stress_increment) - scale) / abs(scale))
+    return max(errors)
+
+def get_self_consistent_error(exact_phase_stress):
+    """SCA's self-consistent loop on a laminate, where SCA is exact whatever its C0: after each load step, c must be
+    SC-3 applied to the exact solution's macroscopic increments, since the loop stops where the fit to the step's own
+    increments returns c. A wrong step start or average shows here. The largest relative difference."""
+    clusters = get_sca_clusters()
+    solver = sca_model.SCASolver(clusters, "self-consistent")
+    exact_macro_stress = clusters.average(np.moveaxis(exact_phase_stress[:, clusters.materials.phase], 1, 0))
+    plastic_history = get_unloaded_plastic_state(clusters.cluster_count)
+    previous_macro_strain, previous_macro_stress, errors = np.zeros(6), np.zeros(6), []
+    for macro_strain, macro_stress in zip(run.get_load_path().applied_macro_strain, exact_macro_stress):
+        plastic_history = solver.solve_step(macro_strain, plastic_history).plastic_state
+        exact_scale = sca_model.fit_reference_scale(macro_strain - previous_macro_strain,
+                                                    macro_stress - previous_macro_stress)
+        errors.append(abs(solver.reference_scale - exact_scale) / exact_scale)
+        previous_macro_strain, previous_macro_stress = macro_strain, macro_stress
+    return max(errors)
+
+def get_one_partition_error():
+    """SCA with C0 = L_m against FFT-TFA on one partition, both on SCA's clusters along the load path: the same
+    clustered equation by two codes, SCA's dense D in increments (SC-1) and FFT-TFA's corrections in total form
+    (FT-4), so they agree to the stopping accuracy. The larger of the macroscopic and the cluster stress differences."""
+    clusters = get_sca_clusters()
+    sca = solve_load_path(sca_model.SCASolver(clusters, "matrix"))
+    fft_tfa = solve_load_path(fft_tfa_model.FFTTFASolver(clusters, 0))
+    return get_stress_error(sca, fft_tfa.macro_stress, fft_tfa.cluster_stress)
+
 ## ------- Checks ------- ##
 
 def solve_check_problem(problem_inputs, cache_folder):
@@ -343,6 +414,9 @@ def check_laminate(problem_name, results):
         all_passed &= report_error(f"{problem_name}: {method} matches the exact solution", error, tolerance)
     error = get_laminate_error(solve_at_full_degree(clusters), exact_phase_stress)
     all_passed &= report_error(f"{problem_name}: FFT-TFA at full degree matches the exact solution", error, tolerance)
+    error = get_self_consistent_error(exact_phase_stress)
+    all_passed &= report_error(f"{problem_name}: SCA's self-consistent c fits the exact solution's increments", error,
+                               tolerance)
     if problem_name == "laminate":
         for method, result in solve_on_split_clusters(clusters.mesh).items():
             error = get_laminate_error(result, exact_phase_stress)
@@ -398,9 +472,19 @@ def check_problem(problem_name, problem_inputs, saved_results, cache_folder):
     if config.reference is not None:
         all_passed &= check_reference(problem_name, results["Spectral LS"])
     clusters = run.get_partition_clusters(config.fft_tfa[0])
-    interaction_error = get_interaction_error(clusters)
+    interaction = fft_tfa_model.get_interaction(clusters, "full")
+    interaction_error = get_interaction_error(
+        clusters, lambda polarization: fft_tfa_model.get_strain_change(interaction, polarization))
     all_passed &= report_error(f"{problem_name}: FFT-TFA's interaction at full degree matches the element-level LS "
                                "operator", interaction_error, config.interaction_check_tolerance)
+    sca_clusters = get_sca_clusters()
+    D = sca_model.get_interaction(sca_clusters, cell.get_matrix_L())
+    interaction_error = get_interaction_error(
+        sca_clusters, lambda polarization: sca_model.get_strain_change(D, polarization))
+    all_passed &= report_error(f"{problem_name}: SCA's interaction with C0 = L_m matches the element-level LS operator",
+                               interaction_error, config.interaction_check_tolerance)
+    all_passed &= report_error(f"{problem_name}: SCA with C0 = L_m matches FFT-TFA on one partition along the load "
+                               "path", get_one_partition_error(), config.stopping_accuracy_tolerance)
     degree = config.fft_tfa[0]["degree"]
     patch_error = get_patch_test_error(clusters, degree)
     all_passed &= report_error(f"{problem_name}: FFT-TFA at degree {degree} gives a uniform polarization no strain",
@@ -425,6 +509,8 @@ def main():
             saved_results = {name: saved[name] for name in saved.files}
 
     all_passed = check_polynomial_basis()
+    all_passed &= report_error("SC-3: SCA's fit of c matches least squares on the tensors", get_reference_fit_error(),
+                               config.interaction_check_tolerance)
     result_arrays = {}
     with tempfile.TemporaryDirectory() as cache_folder:
         for problem_name, problem_inputs in check_problems.items():

@@ -6,18 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A research codebase comparing reduced-order methods for elastoplastic composites; the README explains the problem,
 the three grids (elements, partitions, clusters) and the methods. Use the method names exactly, and in this order
-everywhere (table, figures, code): **FFT-TFA**, **Spectral LS**, **TFA**. FFT-TFA is the method under development. CP,
+everywhere (table, figures, code): **FFT-TFA**, **SCA**, **Spectral LS**, **TFA**. FFT-TFA is the method under development. CP,
 the earlier method, was removed (git tag `pre-cleanup-2`); "fine LS", "coarse LS", "LS Newton" and "MAIN_*" are retired
 names, and so are "piece" and "region", since every cluster now lies in one partition. FFT-TFA and TFA share their
 material model (clusters, eigenstrains, update at the average strain) and differ in how the clusters interact: FFT-TFA
 averages the LS operator over its clusters with the matrix as C0, exact in the matrix but with the inclusion's
 polarization uniform per cluster (TFA resolves it), summarizes the other partitions by polynomial moments up to a
-`degree`, and uses the Moulinec–Suquet kernel instead of FE. At full degree FFT-TFA is SCA's clustered LS equation with
-C0 = L_m (`notes/fft_tfa_lecture.md`, sections 5–7). Neither difference is a bug.
+`degree`, and uses an LS element kernel instead of FE. At full degree FFT-TFA is SCA's clustered LS equation with
+C0 = L_m (`notes/fft_tfa_lecture.md`, sections 5–7). Neither difference is a bug. SCA solves that clustered equation
+exactly, on k-means clusters over the whole cell (one partition), through a dense D (lecture appendix E); it is there to
+show where FFT-TFA is worth it.
 
 The theory is one note, `notes/fft_tfa_lecture.md`: FFT-TFA in its body, the material law, Spectral LS and TFA in its
 appendix. Read the relevant section before changing solver math; keep it one file. Code names map onto its symbols and
-its numbered equations (FT-*, LS-*, ER-*), which code comments cite. Comments cite equations and papers, never the history of a decision. The code is meant to read as an
+its numbered equations (FT-*, LS-*, SC-*, ER-*), which code comments cite. Comments cite equations and papers, never the history of a decision. The code is meant to read as an
 introduction for someone new to it: each module opens with a docstring saying what it does in plain words, functions and
 classes carry docstrings, and names are short but say what a thing is (the user's words: "tight and concise, but it
 should communicate what it does").
@@ -30,32 +32,42 @@ should communicate what it does").
   and what to compare; then results, the lists, solver details, checks. config.py is often left at a local study
   configuration; "default" means `git show HEAD:code/config.py`. The user edits it while you work: change it by targeted
   edits, never by rewriting it from an earlier read.
-- **What runs is a list of entries per method** (`fft_tfa`, `spectral_ls`, `tfa`), empty to switch a method off. Each
+- **What runs is a list of entries per method** (`fft_tfa`, `sca`, `spectral_ls`, `tfa`), empty to switch a method off. Each
   entry holds that method's own settings, so nothing downstream reads a global partition or cluster count. A list of
   lists splits a method into schemes, chosen by the user (`config.get_schemes`; names from the settings, `run.get_entries`):
   the error-against-time plot draws one line per scheme in the order listed, the other line figures each scheme's last
   (finest) entry only, never several shades of one scheme; a scheme's colour is a shade of its method's
   (`plots.scheme_shades`). An entry listed in two schemes is solved once.
-  `clustered_mesh` (elements per side) is one fine mesh shared by FFT-TFA and TFA; Spectral LS's elements are its own.
+  `clustered_mesh` (elements per side) is one fine mesh shared by FFT-TFA, SCA and TFA; Spectral LS's elements are its own.
 - **The code is for teaching** (the user's goals, 2026-11-10): correct first, then obvious to use and to read, nothing
   convoluted; reuse general helpers; optimize only where the code stays readable; a fair comparison between methods.
   Every method is a `newton.Solver` built from its clusters and its own settings (`FFTTFASolver(clusters, degree)`,
-  `SpectralLSSolver(clusters, C0)`, `TFASolver(clusters)`); keep new methods and features to that shape.
-- **FFT-TFA is separate from Spectral LS**: `fft_tfa_model.py` uses only `ls_model`'s shared code (the Moulinec–Suquet
-  kernel, `apply_on_lattice`) and `newton`'s block helpers. Its reference medium is always the matrix (no setting). Its
+  `SCASolver(clusters, C0)`, `SpectralLSSolver(clusters, C0)`, `TFASolver(clusters)`); keep new methods and features
+  to that shape.
+- **FFT-TFA is separate from Spectral LS**: `fft_tfa_model.py` uses only `ls_model`'s shared code (the element
+  kernel, `apply_on_lattice`, `to_fourier_blocks`) and `newton`'s block helpers. Its reference medium is always the
+  matrix (no setting; lecture, section 4, says why). Its
   interaction: each partition's own clusters exactly (the corrections, FT-3), every other partition through its
   polynomial moments up to `degree` (per entry; `"full"` is exact), by one FFT; the corrections act on the
   polarization's deviation from its cell mean, so a uniform polarization causes no strain.
 - **Clusters lie inside partitions**: k-means inside each partition's part in each phase, or those parts themselves. No
-  smoothing of the features. Cell-wide k-means was removed: it breaks the memory advantage that is FFT-TFA's selling
-  point, by fragmenting into many parts per partition.
+  smoothing of the features. Cell-wide k-means was removed for FFT-TFA and TFA: it breaks the memory advantage that is
+  FFT-TFA's selling point, by fragmenting into many parts per partition. SCA's clusters are cell-wide by definition:
+  `run.get_entry_clusters` gives it one partition.
+- **One element kernel for every LS method** (`element_kernel`: `"Willot"`, the default since 2026-11-12, or
+  `"Moulinec-Suquet"`; `ls_model.get_element_kernel`, lecture appendix B.1): FFT-TFA, SCA, Spectral LS, the reference and the
+  k-means features share it, never one per entry, so the comparison stays fair. TFA is FE whatever it says. Willot's
+  is Moulinec–Suquet's closed form at another direction, so it changes nothing downstream; check.py runs every problem
+  on Willot's and the laminate and the fiber again on Moulinec–Suquet's.
 - **Spectral LS's reference stiffness is a choice** (`C0` in `spectral_ls`, `"midpoint"` or `"matrix"`), both kept so as
   not to flatter FFT-TFA: its answer does not depend on it, but `"matrix"` was 17 % slower at contrast 100. So LS-24 stays.
 - **Fairness between methods:** each gets its best setting from the same principles, justified from the LS
   literature only (no FE papers), all share the Newton–Krylov settings and thread count, and all stop at the same
-  accuracy (LS-24; FFT-TFA's residual is already in matrix units, FT-5), which `check.py` checks. The papers are in
+  accuracy (LS-24; FFT-TFA's residual is already in matrix units, FT-5; SCA's is judged as it is), which `check.py`
+  checks. SCA uses Newton–GMRES too, though Liu–Bessa–Liu solve directly: GMRES is faster past a few dozen clusters
+  (lecture E.4). The papers are in
   `references/`; cite only papers read cover to cover, never from a title or abstract.
-- **Small codebase:** one file per method and concept, the current ten; don't add modules without asking, and don't bring
+- **Small codebase:** one file per method and concept, the current eleven; don't add modules without asking, and don't bring
   back what the cleanups removed (tags `pre-cleanup`, `pre-cleanup-2` and `pre-cleanup-3`: fixed-point solvers,
   FFT-preconditioned TFA, the FE kernel for P0, the coarse LS lattice, CP, the Fourier preconditioner, softening, FFT-TFA's
   truncation to neighbouring partitions, `reach`) without the user asking. Field error
@@ -105,16 +117,17 @@ Estimate the cost of large configurations (`preview`) and run them in the backgr
 
 ## Architecture
 
-Imports go one way: `config` → `material` → `newton` → `cell` → `ls_model`, `tfa_model` → `fft_tfa_model` (from
-`ls_model`) → `run` → `check`. `plots.py` imports no project module; only `run.py` calls it.
+Imports go one way: `config` → `material` → `newton` → `cell` → `ls_model`, `tfa_model` → `fft_tfa_model`,
+`sca_model` (from `ls_model`) → `run` → `check`. `plots.py` imports no project module; only `run.py` calls it.
 
 The README's "Reading the code" table says what each module holds, in reading order. The shared types: `cell.Mesh`
 (elements and partitions, shapes along [z, y, x]), `cell.Clusters` (its mesh, the material states, ordered by partition),
 `run.LoadPathResult` (a solver's results along the load path; the reference's too).
 
-A method is a `newton.Solver` subclass with `evaluate` (its residual: LS-18, FT-5, ER-4) and `get_newton_correction` (LS-20
-with LS-28, FT-6, ER-21). `start_step` (TFA's elastic predictor), `measure_residual` (Spectral LS's LS-24) and
-`divergence_limit` (TFA's) may change. Figures are drawn only from what a run saved (`run.json`, `results.npz`), which is
+A method is a `newton.Solver` subclass with `evaluate` (its residual: LS-18, FT-5, SC-1, ER-4) and
+`get_newton_correction` (LS-20 with LS-28, FT-6, SC-4, ER-21). `start_step` (TFA's elastic predictor),
+`measure_residual` (Spectral LS's LS-24), `divergence_limit` (TFA's) and `solve_step` (SCA's self-consistent loop) may
+change. Figures are drawn only from what a run saved (`run.json`, `results.npz`), which is
 why `replot` needs no solve: `results.npz` holds the macroscopic stress at every step and maps of the mid-thickness
 layer (cluster, partition, phase; stress and accumulated plastic strain at the turning points), so any field in
 `run.fields` can be added and redrawn. Runs saved before 2026-11-10 stored per-cluster arrays and cannot be replotted.
@@ -129,7 +142,8 @@ layer (cluster, partition, phase; stress and accumulated plastic strain at the t
   `run.get_reference_parameters` and `tfa_model.get_E_and_P` (`"domain_side_length"`, `"elements_per_side"`, ...) are
   hashed into the cache file names, and the cached reference stores `material_ids` and `macroscopic_stress`. Renaming
   any of them, or changing a value's type (they are Python ints), orphans every existing cache (a reference can take 30
-  min); change them only with a version bump, on purpose.
+  min); change them only with a version bump, on purpose. The reference's `"discretization"` key holds
+  `config.element_kernel`, so references solved before it existed (all Moulinec–Suquet) still load.
 - **Strain convention (ER-2):** engineering shear, `(ε11, ε22, ε33, 2ε12, 2ε23, 2ε13)`.
 - **Convergence (LS-24):** Spectral LS's residual is a strain of its reference medium, so convergence and the line search
   judge M_m⁻¹ r (the correction an all-matrix cell would need, `measure_residual`), while the Newton correction still solves
@@ -155,8 +169,8 @@ layer (cluster, partition, phase; stress and accumulated plastic strain at the t
   volumes: every cell average goes through `Clusters.average`. Every method reports stress and plastic state per cluster.
 - **A new shape** goes in `is_inside_inclusion`, `check_geometry`, the geometry cache parameters
   (`cell.get_geometry_parameters`: every parameter of the shape, or a stale E, P or reference is reused silently) and, if
-  constant along z, `shapes_constant_along_z`. `"random fibers"` keys its cache on the placed radius and centres
-  (`get_fiber_centres`), which stand for the count, volume fraction, gap and seed.
+  constant along z, `shapes_constant_along_z`. `"random fibers"` and `"random spheres"` key their cache on the placed
+  radius and centres (`get_random_centres`), which stand for the count, volume fraction, gap and seed.
 - **TFA's P** is stored column-major so consecutive yielding clusters form a contiguous column block
   (`apply_P_to_clusters`). Don't fancy-index `P[:, columns]`: the copy costs more than the full product.
 - **Iteration counts:** "Newton its" are corrections, "Krylov its" the inner (GMRES, or CG for Spectral LS) iterations
@@ -164,6 +178,11 @@ layer (cluster, partition, phase; stress and accumulated plastic strain at the t
   loaded from the cache counted as when it was computed (`Solver.offline_from_cache`, set by TFA's E and P).
 - **Known differences by design:** LS methods (FFT-TFA included) start each step from the previous strain plus the
   uniform increment; TFA starts from the exact elastic predictor, so LS spends Newton iterations on elastic steps.
+- **SCA's residual is in increments** from the last accepted step (SC-1, Liu–Bessa–Liu's eq. 28), not total: with a
+  self-consistent C0 the total form makes C0 move the whole solution, the fit then has no root and the loop runs away
+  (tried 2026-11-12). Its self-consistent C0 is c I (Schneider 2019, §5.1), so D is built once for I and rescaled by
+  1/c; Liu's two Lamé constants would need D in two parts (three with Moulinec–Suquet's kernel). Its Newton and Krylov
+  counts sum every re-solve of a step. D is not cached.
 
 ## Status
 
@@ -177,7 +196,11 @@ each partition (stiffer and less accurate). Not worth it: a per-partition block-
 iterations, slower overall); removing the exact corrections inside each partition (polynomials cannot follow the sharp
 near field: 14–68 % off at practical partition sizes). Declined: polarization shapes from the elastic strain
 concentration plus one polarization per cluster (needs offline fine-mesh solves, and a near/far split of the interaction
-to be fast); the user wants a richer polarization that needs neither (README, "Inclusion polarization").
+to be fast); the user wants a richer polarization that needs neither (README, "Inclusion polarization"). Building
+FFT-TFA's interaction by applying Γ0 to each cluster's or polynomial's unit polarization (the definition, as SCA's D is
+built) lost to grouping element pairs by offset: 2–6× the time and memory in 3D (2026-11-12); it wins only past about
+36 clusters in a partition, which is SCA's case. A C0 stiffer than every phase (2026-11-13; lecture, section 4): every
+error part stiff, but 8–25 times less accurate and 2–3 times slower; the setting was removed.
 
 Known behaviour, model error rather than bugs: FFT-TFA's far field converges with the degree, not with the partitions
 alone, and partitions should be at most about half an inclusion across (lecture, section 10). Also:

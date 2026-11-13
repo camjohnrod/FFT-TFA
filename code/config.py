@@ -20,9 +20,9 @@ def strain(e11=0, e22=0, e33=0, g12=0, g23=0, g13=0):
 ## ======= 1. The Problem ======= ##
 
 # One name from each list in section 4, where you can add your own.
-geometry                    = "100 fibers"
+geometry                    = "16 spheres"
 materials                   = "glass/PA"
-load_path                   = "biaxial cyclic"  # a list of turning points, each a strain; the first must not be zero
+load_path                   = "tension, then shear"  # turning points, each a strain; the first must not be zero
 
 steps_to_first_turning_point = 25      # the load path's other lines keep the same step length
 
@@ -34,28 +34,42 @@ steps_to_first_turning_point = 25      # the load path's other lines keep the sa
 #   fft_tfa = [[dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=2) for p in (4, 8, 16)],
 #              [dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=3) for p in (4, 8, 16)]]
 
-# FFT-TFA and TFA both group the elements of one fine mesh, which resolves the geometry, into clusters. Spectral LS and
-# the reference set their own elements.
-clustered_mesh              = 256       # elements per side
+# FFT-TFA, SCA and TFA all group the elements of one fine mesh, which resolves the geometry, into clusters. Spectral LS
+# and the reference set their own elements.
+clustered_mesh              = 32        # elements per side
+
+# The element kernel Γ0 of every LS method: FFT-TFA, SCA, Spectral LS, the reference and the k-means features, so all
+# share one discretization. "Willot", the rotated staggered grid (Willot 2015): smaller errors at equal resolution and
+# fewer oscillations at interfaces; or "Moulinec-Suquet", the original, by trigonometric polynomials. TFA uses finite
+# elements whatever this says.
+element_kernel              = "Willot"
 
 # FFT-TFA, the method under development (notes/fft_tfa_lecture.md): clusters interacting exactly inside each
 # partition, and through an FFT on the partitions beyond, each partition summarized by polynomial moments.
 #   partitions          per side: the blocks of elements its FFT runs on; must divide clustered_mesh. Best at most about
 #                       half an inclusion across
-#   matrix_clusters     per partition's matrix part, by k-means
-#   inclusion_clusters  per partition's inclusion part; an elastic inclusion needs one
+#   matrix_clusters     per partition's matrix part, by k-means; 1 (with inclusion_clusters 1): each part is one
+#                       cluster, with no k-means and so no offline solves
+#   inclusion_clusters  per partition's inclusion part, by k-means: more follow its polarization more closely
 #   degree              of the polynomials summarizing each partition: 0 its mean only; higher converges to the exact
 #                       interaction, "full" is exact. About 2–4 in 2D, 2 in 3D, where the kernels grow fast (preview)
-fft_tfa = [[dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=0) for p in (4, 8, 16, 32, 64)], 
-           [dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=1) for p in (4, 8, 16, 32, 64)], 
-           [dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=2) for p in (4, 8, 16, 32, 64)], 
-           [dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=3) for p in (4, 8, 16, 32, 64)]]
-    
-# Spectral LS, the standard Moulinec–Suquet method, one cluster per element.
+fft_tfa = [[dict(partitions=p, matrix_clusters=m, inclusion_clusters=1, degree=2) for p in (2, 4, 8, 16)]
+           for m in (8, 1)]
+
+# SCA, self-consistent clustering analysis (Liu, Bessa & Liu 2016; lecture, appendix E): the clustered equation FFT-TFA
+# approximates, solved exactly, on clusters over the whole cell. It stores (6 × clusters)² doubles, which preview
+# reports.
+#   matrix_clusters     of the matrix, by k-means over the whole cell
+#   inclusion_clusters  of the inclusion, likewise
+#   C0                  its reference stiffness, which changes its answer: "matrix", which makes it FFT-TFA on one
+#                       partition; or "self-consistent", c I with c refitted at every load step (Schneider 2019)
+sca = [[dict(matrix_clusters=c, inclusion_clusters=c, C0="self-consistent") for c in (8, 32, 128, 256, 512)]]
+
+# Spectral LS, the standard method of Moulinec and Suquet, one cluster per element, on element_kernel.
 #   elements            per side: its own mesh, coarser or finer than clustered_mesh
 #   C0                  its reference stiffness, which does not change its answer: "midpoint" of the phases, or "matrix"
 #                       (about as fast at contrast 34, 17 % slower at contrast 100)
-spectral_ls = [dict(elements=e, C0="midpoint") for e in (64, 128, 256)]
+spectral_ls = [dict(elements=16, C0="midpoint")]
 
 # TFA, the baseline (lecture, appendix C): clusters interacting through FE influence functions, built once and
 # cached. Its settings mean the same as FFT-TFA's. It stores (6 × clusters)² doubles, which preview reports.
@@ -64,11 +78,11 @@ tfa         = []
 # The fine solution everything is compared with: Spectral LS, elements a multiple of clustered_mesh. Solved once and
 # cached, not timed, and solved again after any change of geometry, materials, load path or solver tolerance; a first
 # solve can take 30 min, so run it in the background. None: no reference.
-reference   = dict(elements=512, C0="midpoint")
+reference   = dict(elements=32, C0="midpoint")
 
 ## ======= 3. Results, Figures and Computer ======= ##
 
-results_name                = "test"   # names the results folder, nothing else
+results_name                = "spheres-32"   # names the results folder, nothing else
 
 # The maps show the fields at this turning point of the load path: 1 is the first; "last" on a cyclic path is back at
 # zero strain, so residual stress. replot uses this section's figure settings on a saved run.
@@ -90,6 +104,9 @@ all_geometries = {
     # 55 % of the cell (fibers with half the gap around each); past it, all are pushed apart until none overlap, up to
     # about 80 %.
     "100 fibers":    dict(shape="random fibers", count=100, volume_fraction=0.50, gap=1 / 128, seed=1),
+    # Spheres placed alike, in 3D: random placing jams near 38 % of the cell (spheres with half the gap around each);
+    # past it, all are pushed apart until none overlap.
+    "16 spheres":    dict(shape="random spheres", count=16, volume_fraction=0.25, gap=1 / 64, seed=1),
     "one fiber":     dict(shape="fiber", radius=0.35e-3),          # centred, through the thickness
     "sphere":        dict(shape="sphere", radius=0.35e-3),         # centred
     "layer":         dict(shape="laminate", thickness=0.5e-3),     # centred, interfaces normal to x; exact solution
@@ -124,7 +141,8 @@ cell_side                   = 1e-3     # the side of the periodic cubic cell, in
 # converged when its relative residual (the strain residual over the imposed strain, never over less than
 # residual_strain_scale_floor) is below convergence_tolerance. Spectral LS's residual is a strain of its reference
 # medium, so it is judged as the correction an all-matrix cell would need (lecture, appendix B.3), and the
-# tolerance means the same for any reference stiffness. FFT-TFA's reference medium is the matrix already.
+# tolerance means the same for any reference stiffness. FFT-TFA's reference medium is the matrix already; SCA's
+# residual is judged as it is, and check.py checks that it stops as accurately as the others.
 convergence_tolerance       = 1e-6
 residual_strain_scale_floor = 1e-4
 newton_max_iterations       = 50
@@ -141,9 +159,15 @@ line_search_sufficient_decrease = 1e-4
 line_search_step_reduction  = 0.5
 line_search_max_reductions  = 10
 # A method abandons the load path when its relative residual exceeds its limit times the larger of 1 and the step's
-# first relative residual: divergence_limit for FFT-TFA and Spectral LS, tfa_divergence_limit for TFA.
+# first relative residual: divergence_limit for FFT-TFA, SCA and Spectral LS, tfa_divergence_limit for TFA.
 divergence_limit            = 1e3
 tfa_divergence_limit        = 1.0
+
+# SCA's self-consistent C0 = c I: after each solve of a load step, c is refitted to the step's macroscopic increments,
+# and the step solved again until c changes by less than sca_reference_tolerance (relative; Liu–Bessa–Liu 2016 use
+# 0.1 %), at most sca_max_reference_updates times.
+sca_reference_tolerance     = 1e-3
+sca_max_reference_updates   = 10
 
 # k-means: Lloyd iterations from a seeded start (scipy's minit), on features from six elastic Spectral LS solves with
 # this reference stiffness.
@@ -157,12 +181,12 @@ k_means_features_C0         = "midpoint"
 tfa_columns_per_solve       = 100
 tfa_factorization_ordering  = "MMD_AT_PLUS_A"
 
-# Random fibers: random sequential addition gives up after fiber_placement_attempts random centres; pushing apart
-# then moves overlapping pairs to (1 + fiber_push_margin) times their minimum distance, and stops with an error after
-# fiber_push_passes passes.
-fiber_placement_attempts    = 100000
-fiber_push_margin           = 1e-3
-fiber_push_passes           = 10000
+# Random fibers and spheres: random sequential addition gives up after placement_attempts random centres; pushing
+# apart then moves overlapping pairs to (1 + push_margin) times their minimum distance, and stops with an error after
+# push_passes passes.
+placement_attempts          = 100000
+push_margin                 = 1e-3
+push_passes                 = 10000
 
 ## ======= 6. Checks (check.py) ======= ##
 
@@ -228,18 +252,20 @@ def check_geometry():
         if not 0 < settings["thickness"] < cell_side:
             raise ValueError(f"{geometry!r}: thickness must lie between zero and the cell's side. "
                              f"Got {settings['thickness']}.")
-    elif shape == "random fibers":
+    elif shape in ("random fibers", "random spheres"):
         if not 0 < settings["volume_fraction"] < 1:
             raise ValueError(f"{geometry!r}: volume_fraction must lie between 0 and 1. "
                              f"Got {settings['volume_fraction']}.")
-        # A fiber and its own periodic image must keep the gap too.
-        diameter = 2 * cell_side * math.sqrt(settings["volume_fraction"] / (math.pi * settings["count"]))
+        # An inclusion and its own periodic image must keep the gap too.
+        share = settings["volume_fraction"] / settings["count"]
+        diameter = 2 * cell_side * (math.sqrt(share / math.pi) if shape == "random fibers"
+                                    else (3 * share / (4 * math.pi)) ** (1 / 3))
         if diameter + settings["gap"] * cell_side >= cell_side:
-            raise ValueError(f"{geometry!r}: a fiber's diameter plus gap must be below the cell's side, so a fiber "
+            raise ValueError(f"{geometry!r}: an inclusion's diameter plus gap must be below the cell's side, so it "
                              "does not touch its own periodic image.")
     else:
-        raise ValueError(f"{geometry!r}: shape must be \"random fibers\", \"fiber\", \"sphere\", \"laminate\" or "
-                         f"\"laminate_z\". Got {shape!r}.")
+        raise ValueError(f"{geometry!r}: shape must be \"random fibers\", \"random spheres\", \"fiber\", \"sphere\", "
+                         f"\"laminate\" or \"laminate_z\". Got {shape!r}.")
 
 def check_inputs():
     """Stops on an input the code cannot run with, naming the setting to change. check.py calls it again after setting
@@ -256,16 +282,23 @@ def check_inputs():
     if steps_to_first_turning_point < 1:
         raise ValueError("steps_to_first_turning_point must be at least 1.")
 
-    if not (fft_tfa or spectral_ls or tfa):
-        raise ValueError("Nothing to run: fft_tfa, spectral_ls and tfa are all empty.")
+    if not (fft_tfa or sca or spectral_ls or tfa):
+        raise ValueError("Nothing to run: fft_tfa, sca, spectral_ls and tfa are all empty.")
+    if element_kernel not in ("Willot", "Moulinec-Suquet"):
+        raise ValueError(f"element_kernel must be \"Willot\" or \"Moulinec-Suquet\". Got {element_kernel!r}.")
     check_entries("fft_tfa", fft_tfa, ("partitions", "matrix_clusters", "inclusion_clusters", "degree"))
+    check_entries("sca", sca, ("matrix_clusters", "inclusion_clusters", "C0"))
     check_entries("spectral_ls", spectral_ls, ("elements", "C0"))
     check_entries("tfa", tfa, ("partitions", "matrix_clusters", "inclusion_clusters"))
     for entry in get_all_entries(fft_tfa) + get_all_entries(tfa):
         if clustered_mesh % entry["partitions"] != 0:
             raise ValueError(f"partitions={entry['partitions']} must divide clustered_mesh={clustered_mesh}.")
+    for entry in get_all_entries(fft_tfa) + get_all_entries(sca) + get_all_entries(tfa):
         if min(entry["matrix_clusters"], entry["inclusion_clusters"]) < 1:
             raise ValueError(f"The cluster counts must be at least 1. Got {entry}.")
+    for entry in get_all_entries(sca):
+        if entry["C0"] not in ("matrix", "self-consistent"):
+            raise ValueError(f"SCA's C0 must be \"matrix\" or \"self-consistent\". Got {entry}.")
     for entry in get_all_entries(fft_tfa):
         if entry["degree"] != "full" and not (isinstance(entry["degree"], int) and entry["degree"] >= 0):
             raise ValueError(f"degree must be \"full\" or an integer from 0. Got {entry}.")

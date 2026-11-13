@@ -10,8 +10,8 @@ $O(N_{\text{part}})$, whatever the number of material states inside the blocks. 
 **How to read it.** The derivation starts from the exact cell problem and adds one assumption at a time, each stated in
 a box where it is made. Each section opens by saying what we have so far, what is missing, and what the section does
 about it. Every step says what it does (substitute, rearrange, define, average) and shows the result. The lecture
-assumes small-strain elasticity and knowing what an FFT does. The labels LS-\*, FT-\*, ER-\* are the ones the code's
-comments cite, which is why they are not consecutive. Every figure is computed by the code
+assumes small-strain elasticity and knowing what an FFT does. The labels LS-\*, FT-\*, SC-\*, ER-\* are the ones the
+code's comments cite, which is why they are not consecutive. Every figure is computed by the code
 (`notes/figures/make_figures.py`). Papers are cited by author and year.
 
 **The road.** Each assumption buys fewer unknowns or a cheaper interaction:
@@ -30,14 +30,14 @@ A4 becomes exact as the degree is raised, so FFT-TFA converges to the clustered 
 **Contents.** 1 The problem · 2 Three grids · 3 The Lippmann–Schwinger equation · 4 One state per cluster · 5 The
 clustered equation · 6 FFT-TFA at degree 0: each other partition by its mean · 7 Beyond the mean: polynomial moments ·
 8 Solving a load step · 9 The methods side by side · 10 Known limits · Appendix: A the material law, B Spectral LS, C
-TFA, D FFT-TFA's polynomials and tables, E the equations in the code, F names in the code, G symbols
+TFA, D FFT-TFA's polynomials and tables, E SCA, F the equations in the code, G names in the code, H symbols
 
 **Where things live.** One letter at three scales: element $\alpha$ lies in cluster $a$, which lies in partition $A$
 (and $\beta$ in $b$ in $B$). So Greek $\alpha, \beta$ are **elements**, lowercase $a, b$ are **clusters**, and capital
 $A, B$ are **partitions**. Every field is written as a function of where it lives: $\boldsymbol\varepsilon(\alpha)$ is
 the strain of element $\alpha$, $\boldsymbol\varepsilon(a)$ the strain of cluster $a$, and $\langle f\rangle_a$,
 $\langle f\rangle_A$ are averages over a cluster, a partition. $\boldsymbol\Gamma_0$ is the element kernel; a **hat**
-marks its average over groups of elements, $\hat{\boldsymbol\Gamma}$. Every symbol is listed in Appendix G.
+marks its average over groups of elements, $\hat{\boldsymbol\Gamma}$. Every symbol is listed in Appendix H.
 
 ---
 
@@ -192,7 +192,7 @@ This is the **Lippmann–Schwinger equation** (Moulinec–Suquet 1998, eq. 7).
   Newton.
 - $\boldsymbol\Gamma_0$ is a **convolution**, since the medium is homogeneous. In Fourier space it becomes one
   $6\times6$ matrix per frequency, known in closed form (Moulinec–Suquet 1998, eq. 4;
-  `ls_model.get_moulinec_suquet_kernel`).
+  `ls_model.get_element_kernel`).
 - At zero frequency it is zero, which gives two properties sections 6 and 7 rely on: **a uniform polarization causes
   no strain**, and **the strain any polarization causes averages to zero over the cell**, which keeps
   $\langle\boldsymbol\varepsilon\rangle=\bar{\boldsymbol\varepsilon}$.
@@ -214,6 +214,12 @@ $\boldsymbol\Gamma_0(\alpha\leftarrow\beta)^{\mathsf T}=\boldsymbol\Gamma_0(\bet
 one FFT, a $6\times6$ product per frequency and one inverse FFT: $O(N_{\text{elem}}\log N_{\text{elem}})$ (LS-17,
 `ls_model.apply_on_lattice`). Solving it with one material state per element, A0 and nothing more, is **Spectral LS**,
 Moulinec–Suquet's method (`ls_model.SpectralLSSolver`; Appendix B).
+
+**Which element kernel.** On a grid, how derivatives are taken is a choice, and it decides
+$\boldsymbol\Gamma_0(\alpha\leftarrow\beta)$. The code offers two (`config.element_kernel`, Appendix B.1):
+Moulinec–Suquet's, which writes the fields as sums of waves and rings at interfaces, and Willot's (2015), finite
+differences on a grid turned by 45°, with smaller errors at the same resolution. Everything after this step uses only
+that the kernel is a symmetric convolution that a uniform polarization does not strain, so it holds for either.
 
 ---
 
@@ -280,6 +286,27 @@ $$
 $$
 
 with $\boldsymbol\mu(a)$ from the radial return at $\boldsymbol\varepsilon(a)$.
+
+#### Why not another $\mathbf C_0$
+
+FT-1 holds for any $\mathbf C_0$; what $\mathbf C_0$ decides is where A2 acts, and the sign of its error. A2 restricts
+the polarization to one value per cluster, a Galerkin approximation of the Hashin–Shtrikman principle
+(Brisard–Dormieux 2010): with $\mathbf C_0$ below a phase's stiffness, restricting that phase's polarization errs soft;
+above it, stiff.
+
+- **$\mathbf C_0=\mathbf L_M$:** A2 acts in the inclusion only, which is stiffer, so it errs soft, while A1 errs stiff
+  once the matrix yields. The two partly cancel, so the total error has no fixed sign (section 10).
+- **$\mathbf C_0$ above every phase** (for stiff elastic fibers, $\mathbf L_I$, which makes the fibers' polarization
+  zero): A2 acts in the matrix instead, and every part errs stiff; plasticity only lowers a tangent, so this holds along
+  the whole path. Measured on 100 glass fibers in PA (contrast 34), biaxial cyclic, degree 3: stiff at every step, but
+  8–25 times further from Spectral LS on the same mesh than with $\mathbf L_M$ (62 % against 2.5 % rms in σ̄11 with 4²
+  partitions, 6.3 % against 0.81 % with 32²), and 2–3 times slower, since the Jacobian is positive only by about
+  $\mathbf L_T/\mathbf C_0$; a far field below degree 3 can even leave a step without a solution.
+
+The reason is where the approximation lands: one polarization per cluster costs little where the field inside a
+cluster varies little. A stiff inclusion's strain is nearly uniform, while the matrix's varies sharply between
+inclusions. So $\mathbf C_0$ should be the stiffness of the phase whose field varies most, here the matrix: that puts A2
+where it costs least.
 
 ---
 
@@ -542,7 +569,7 @@ share of the exact interaction within a partition. Degrees above 0 are section 7
 
 Read it at degree 0, the lightest line:
 
-- **Within a partition** the mean is 54 % off, and no degree fixes it (still 9 % at degree 4): there the kernel is at
+- **Within a partition** the mean is 55 % off, and no degree fixes it (still 9 % at degree 4): there the kernel is at
   its sharpest and the indicators step at every interface. That is why 6.1 keeps the own partition exact.
 - **Between partitions** the mean is 8 % off one partition apart, and refining the partitions does not help: neighbours
   stay about 8 % off whatever their size (section 10). The mean misses how the polarization varies across a partition,
@@ -805,18 +832,18 @@ what each costs, and splits FFT-TFA's error by assumption.
 | | A0 elements | A1 one state per cluster | A2 inclusion polarization uniform | A3 average per cluster | A4 far field by polynomials |
 |---|---|---|---|---|---|
 | **FFT-TFA** | ✓ | ✓ | ✓ | ✓ | ✓, exact at full degree |
+| **SCA** | ✓ | ✓ | ✓, and in the matrix too unless $\mathbf C_0=\mathbf L_M$ | ✓ | |
 | **Spectral LS** | ✓ | | | | |
 | **TFA** | finite elements instead | ✓ | | | |
-| SCA, $\mathbf C_0=\mathbf L_M$ (not in the code) | ✓ | ✓ | ✓ | ✓ | |
 
 TFA averages over the clusters too, but after solving at every point (Appendix C.1), so it needs neither A2 nor A3.
 
 | | Material states | Interaction | Stored | Cost per product |
 |-------|------|---------|---------|------------|
-| **FFT-TFA** | clusters | moments by FFT on the partitions, exact inside each partition | moment kernels on the partitions, blocks inside each partition | $O(N_{\text{poly}}N_{\text{part}}\log N_{\text{part}})$ + $O(N_{\text{poly}}^2N_{\text{part}})$ + blocks |
+| **FFT-TFA** | clusters inside partitions | moments by FFT on the partitions, exact inside each partition | moment kernels on the partitions, blocks inside each partition | $O(N_{\text{poly}}N_{\text{part}}\log N_{\text{part}})$ + $O(N_{\text{poly}}^2N_{\text{part}})$ + blocks |
+| **SCA** | clusters over the whole cell | the clustered equation, every pair | dense, $(6N_{\text{clust}})^2$ | $O(N_{\text{clust}}^2)$ |
 | **Spectral LS** | elements | FFT on the elements | kernel and fields on the elements | $O(N_{\text{elem}}\log N_{\text{elem}})$ |
-| **TFA** | clusters | exact FE influence functions | dense, $(6N_{\text{clust}})^2$ | $O(N_{\text{clust}}^2)$ |
-| SCA (not in the code) | clusters | the clustered equation | dense, $(6N_{\text{clust}})^2$ | $O(N_{\text{clust}}^2)$ |
+| **TFA** | clusters inside partitions | exact FE influence functions | dense, $(6N_{\text{clust}})^2$ | $O(N_{\text{clust}}^2)$ |
 
 **Where FFT-TFA's error comes from,** assumption by assumption, each part measurable with the code:
 
@@ -824,15 +851,22 @@ TFA averages over the clusters too, but after solving at every point (Appendix C
 2. **A2–A3,** the inclusion's polarization uniform per cluster and the equation averaged (FFT-TFA at full degree
    against TFA);
 3. **A4,** the far field's polynomial fit (FFT-TFA against itself at full degree);
-4. **A0 against finite elements:** the Moulinec–Suquet kernel against TFA's.
+4. **A0 against finite elements:** the element kernel against TFA's elements (with Willot's kernel, one Gauss point
+   against eight).
 
 **Relation to the literature.**
 
 - **Moulinec–Suquet (1998):** the reference-medium equation and its FFT solution.
-- **SCA (Liu–Bessa–Liu 2016):** the clustered equation, with $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ built as a dense
-  matrix on the fine grid (their eq. 27). They found a reference medium equal to the matrix too stiff once the matrix
-  yields (§3.2, Fig. 5), and update it self-consistently at every increment. FFT-TFA keeps $\mathbf L_M$ fixed, which
-  makes the matrix's polarization exact (section 4) and leaves one kernel, built once.
+- **Willot (2015):** the rotated staggered grid, the element kernel the code uses by default (Appendix B.1).
+- **SCA (Liu–Bessa–Liu 2016; Appendix E):** the clustered equation, with $\hat{\boldsymbol\Gamma}(a\leftarrow b)$
+  built as a dense matrix on the fine grid (their eq. 27). With $\mathbf C_0=\mathbf L_M$ their results converge
+  more slowly in the clusters than with a reference medium refitted to the macroscopic response at every increment
+  (§3.1–3.2, Figs. 4–5), which is their self-consistent scheme. FFT-TFA keeps $\mathbf L_M$ fixed, which makes the
+  matrix's polarization exact (section 4) and leaves one kernel, built once.
+- **Schneider (2019):** for a fixed $\mathbf C_0$ and hardening materials, the clustered equation has one solution,
+  which converges to the cell problem's as the clusters are refined (§3), though only logarithmically in his tests
+  (§5). On glass fibers in polyamide, 50 % fibers loaded transversely, SCA with 32 + 32 clusters was still 22.9 % off,
+  an error already present in elasticity (§5.3); he sees SCA's use at low contrast or low filler fraction (§6).
 - **Brisard–Dormieux (2010, 2012):** the same regular cells, in linear elasticity, with a polarization constant on each
   cell, used both to approximate the polarization and to test the equation (2012, §4.1–4.2): FFT-TFA's far field at
   degree 0. FFT-TFA adds polynomials up to a degree, and clusters inside the cells with the exact interaction among a
@@ -860,10 +894,19 @@ Each limit comes from one assumption.
 - **Partitions should be smaller than the inclusions.** With partitions about an inclusion across, the field around an
   inclusion reaches past its partition, and only a high degree follows it. Partitions at most about half an inclusion
   across work best (README, "Status and roadmap").
-- **A floor far away.** Beyond two partitions, from degree 2 on, the far field's error levels off at a few hundredths of
-  a percent instead of falling with the degree (figure 3). Our reading, not verified: the element kernel varies from
-  element to element even far from its source, the discrete kernel's high-frequency content, and polynomials smooth
-  that over.
+- **A floor far away.** Beyond two partitions, from degree 2 on, the far field's error levels off at a few
+  thousandths of a percent instead of falling with the degree (figure 3). With Moulinec–Suquet's kernel the floor is
+  ten times higher, a few hundredths: it comes from the element kernel's high-frequency content, which varies from
+  element to element even far from its source and which polynomials smooth over, and Willot's kernel has less of it.
+
+#### From A2 and A1: opposite signs
+
+Measured on 100 random glass fibers in PA (contrast 34), biaxial cyclic, 64² partitions of 4 × 4 elements, against
+Spectral LS on the same mesh, each part alone by refining the others to one cluster per element at full degree, and
+signed by each step's stiffness. One polarization per inclusion cluster (A2) errs soft at 96–100 % of the steps
+(0.48 % rms in σ̄11, −1.9 % in every elastic step); one state per matrix cluster (A1) errs stiff at 84–96 % (0.15 %);
+the far field at degree 3 errs stiff at every step (0.10 %). The parts add up, to 0.06 % rms. So the total error's
+sign changes along the path, and an error against a reference can understate the model's.
 
 #### From A2: one polarization per inclusion cluster
 
@@ -947,9 +990,9 @@ holds the elastic contrast and the plastic strain together; it is not a plastic 
 
 #### B.1 The kernel
 
-At every frequency $\boldsymbol\xi\neq\mathbf 0$ of the element lattice, with $\mathbf n=\boldsymbol\xi/\lvert\boldsymbol\xi\rvert$
-and $\mathbf B(\mathbf n)$ ($6\times3$) the engineering strain of a displacement varying along $\mathbf n$, per unit
-gradient (Moulinec–Suquet 1998, eq. 4; `ls_model.get_P0_transformed`):
+At every frequency $\boldsymbol\xi\neq\mathbf 0$ of the element lattice, the kernel takes the continuum form along a
+unit direction $\mathbf n$, with $\mathbf B(\mathbf n)$ ($6\times3$) the engineering strain of a displacement varying
+along $\mathbf n$, per unit gradient (Moulinec–Suquet 1998, eq. 4; `ls_model.get_element_kernel`):
 
 $$
 \large
@@ -965,10 +1008,31 @@ $$
 \tag{LS-9}
 $$
 
-At every other frequency $\hat{\mathbf P}_0$ is a projection, with eigenvalues 0 and 1, for any $\mathbf C_0$. Along an
-axis with an even element count, $\hat{\boldsymbol\Gamma}_0$ has no real-valued meaning at the highest frequency; there
-$\hat{\mathbf P}_0=\mathbf I$, Moulinec–Suquet's choice (1998, §2.4.2), which makes the stress there zero. Applying it
-to a field $\mathbf v$ is one FFT, a $6\times6$ product per frequency and one inverse FFT
+At every other frequency $\hat{\mathbf P}_0$ is a projection, with eigenvalues 0 and 1, for any $\mathbf C_0$. The two
+discretizations (`config.element_kernel`) differ only in $\mathbf n$ and at a few of the highest frequencies. With
+$q_i=2\pi\xi_i/N_i$ the frequency per element along axis $i$:
+
+- **Moulinec–Suquet** (1998): the fields are trigonometric polynomials and $\mathbf n=\boldsymbol\xi/\lvert\boldsymbol\xi\rvert$.
+  Along an axis with an even element count, $\hat{\boldsymbol\Gamma}_0$ has no real-valued meaning at the highest
+  frequency; there $\hat{\mathbf P}_0=\mathbf I$, Moulinec–Suquet's choice (1998, §2.4.2), which makes the stress there
+  zero.
+- **Willot** (2015), the rotated staggered grid: displacements at the elements' corners, strains and stresses at their
+  centres, derivatives by differences across each element's diagonals. Its discrete gradient (his eq. 36) is a complex
+  multiple of the real vector
+
+  $$
+  \large
+  w_i=\sin\frac{q_i}{2}\,\prod_{j\neq i}\cos\frac{q_j}{2}
+  $$
+
+  and $\hat{\boldsymbol\Gamma}_0$ depends only on the gradient's direction (his eq. 39), so $\mathbf n=\mathbf w/\lvert\mathbf w\rvert$:
+  the same closed form, at another direction. Where two or more components of $\mathbf q$ equal $\pi$, $\mathbf w=\mathbf 0$
+  and $\hat{\mathbf P}_0=\mathbf 0$ (his eq. 41). It is the same discretization as trilinear finite elements with one
+  Gauss point, at each element's centre (Schneider 2021, §2.5); TFA's elements are those with eight.
+
+At low frequencies $\mathbf w\approx\mathbf q/2$, so the two directions agree and both converge to the same solution;
+they differ in how fast, and in the oscillations near interfaces, which Willot's scheme greatly reduces (Willot 2015,
+§5). Applying either to a field $\mathbf v$ is one FFT, a $6\times6$ product per frequency and one inverse FFT
 (`ls_model.apply_on_lattice`):
 
 $$
@@ -1236,7 +1300,9 @@ $$
 w_{ji}(\boldsymbol\delta)=\sum_{\mathbf r-\mathbf s=\boldsymbol\delta}\psi_j(\mathbf r)\,\psi_i(\mathbf s)
 $$
 
-for every offset $\mathbf D$ at once (`get_moment_kernels`), then transformed to Fourier space.
+for every offset $\mathbf D$ at once (`get_moment_kernels`), then transformed to Fourier space. The weights
+$w_{ji}(\boldsymbol\delta)$ for every $\boldsymbol\delta$ at once are the cross-correlation of $\psi_j$ and $\psi_i$, one
+FFT padded to twice the partition, and the sum over $\boldsymbol\delta$ is then a matrix product.
 
 **The corrections.** Inside one partition ($\mathbf D=\mathbf 0$), group the element pairs of section 5, step 2, the
 same way:
@@ -1270,7 +1336,89 @@ The moment kernels hold one $6N_{\text{poly}}\times6N_{\text{poly}}$ block per f
 corrections one $6\times6$ block per pair of clusters in the same partition. The kernels grow with $N_{\text{poly}}^2$,
 not with the clusters: in 3D, degree 3 stores 25 times as much as degree 1.
 
-### E. The equations in the code
+### E. SCA (`sca_model.py`)
+
+SCA solves the clustered equation of section 5 as it stands: no partitions and no far-field summary. What sets it apart
+in the code is its clusters, its dense interaction, and its reference medium, which is a setting.
+
+#### E.1 The equation, in increments
+
+SCA's clusters are k-means on the elastic strain concentration, per phase over the whole cell (Liu–Bessa–Liu 2016,
+§2.2.1): one partition, so a cluster's elements may lie anywhere. Liu–Bessa–Liu write the clustered equation in
+increments from the last accepted load step $n$ (their eq. 28). With $\Delta(\cdot)=(\cdot)-(\cdot)_n$ and
+$\boldsymbol\tau=\boldsymbol\sigma-\mathbf C_0\boldsymbol\varepsilon$ (section 3, step 1):
+
+$$
+\large
+\mathbf r=\Delta\boldsymbol\varepsilon-\Delta\bar{\boldsymbol\varepsilon}+\mathbf D\,\big(\Delta\boldsymbol\sigma-\mathbf C_0\,\Delta\boldsymbol\varepsilon\big)
+\tag{SC-1}
+$$
+
+with $\mathbf D$ holding $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ for every pair of clusters (E.2). For a fixed
+$\mathbf C_0$ this is section 5's clustered equation less its residual at step $n$, which that step drove below the
+tolerance. So with $\mathbf C_0=\mathbf L_M$, SCA is FFT-TFA on one partition, at any degree since there is no other
+partition to summarize (`check.py` checks that both interactions equal the element operator averaged). The increments
+matter when $\mathbf C_0$ changes from step to step (E.3): the new $\mathbf C_0$ then acts on the step's increment only.
+
+#### E.2 The interaction, by FFT on the elements
+
+$\mathbf D$ is dense, a $6\times6$ block $\mathbf D_{ab}=\hat{\boldsymbol\Gamma}(a\leftarrow b)$ for every pair, built
+one source cluster at a time (Liu–Bessa–Liu, eq. 27): transform $b$'s indicator, multiply by $\hat{\boldsymbol\Gamma}_0$
+at every frequency, transform back, which gives the strain a unit polarization on $b$ causes at every element, and
+average it over each cluster $a$:
+
+$$
+\large
+\mathbf D_{ab}=\Big\langle\mathcal F^{-1}\big[\hat{\boldsymbol\Gamma}_0\,\hat\chi_b\big]\Big\rangle_a
+\tag{SC-2}
+$$
+
+That is $37$ FFTs of the element grid per cluster offline (one forward, 36 back), and $(6N_{\text{clust}})^2$ numbers
+stored. $\hat{\boldsymbol\Gamma}_0$ is zero at frequency zero, so every column of $\mathbf D$ averages to zero over the
+cell and the mean strain stays the imposed one: what FT-4 does for FFT-TFA comes free.
+
+#### E.3 The reference medium
+
+Unlike Spectral LS's, the clustered equation's solution depends on $\mathbf C_0$ (Liu–Bessa–Liu, Remark 4; Schneider
+2019, §2.2: averaged over clusters, $\boldsymbol\Gamma_0\mathbf C_0$ is no longer a projection). The setting `C0`
+chooses:
+
+- **`"matrix"`:** $\mathbf C_0=\mathbf L_M$, fixed, as in FFT-TFA.
+- **`"self-consistent"`:** $\mathbf C_0=c\,\mathbf I$, with $\mathbf I$ the identity tensor (Schneider 2019, §5.1),
+  and $c$ the least-squares fit to the step's macroscopic increments (Liu–Bessa–Liu's eqs. 41–44, with one constant
+  instead of two):
+
+$$
+\large
+c=\arg\min_{c'}\big\lVert\Delta\bar{\boldsymbol\sigma}-c'\,\Delta\bar{\boldsymbol\varepsilon}\big\rVert^2=\frac{\Delta\bar{\boldsymbol\sigma}:\Delta\bar{\boldsymbol\varepsilon}}{\Delta\bar{\boldsymbol\varepsilon}:\Delta\bar{\boldsymbol\varepsilon}}
+\tag{SC-3}
+$$
+
+As in their Box II, each step is solved, $c$ refitted, and the step solved again from that solution, until $c$
+changes by less than `sca_reference_tolerance` (0.1 %, theirs). $c$ starts at $2\mu_M$, the matrix's shear
+stiffness. Scaling $\mathbf C_0$ leaves $\hat{\mathbf P}_0$ unchanged, so $\hat{\boldsymbol\Gamma}_0$ for
+$c\,\mathbf I$ is $\hat{\boldsymbol\Gamma}_0$ for $\mathbf I$ divided by $c$: $\mathbf D$ is built once and
+rescaled. Liu–Bessa–Liu fit an isotropic $\mathbf C_0$ with two Lamé constants instead, which needs $\mathbf D$ in
+two parts (their eqs. 25–26), three with Moulinec–Suquet's kernel, whose highest frequencies split differently.
+
+#### E.4 Newton, by GMRES
+
+Linearizing SC-1 as FT-6 linearizes FT-5:
+
+$$
+\large
+\mathbf J\mathbf v=\mathbf v+\mathbf D\,\big[(\mathbf L_T-\mathbf C_0)\,\mathbf v\big]
+\tag{SC-4}
+$$
+
+solved by GMRES, preconditioned by each cluster's own block $\mathbf I+\mathbf D_{aa}(\mathbf L_T(a)-\mathbf C_0)$ as
+in FT-7. Liu–Bessa–Liu solve each Newton system directly (Box I), natural for the few hundred clusters they use. The
+code uses GMRES as for every method: a dense factorization costs about $\tfrac23(6N_{\text{clust}})^3$ per Newton
+iteration, a GMRES iteration one product, $2(6N_{\text{clust}})^2$. On 100 fibers in glass/PA over 25 steps, GMRES and
+the direct solve take under 0.2 s each at 16 clusters, and GMRES is 8 times faster at 256 clusters and 15 times at 512,
+with the same answers to the stopping accuracy.
+
+### F. The equations in the code
 
 | Equation | Code |
 |---|---|
@@ -1285,10 +1433,12 @@ not with the clusters: in 3D, degree 3 stores 25 times as much as degree 1.
 | FT-3: corrections | `fft_tfa_model.get_correction_blocks` |
 | FT-4: interaction | `fft_tfa_model.get_strain_change`, built by `get_interaction` |
 | FT-6, FT-7: Newton system, preconditioner | `fft_tfa_model.FFTTFASolver.get_newton_correction`, `get_own_strain_change` |
+| SC-1, SC-3, SC-4: SCA's residual, reference stiffness, Newton | `sca_model.SCASolver`, `fit_reference_scale` |
+| SC-2: SCA's interaction $\mathbf D$ | `sca_model.get_interaction` |
 | Newton loop, line search, GMRES | `newton.Solver`, `newton.solve_by_gmres` |
 | Clusters | `cell.cluster_by_phase`, `cell.cluster_by_k_means`, `cell.get_clusters` |
 
-### F. Names in the code
+### G. Names in the code
 
 | Here | Code |
 |---|---|
@@ -1302,8 +1452,9 @@ not with the clusters: in 3D, degree 3 stores 25 times as much as degree 1.
 | $\mathbf K_{ji}(\mathbf D)$ | `kernels`; in Fourier space `moment_kernels` |
 | $\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)$ | `correction_blocks` |
 | $\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$, its own blocks | `get_strain_change`, `own_strain_change` |
+| SCA's $\mathbf D$; $c$ of $\mathbf C_0=c\,\mathbf I$ | `D`; `reference_scale` |
 
-### G. Symbols
+### H. Symbols
 
 A capital subscript is a name, not an index: $M$ matrix, $I$ inclusion, $T$ tangent; $0$ marks the reference medium.
 
@@ -1318,6 +1469,7 @@ A capital subscript is a name, not an index: $M$ matrix, $I$ inclusion, $T$ tang
 | $\boldsymbol\Gamma_0(\alpha\leftarrow\beta)$ | element kernel: strain at element $\alpha$ per unit polarization on element $\beta$ (section 3) |
 | $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ | averaged kernel between any two groups of elements (section 5): clusters, partitions, or one of each |
 | $\hat{\boldsymbol\Gamma}_{\text{far}},\ \hat{\boldsymbol\Gamma}_{\text{corr}},\ \hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$ | far field, corrections, FFT-TFA's interaction (FT-2 to FT-4) |
+| $\mathbf D$; $\mathbf I$ | SCA's interaction, $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ for every pair of clusters (SC-2); the identity tensor |
 | $\chi_a(\alpha)$ | indicator of cluster $a$: 1 if element $\alpha$ lies in $a$, else 0 |
 | $\lvert a\rvert,\ \lvert A\rvert$ | number of elements of cluster $a$, of partition $A$ (the same for every partition) |
 | $v(a)$ | volume fraction of cluster $a$ in its partition, $\lvert a\rvert/\lvert A\rvert$ |

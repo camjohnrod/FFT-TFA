@@ -25,6 +25,7 @@ figure_style = {'font.family': 'serif', 'font.serif': ['cmr10'], 'mathtext.fonts
 method_styles = {
     "Reference":   {'color': 'black', 'linestyle': '-', 'zorder': 0},
     "FFT-TFA":     {'color': '#009E73', 'linestyle': (0, (6, 2, 1.5, 2)), 'zorder': 2},
+    "SCA":         {'color': '#D55E00', 'linestyle': (0, (6, 1.5, 1.5, 1.5, 1.5, 1.5)), 'zorder': 2.5},
     "Spectral LS": {'color': '#0072B2', 'linestyle': (0, (1, 1.6)), 'dash_capstyle': 'round', 'zorder': 3},
     "TFA":         {'color': '#CC79A7', 'linestyle': (0, (5, 3)), 'linewidth': 1.4, 'zorder': 4},
 }
