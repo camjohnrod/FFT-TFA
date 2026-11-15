@@ -59,7 +59,7 @@ def apply_sparse(matrix, rows):
 
 ## ------- Residual Size ------- ##
 
-# The tensor norm from Voigt components. A strain's engineering shear (ER-2) is twice the tensor shear, so its squares
+# The tensor norm from Voigt components. A strain's engineering shear (lecture, appendix I) is twice the tensor shear, so its squares
 # are weighted by ½; a stress holds each shear once, while the tensor has it twice, so its squares are weighted by 2.
 tensor_norm_weights = np.array([1, 1, 1, 0.5, 0.5, 0.5])
 stress_norm_weights = 1 / tensor_norm_weights

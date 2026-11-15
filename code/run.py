@@ -95,8 +95,8 @@ def preview():
 
 def describe_storage(entry, clusters):
     """What an entry stores, in MB: FFT-TFA's moment kernels (one 6p × 6p block per frequency, p the polynomials of its
-    degree) and one 6 × 6 block per pair of clusters in the same partition (FT-3), SCA's dense D (and with a
-    self-consistent C0, D's parts) and TFA's dense P, Spectral LS's kernel and LS-24's operator."""
+    degree) and one 6 × 6 block per pair of clusters in the same partition (FT-2), SCA's dense D (and with a
+    self-consistent C0, D's parts) and TFA's dense P, Spectral LS's kernel and LS-10's operator."""
     mesh = clusters.mesh
     partition_shape = mesh.partition_shape
     frequencies = partition_shape[0] * partition_shape[1] * (partition_shape[2] // 2 + 1)     # rfftn's half

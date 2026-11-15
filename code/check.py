@@ -8,7 +8,7 @@ change to the code:
 Each check prints PASS or FAIL with the number it judged. The problems are in check_problems below. The checks:
 - On every problem, every method must complete every load step and, once results are saved, reproduce them bit for
   bit.
-- On every problem, FFT-TFA's interaction at full degree (FT-2, FT-3), whose polynomials span every function on a
+- On every problem, FFT-TFA's interaction at full degree (FT-4, FT-2), whose polynomials span every function on a
   partition, must equal the element-level LS operator averaged over its clusters, computed here from the elements: a
   wrong kernel, moment, pair count, correction block or average fails. So must SCA's D (SC-2), on its clusters over
   the whole cell, which makes SCA with C0 = L_m FFT-TFA on one partition. And at FFT-TFA's own degree, a uniform
@@ -280,7 +280,7 @@ def get_interaction_error(clusters, get_strain_change):
     """A method's interaction, get_strain_change(polarization) with C0 = L_m, against the element-level LS operator:
     random polarizations, one per cluster, spread over its elements, strains Γ0 * τ by FFT on the element lattice (the
     element kernel), averaged over each cluster's elements. The largest relative difference. FFT-TFA at full degree
-    represents every partition's polarization exactly (FT-4 then removes a mean that is zero to round-off), and SCA's D
+    represents every partition's polarization exactly (FT-3 then removes a mean that is zero to round-off), and SCA's D
     is this operator averaged, so both must agree with it to round-off."""
     shape, matrix_L = clusters.mesh.element_shape, cell.get_matrix_L()
     polarization = 1e6 * np.random.default_rng(0).standard_normal((clusters.cluster_count, 6))
@@ -363,7 +363,7 @@ def get_sca_clusters():
 
 def to_tensor(voigt, shear_factor):
     """A symmetric 3 × 3 tensor from Voigt components (11, 22, 33, 12, 23, 13), the shears times shear_factor: ½ for an
-    engineering strain (ER-2), 1 for a stress."""
+    engineering strain (lecture, appendix I), 1 for a stress."""
     (xx, yy, zz), (xy, yz, xz) = voigt[:3], shear_factor * voigt[3:]
     return np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]])
 
@@ -410,7 +410,7 @@ def get_self_consistent_error():
 def get_one_partition_error():
     """SCA with C0 = L_m against FFT-TFA on one partition, both on SCA's clusters along the load path: the same
     clustered equation by two codes, SCA's dense D in increments (SC-1) and FFT-TFA's corrections in total form
-    (FT-4), so they agree to the stopping accuracy. The larger of the macroscopic and the cluster stress differences."""
+    (FT-3), so they agree to the stopping accuracy. The larger of the macroscopic and the cluster stress differences."""
     clusters = get_sca_clusters()
     sca = solve_load_path(sca_model.SCASolver(clusters, "matrix"))
     fft_tfa = solve_load_path(fft_tfa_model.FFTTFASolver(clusters, 0))

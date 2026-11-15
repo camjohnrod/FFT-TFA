@@ -1,12 +1,12 @@
 """TFA, the baseline (transformation field analysis; notes/fft_tfa_lecture.md appendix C,
-equations ER-*).
+equations TFA-*).
 
 Each cluster has one uniform eigenstrain μ and one material update at its average strain ε. Offline, a finite-element
 model of the whole composite gives two influence functions on the clusters:
-  E  the cluster-average strain per unit macro strain (ER-1), clusters × 6 rows by 6 columns;
-  P  the cluster-average strain per unit eigenstrain in each cluster (ER-24), a dense (6 × clusters)² matrix.
-Online, each load step solves r = ε − E ε̄ − P μ(ε) = 0 (ER-4) by Newton, each correction by GMRES on the matrix-free
-Jacobian J v = v − P (H_μ v) of ER-21. E and P are exact for the composite in elasticity, but P is dense: its memory and
+  E  the cluster-average strain per unit macro strain (TFA-1), clusters × 6 rows by 6 columns;
+  P  the cluster-average strain per unit eigenstrain in each cluster (TFA-2), a dense (6 × clusters)² matrix.
+Online, each load step solves r = ε − E ε̄ − P μ(ε) = 0 (TFA-3) by Newton, each correction by GMRES on the matrix-free
+Jacobian J v = v − P (H_μ v) of TFA-5. E and P are exact for the composite in elasticity, but P is dense: its memory and
 its products grow with the square of the clusters. Both come from one factorization of the FE stiffness K and are
 cached in code/cache/, since P can take minutes.
 """
@@ -86,7 +86,7 @@ def get_element_dofs(mesh):
     return (3 * element_nodes[:, :, None] + np.arange(3)).reshape(-1, 24)
 
 class FEModel:
-    """The periodic FE model of the composite on a mesh: its element matrices and the global operators of ER-24."""
+    """The periodic FE model of the composite on a mesh: its element matrices and the global operators of TFA-2."""
     def __init__(self, mesh):
         self.mesh = mesh
         self.dof_count = 3 * mesh.element_count
@@ -111,12 +111,12 @@ class FEModel:
         return -assemble_blocks(self.get_F_elements(), self.element_dofs, macro_strain_columns, (self.dof_count, 6))
 
     def get_F_eigenstrain(self, clusters):
-        """F_μ in ER-24: nodal loads per unit cluster eigenstrain, one block of six columns per cluster."""
+        """F_μ in TFA-2: nodal loads per unit cluster eigenstrain, one block of six columns per cluster."""
         return assemble_blocks(self.get_F_elements(), self.element_dofs, get_block_indices(clusters.element_cluster),
                                (self.dof_count, 6 * clusters.cluster_count))
 
     def get_cluster_averaging_operator(self, clusters):
-        """A_ε in ER-24: maps nodal displacements to cluster-average strain."""
+        """A_ε in TFA-2: maps nodal displacements to cluster-average strain."""
         partition_volume = self.mesh.elements_per_partition * self.mesh.element_volume
         cluster_volume = clusters.share * partition_volume
         element_blocks = self.integrated_B / cluster_volume[clusters.element_cluster, None, None]
@@ -161,7 +161,7 @@ def compute_E_and_P(clusters):
     start_time, start_memory = time.perf_counter(), get_memory_MB("VmRSS")
     model = FEModel(clusters.mesh)
     solve = get_influence_function_solver(model, clusters)
-    # ER-1: E is the applied macro strain plus the fluctuation it causes; P is A_ε K⁻¹ F_μ (ER-24).
+    # TFA-1: E is the applied macro strain plus the fluctuation it causes; P is A_ε K⁻¹ F_μ (TFA-2).
     E = np.tile(np.eye(6), (clusters.cluster_count, 1)) + solve(model.get_F_macro_strain())
     P = solve(model.get_F_eigenstrain(clusters))
     return {"E": E, "P": P, "build_seconds": time.perf_counter() - start_time,
@@ -226,7 +226,7 @@ class TFASolver(Solver):
         # SF-5's free compliance: that of the cell's elastic stiffness, the average of L E over the clusters.
         elastic_stiffness = clusters.average(clusters.materials.L @ self.E.reshape(-1, 6, 6))
         self.free_compliance = get_free_compliance(elastic_stiffness, self.stress_free)
-        # Set at the start of each step (start_step): b = E ε̄, the strain the macro strain alone causes (ER-4), and
+        # Set at the start of each step (start_step): b = E ε̄, the strain the macro strain alone causes (TFA-3), and
         # P μₙ, the strain the accepted eigenstrains cause.
         self.b = None
         self.induced_strain_history = None
@@ -260,7 +260,7 @@ class TFASolver(Solver):
 
     def evaluate(self, strain, macro_strain, plastic_history):
         """Updates the material at the given strain, solves the clusters that stay elastic exactly, and returns the
-        residual r = ε - b - Pμ(ε) of ER-4, less SF-5's freed strain, which is then zero in every elastic cluster.
+        residual r = ε - b - Pμ(ε) of TFA-3, less SF-5's freed strain, which is then zero in every elastic cluster.
 
         An elastic cluster's eigenstrain stays at its accepted value, so setting its strain to b + Pμ (and the freed
         strain, which depends on the strains only through μ) zeroes its residual without changing μ. Yielding clusters
@@ -285,7 +285,7 @@ class TFASolver(Solver):
         return Evaluation(strain, plastic_state, stress, strain - self.b - induced_strain - freed_strain)
 
     def get_newton_correction(self, current, plastic_history):
-        """Solves J δε = -r (ER-18) by GMRES, with the matrix-free product J v = v - P (H_μ v) of ER-21, less the
+        """Solves J δε = -r (TFA-4) by GMRES, with the matrix-free product J v = v - P (H_μ v) of TFA-5, less the
         freed strain's change (SF-5). H_μ is zero outside the yielding clusters, so each product reads only their
         columns of P."""
         materials, average = self.clusters.materials, self.clusters.average

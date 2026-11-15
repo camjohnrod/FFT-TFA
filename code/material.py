@@ -3,9 +3,9 @@
 Each cluster (cell.Clusters) has one strain and one plastic history. From them, radial_return gives the cluster's
 stress and its new plastic strain, which is its eigenstrain μ: the strain the material no longer resists elastically,
 σ = L (ε − μ). Newton's method also needs how μ changes with ε, the sensitivity H_μ = ∂μ/∂ε, which gives the
-algorithmic stiffness L_t = dσ/dε = L (I − H_μ). Equations ER-* are in notes/fft_tfa_lecture.md, appendix A.
+algorithmic stiffness L_t = dσ/dε = L (I − H_μ). Equations ML-* are in notes/fft_tfa_lecture.md, appendix A.
 
-Strains and stresses are rows of 6 Voigt components (11, 22, 33, 12, 23, 13), shears as engineering shear γ = 2ε (ER-2),
+Strains and stresses are rows of 6 Voigt components (11, 22, 33, 12, 23, 13), shears as engineering shear γ = 2ε (lecture, appendix I),
 one row per cluster.
 """
 
@@ -15,7 +15,7 @@ import numpy as np
 ## ------- Plastic History ------- ##
 
 class PlasticState(NamedTuple):
-    """Every cluster's plastic history: the history accepted at the end of the last load step (z_n of ER-3), or a
+    """Every cluster's plastic history: the history accepted at the end of the last load step (z_n of ML-1), or a
     candidate for the current one."""
     plastic_strain: np.ndarray                # clusters × 6: the eigenstrain μ
     accumulated_plastic_strain: np.ndarray    # clusters: the equivalent plastic strain, which sets the hardening
@@ -87,7 +87,7 @@ def get_flow_direction(deviatoric_stress, equivalent_stress):
     return flow_direction
 
 def radial_return(strain, materials, plastic_history):
-    """Every cluster's new plastic state and stress at the given strains, from the accepted history (ER-3).
+    """Every cluster's new plastic state and stress at the given strains, from the accepted history (ML-1).
 
     Step 1 (get_trial_state): the elastic trial stress. Clusters below yield keep it and their plastic history. Step 2,
     in the yielding clusters: the plastic strain grows by Δp n along the flow direction, and the deviatoric stress
@@ -117,7 +117,7 @@ def radial_return(strain, materials, plastic_history):
 ## ------- Derivatives for Newton ------- ##
 
 def get_eigenstrain_sensitivity(strain, materials, plastic_history):
-    """H_μ = ∂μ/∂ε at the given strains (ER-8), one 6 × 6 block per cluster, zero in clusters that stay elastic.
+    """H_μ = ∂μ/∂ε at the given strains (ML-2), one 6 × 6 block per cluster, zero in clusters that stay elastic.
 
     It has two parts: a change of strain along the flow direction changes how far the trial stress lies beyond yield
     (radial part), and one across it turns the flow direction (rotational part)."""

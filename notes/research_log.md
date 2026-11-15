@@ -195,3 +195,25 @@ Field errors against the reference are not computed yet (macroscopic errors are)
 different resolution is not settled: candidates are block averages at a scale every mesh resolves (on points chosen by
 the reference's phases alone), and element errors on the fine grid split into elements whose phase matches the
 reference's and elements whose phase does not.
+
+## Measurements behind the lecture (moved from it, 2026-11-15)
+
+The lecture states these qualitatively; the numbers, as they were measured (several on older code, before the
+self-consistent SCA fitted two Lamé constants), are kept here.
+
+- **C0 above every phase (lecture, section 4).** Measured on 100 glass fibers in PA (contrast 34), biaxial cyclic, degree 3: stiff at every step, but 8–25 times further from Spectral LS on the same mesh than with $\mathbf L_M$ (62 % against 2.5 % rms in σ̄11 with 4² partitions, 6.3 % against 0.81 % with 32²), and 2–3 times slower, since the Jacobian is positive only by about $\mathbf L_T/\mathbf C_0$; a far field below degree 3 can even leave a step without a solution.
+- **The elastic bound in practice (lecture, 5.1).** Measured (16 spheres at 25 %, glass/PA, 64³ elements, the first load step, $\bar\varepsilon_{11}=0.08\,\%$; $\bar{\boldsymbol\varepsilon}^{\mathsf T}\Delta\bar{\boldsymbol\sigma}$ against Spectral LS on the same mesh, and $\Delta\bar\sigma_{11}/\bar\sigma_{11}$); the self-consistent SCA row is from the old fit
+  C0 = c I:
+
+| Entry | $\bar{\boldsymbol\varepsilon}^{\mathsf T}\Delta\bar{\boldsymbol\sigma}$ | $\Delta\bar\sigma_{11}/\bar\sigma_{11}$ (%) |
+|---|---|---|
+| FFT-TFA, phase parts, degree 3, 2³ / 4³ / 8³ / 16³ partitions | soft at each | −3.84, −3.55, −2.34, −1.76 |
+| SCA, $\mathbf C_0=\mathbf L_M$, 64 / 256 / 1024 k-means clusters | soft at each | −2.93, −2.21, −1.71 |
+| SCA, self-consistent $\mathbf C_0=c\,\mathbf I$, 64 / 256 / 1024 clusters | stiff at each | +5.18, +3.25, +1.98 |
+| Spectral LS on 16³ / 32³ elements | stiff at each | +12.98, +2.35 |
+
+  Every $\mathbf C_0=\mathbf L_M$ entry is soft and monotone, as HS-3 says (the k-means sequence happens to be, with no guarantee); the self-consistent $\mathbf C_0$ lies between the phases, so $W$ has no sign there; the coarse meshes are not restrictions of the 64³ image's space, so no bound applies to them, and their error is the mesh's. FFT-TFA with four matrix clusters per partition gives the same four numbers as with one: in elasticity the matrix carries no polarization, so its clusters are invisible (step 2 of section 4).
+- **A cut laminate (lecture, section 10).** A layer whose interfaces cut partitions 6 elements across (`check.py`'s cut laminate refined to 54² elements, 9² partitions) has its worst cluster 24 % off at degree 0, 8.5 % at degree 1, 3.0 % at degree 3, 0.6 % at degree 4, and exact from degree 5. The polarization steps across the cut partitions, which line up along the layer, so their errors add up instead of decaying. Degree 5 follows any profile across 6 elements.
+- **The far floor (lecture, section 10).** With Moulinec–Suquet's kernel the floor is ten times higher, a few hundredths: it comes from the element kernel's high-frequency content, which varies from element to element even far from its source and which polynomials smooth over, and Willot's kernel has less of it.
+- **Opposite signs (lecture, section 10).** Measured on 100 random glass fibers in PA (contrast 34), biaxial cyclic, 64² partitions of 4 × 4 elements, against Spectral LS on the same mesh, each part alone by refining the others to one cluster per element at full degree, and signed by each step's stiffness. One polarization per inclusion cluster (A2) errs soft at 96–100 % of the steps (0.48 % rms in σ̄11, −1.9 % in every elastic step); one state per matrix cluster (A1) errs stiff at 84–96 % (0.15 %); the far field at degree 3 errs stiff at every step (0.10 %). The parts add up, to 0.06 % rms.
+- **GMRES against a direct solve for SCA (lecture, E.4).** On 100 fibers in glass/PA over 25 steps, GMRES and the direct solve take under 0.2 s each at 16 clusters, and GMRES is 8 times faster at 256 clusters and 15 times at 512, with the same answers to the stopping accuracy.

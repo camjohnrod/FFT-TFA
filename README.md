@@ -101,7 +101,7 @@ grows with the square of their clusters, and a fine reference can take half an h
 | degree | of the polynomials FFT-TFA summarizes each partition by; `"full"` is exact |
 | entry, scheme | one configured run of a method (a line in the table); a list of a method's entries, drawn as one line |
 | offline, online | building a method (its clusters and operators), and solving the load path with it |
-| LS-*, FT-*, SC-*, ER-*, SF-* | equation labels in the lecture, which the code's comments cite |
+| LS-*, FT-*, ML-*, TFA-*, SC-*, SF-* | equation labels in the lecture, which the code's comments cite |
 
 ## Reading the code
 

@@ -18,7 +18,7 @@ equation exactly, on k-means clusters over the whole cell (one partition), throu
 
 The theory is one note, `notes/fft_tfa_lecture.md`: FFT-TFA in its body; the material law, Spectral LS, TFA, SCA and
 stress-free directions in its appendix. Read the relevant section before changing solver math; keep it one file. Code
-names map onto its symbols and its numbered equations (FT-*, LS-*, SC-*, ER-*, SF-*), which code comments cite.
+names map onto its symbols and its numbered equations (LS-*, FT-*, HS-*, ML-*, TFA-*, SC-*, SF-*), which code comments cite.
 `notes/research_log.md` is the dated record of findings, open questions and what was tried and set aside; read it
 before proposing a direction, and don't redo what it sets aside without a new reason.
 
@@ -48,7 +48,7 @@ before proposing a direction, and don't redo what it sets aside without a new re
   features to that shape.
 - **FFT-TFA is separate from Spectral LS:** `fft_tfa_model.py` uses only `ls_model`'s shared code (the element kernel,
   `apply_on_lattice`, `to_fourier_blocks`) and `newton`'s block helpers. Its reference medium is always the matrix (no
-  setting; lecture, section 4). Its interaction: each partition's own clusters exactly (the corrections, FT-3), every
+  setting; lecture, section 4). Its interaction: each partition's own clusters exactly (the corrections, FT-2), every
   other partition through its polynomial moments up to `degree` (`"full"` is exact), by one FFT; the corrections act
   on the polarization's deviation from its cell mean, so a uniform polarization causes no strain.
 - **Clusters lie inside partitions:** k-means inside each partition's part in each phase, or those parts themselves,
@@ -59,10 +59,10 @@ before proposing a direction, and don't redo what it sets aside without a new re
   features share it, never one per entry, so the comparison stays fair. TFA is FE whatever it says. check.py runs
   every problem on Willot's and the laminate and the fiber again on Moulinec–Suquet's.
 - **Spectral LS's reference stiffness is a setting** (`C0`, `"midpoint"` or `"matrix"`): its answer does not depend
-  on it, but its speed does, so both are kept and LS-24 judges convergence the same way for either.
+  on it, but its speed does, so both are kept and LS-10 judges convergence the same way for either.
 - **Fairness between methods:** each gets its best setting from the same principles, justified from the LS
   literature only (no FE papers), all share the Newton–Krylov settings and thread count, and all stop at the same
-  accuracy (LS-24; FFT-TFA's residual is already in matrix units, FT-5; SCA's is judged as it is), which `check.py`
+  accuracy (LS-10; FFT-TFA's residual is already in matrix units, FT-5; SCA's is judged as it is), which `check.py`
   checks. SCA uses Newton–GMRES too, though Liu–Bessa–Liu solve directly: GMRES is faster past a few dozen clusters
   (lecture E.4). The papers are in `references/`; cite only papers read cover to cover, never from a title or
   abstract.
@@ -74,7 +74,7 @@ before proposing a direction, and don't redo what it sets aside without a new re
 - **Small codebase:** one file per method and concept, the current twelve; don't add modules without asking, and
   don't bring back what the cleanups removed (research log, "Tried and set aside") without being asked. Field error
   measures against the reference are not settled (a fair field error across different meshes).
-- **LS-24 is the least intuitive part of the solvers.** When it comes up, explain it from the lecture's appendix B.3
+- **LS-10 is the least intuitive part of the solvers.** When it comes up, explain it from the lecture's appendix B.3
   before building on it.
 
 ## Running the code
@@ -127,9 +127,9 @@ The README's "Reading the code" table says what each module holds, in reading or
 (elements and partitions, shapes along [z, y, x]), `cell.Clusters` (its mesh, the material states, ordered by
 partition), `run.LoadPathResult` (a solver's results along the load path; the reference's too).
 
-A method is a `newton.Solver` subclass with `evaluate` (its residual: LS-18, FT-5, SC-1, ER-4) and
-`get_newton_correction` (LS-20 with LS-28, FT-6, SC-4, ER-21). `start_step` (TFA's elastic predictor),
-`measure_residual` (Spectral LS's LS-24), `divergence_limit` (TFA's) and `solve_step` (SCA's self-consistent loop) may
+A method is a `newton.Solver` subclass with `evaluate` (its residual: LS-7, FT-5, SC-1, TFA-3) and
+`get_newton_correction` (LS-8 with LS-9, FT-6, SC-4, TFA-5). `start_step` (TFA's elastic predictor),
+`measure_residual` (Spectral LS's LS-10), `divergence_limit` (TFA's) and `solve_step` (SCA's self-consistent loop) may
 change. `run.py` solves; `report.py` saves a run and draws it, only from what was saved (`run.json`, `results.npz`),
 which is why `replot` needs no solve: `results.npz` holds the macroscopic stress at every step and maps of the
 mid-thickness layer (cluster, partition, phase; stress and accumulated plastic strain at the turning points), so any
@@ -150,7 +150,7 @@ be replotted.
   orphans every existing cache (a reference can take 30 min); change them only with a version bump, on purpose.
   `report.draw_run` reads run.json files without `unloaded_directions` or `element_kernel` as `"fixed"` and
   Moulinec–Suquet's.
-- **Strain convention (ER-2):** engineering shear, `(ε11, ε22, ε33, 2ε12, 2ε23, 2ε13)`; `newton.tensor_norm_weights`
+- **Strain convention (lecture, appendix I):** engineering shear, `(ε11, ε22, ε33, 2ε12, 2ε23, 2ε13)`; `newton.tensor_norm_weights`
   and `stress_norm_weights` give tensor norms of strains and stresses.
 - **Spectral LS projects each Newton correction by P0** once CG stops: outside P0's range J is not symmetric, and the
   round-off CG leaves there would build up over Newton iterations until CG stalls (strongly plastic steps with lateral
@@ -158,7 +158,7 @@ be replotted.
 - **Under stress-free loading** the stiff inclusion carries far less stress, so a strain residual is a larger share
   of its stress: `check.py`'s stress-free problems run at a tighter `convergence_tolerance`. SCA's self-consistent C0
   with one cluster per phase settles too slowly there (more than `sca_max_reference_updates` solves).
-- **Convergence (LS-24):** Spectral LS's residual is a strain of its reference medium, so convergence and the line
+- **Convergence (LS-10):** Spectral LS's residual is a strain of its reference medium, so convergence and the line
   search judge M_m⁻¹ r (the correction an all-matrix cell would need, `measure_residual`), while the Newton correction
   still solves for r. `get_relative_residual` weights shear by ½ and divides by the imposed strain's norm, never by
   less than `residual_strain_scale_floor`.

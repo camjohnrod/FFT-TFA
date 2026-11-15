@@ -6,9 +6,9 @@ that every pair of clusters fills. FFT-TFA uses the Lippmann–Schwinger equatio
 matrix's elastic stiffness, C0 = L_m, split by distance:
   - far field: each partition's polarization is summarized by its polynomial moments up to `degree` (equivalently, its
     best-fitting polynomial over the partition), and every partition acts on every other through these summaries, by
-    one FFT on the partition lattice (FT-2);
+    one FFT on the partition lattice (FT-4);
   - near field: between the clusters of the same partition, where the interaction is sharpest, the far field's share is
-    replaced by the exact interaction (the corrections, FT-3).
+    replaced by the exact interaction (the corrections, FT-2).
 Degree 0 summarizes a partition by its mean polarization. Raising the degree converges to the exact clustered equation,
 which degree "full" reaches: its polynomials span every function on a partition's elements. The cost grows with the
 partitions and the polynomials, not with the elements.
@@ -83,7 +83,7 @@ def get_cluster_moments(clusters, basis):
     np.add.at(moments, clusters.element_cluster, basis[z % block[0], y % block[1], x % block[2]])
     return moments
 
-## ------- Far Field: Moment Kernels (FT-2) ------- ##
+## ------- Far Field: Moment Kernels (FT-4) ------- ##
 
 def get_moment_kernels(element_Gamma, mesh, basis):
     """How each partition's moments act on every other's, at every partition offset D = A − B, shape
@@ -111,7 +111,7 @@ def get_moment_kernels(element_Gamma, mesh, basis):
         kernels[D] = (weights @ Gamma.reshape(-1, 36)).reshape(p, p, 36)
     return kernels.reshape(*partition_shape, p, p, 6, 6).transpose(0, 1, 2, 3, 5, 4, 6)
 
-## ------- Near Field: Corrections inside each Partition (FT-3) ------- ##
+## ------- Near Field: Corrections inside each Partition (FT-2) ------- ##
 
 class PartitionSlots(NamedTuple):
     """The clusters laid out partition by partition, so that every partition can be handled at once: a partition's
@@ -142,7 +142,7 @@ def get_partition_slots(clusters):
     return PartitionSlots(first_cluster, occupied, indicators, element_count, cluster_slot)
 
 def get_correction_blocks(clusters, element_Gamma, moments, self_kernels):
-    """FT-3's corrections C, for every pair of clusters a, b in the same partition, as sparse 6 × 6 blocks, clusters ×
+    """FT-2's corrections C, for every pair of clusters a, b in the same partition, as sparse 6 × 6 blocks, clusters ×
     clusters: the exact interaction Γ(a←b) minus the far field's share of it.
 
     Γ(a←b) averages the element kernel over every pair of their elements. Grouped by the elements' offset δ inside the
@@ -180,7 +180,7 @@ def get_correction_blocks(clusters, element_Gamma, moments, self_kernels):
                            get_block_indices(slots.first_cluster[partition] + source_slot),
                            (6 * clusters.cluster_count, 6 * clusters.cluster_count))
 
-## ------- Interaction (FT-2, FT-4) ------- ##
+## ------- Interaction (FT-4, FT-3) ------- ##
 
 class Interaction(NamedTuple):
     """FFT-TFA's operators on its clusters, built once (get_interaction)."""
@@ -189,7 +189,7 @@ class Interaction(NamedTuple):
     to_moments: scipy.sparse.csr_matrix          # every partition's polarization moments, from the clusters'
     from_moments: scipy.sparse.csr_matrix        # each cluster's average of its partition's polynomial strain field
     moment_kernels: np.ndarray                   # one 6p × 6p block per partition-lattice frequency
-    correction_blocks: scipy.sparse.bsr_matrix   # FT-3's C inside each partition, stored as 6 × 6 blocks
+    correction_blocks: scipy.sparse.bsr_matrix   # FT-2's C inside each partition, stored as 6 × 6 blocks
     own_strain_change: np.ndarray                # FT-7's own blocks, one 6 × 6 block per cluster
 
 def get_own_strain_change(clusters, moments, self_kernels, correction_blocks):
@@ -198,7 +198,7 @@ def get_own_strain_change(clusters, moments, self_kernels, correction_blocks):
     Σ_b C_ab the sum of a's row of corrections, it has four terms:
       G_aa = Σ_ji (m_j(a) / n_a) K_ji(0) m_i(a)    the far field's self-term, a's moments through its own partition
            + C_aa                                  a's own correction
-           − Σ_r w_r C_ra                          the change of FT-4's cell mean (the far field adds nothing to it)
+           − Σ_r w_r C_ra                          the change of FT-3's cell mean (the far field adds nothing to it)
            − w_a (S(a) − Σ_q w_q S(q))             the corrections act on τ − ⟨τ⟩, and ⟨τ⟩ holds w_a τ_a."""
     own = np.einsum('aj,ai,jxiy->axy', moments / clusters.element_counts[:, None], moments, self_kernels)
     weights = clusters.share / clusters.partition_count
@@ -246,12 +246,12 @@ def get_interaction(clusters, degree):
                        get_own_strain_change(clusters, moments, self_kernels, correction_blocks))
 
 def get_strain_change(interaction, polarization):
-    """FT-2 with FT-4: the strain every cluster takes from every cluster's polarization, ε_a = ε̄ − (this).
+    """FT-4 with FT-3: the strain every cluster takes from every cluster's polarization, ε_a = ε̄ − (this).
 
     Far field: every partition's polarization moments, by FFT through the moment kernels, read by each cluster through
     its own moments. Near field: the corrections inside each partition, applied to the polarization's deviation from
     its cell mean (a uniform polarization causes no strain, so it must not reach the corrections). Then less the cell
-    mean, so the mean strain stays the imposed one (FT-4)."""
+    mean, so the mean strain stays the imposed one (FT-3)."""
     clusters = interaction.clusters
     partition_moments = (interaction.to_moments @ polarization).reshape(clusters.partition_count, -1)
     far = interaction.from_moments @ apply_on_lattice(interaction.moment_kernels, partition_moments).reshape(-1, 6)
@@ -271,7 +271,7 @@ class FFTTFASolver(Solver):
         self.free_compliance = get_free_compliance(self.interaction.matrix_L, self.stress_free)
 
     def evaluate(self, strain, macro_strain, plastic_history):
-        """FT-5: r = ε − ε̄ + (FT-2's strain change), with each cluster's polarization (FT-1)
+        """FT-5: r = ε − ε̄ + (FT-4's strain change), with each cluster's polarization (FT-1)
         τ_a = (L_a − C0) ε_a − L_a μ_a, which is −L_m μ_a in a matrix cluster, and its eigenstrain μ_a from the radial
         return at its strain. With stress-free components, ε̄ is joined by the mean strain the cell takes there
         (SF-2)."""
@@ -283,7 +283,7 @@ class FFTTFASolver(Solver):
         return Evaluation(strain, plastic_state, stress, residual)
 
     def get_newton_correction(self, current, plastic_history):
-        """FT-6: J v = v + (FT-2's strain change of the polarization change T v), with T = L_t − C0 and L_t each
+        """FT-6: J v = v + (FT-4's strain change of the polarization change T v), with T = L_t − C0 and L_t each
         cluster's algorithmic stiffness; with stress-free components, less the mean strain T v frees (SF-2). GMRES
         solves it with J's diagonal blocks inverted (block-Jacobi, FT-7) on the right."""
         interaction, clusters, free_compliance = self.interaction, self.clusters, self.free_compliance

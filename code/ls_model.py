@@ -70,7 +70,7 @@ def get_direction_strain_matrix(directions):
 def get_element_kernel(lattice_shape, C0):
     """The element kernel P0 = Γ0 C0 on a lattice of the given shape [z, y, x] over the cubic cell, as offset blocks,
     discretized as config.element_kernel says. Both discretizations take the continuum form at every frequency ξ,
-    P̂0 = Γ̂0 C0 (LS-21) with Γ̂0 = B (Bᵀ C0 B)⁻¹ Bᵀ and B = B(n), and P̂0(0) = 0 (LS-9). They differ in the direction n
+    P̂0 = Γ̂0 C0 (LS-4) with Γ̂0 = B (Bᵀ C0 B)⁻¹ Bᵀ and B = B(n), and P̂0(0) = 0 (LS-5). They differ in the direction n
     and at a few of the highest frequencies, with q = 2π ξ / N the frequency per element along each axis:
 
     - "Moulinec-Suquet" (1998): n = ξ / |ξ|. Along an axis with an even count N, Γ̂0 is not even in a component equal
@@ -110,14 +110,14 @@ def get_P0_transformed(lattice_shape, C0):
     """P̂0 at every frequency of a lattice of the given shape: the element kernel, as Spectral LS applies it."""
     return to_fourier_blocks(get_element_kernel(lattice_shape, C0), lattice_shape)
 
-## ------- Residual in Matrix Units (LS-24) ------- ##
+## ------- Residual in Matrix Units (LS-10) ------- ##
 
 def get_matrix_units_operator(P0_transformed, C0, matrix_L):
-    """M̂_m⁻¹ per frequency, which turns Spectral LS's residual into matrix units (LS-24, lecture appendix B.3).
+    """M̂_m⁻¹ per frequency, which turns Spectral LS's residual into matrix units (LS-10, lecture appendix B.3).
 
     The LS residual r is a strain of the reference medium, so its size depends on C0. Convergence is judged instead on
     the strain correction an all-matrix cell would need to cancel r, M_m⁻¹ r, with M_m the Newton Jacobian of a
-    homogeneous cell of matrix stiffness C_m (LS-20 with L_t = C_m everywhere):
+    homogeneous cell of matrix stiffness C_m (LS-8 with L_t = C_m everywhere):
       M̂_m(ξ) = I − P̂0(ξ) (I − C0⁻¹ C_m),
     a fixed Fourier operator like P0, so the tolerance means the same whatever C0."""
     matrix_cell_jacobian = np.eye(6) - P0_transformed @ (np.eye(6) - np.linalg.solve(C0, matrix_L))
@@ -131,12 +131,12 @@ def get_element_clusters(elements):
     return get_clusters(mesh, cluster_by_phase(mesh))
 
 class SpectralLSSolver(Solver):
-    """Spectral LS: the LS equation LS-18 on the elements, each element its own partition and cluster. Newton on the
-    element strains, each correction by conjugate gradients (LS-28), convergence judged in matrix units (LS-24).
+    """Spectral LS: the LS equation LS-7 on the elements, each element its own partition and cluster. Newton on the
+    element strains, each correction by conjugate gradients (LS-9), convergence judged in matrix units (LS-10).
     clusters: one per element (get_element_clusters); C0: the reference stiffness's name, "midpoint" or "matrix".
 
     With stress-free components, P̂0 at frequency zero, which acts on the cell's mean, is S_F C0 instead of zero (SF-4):
-    P0 then also gives the mean strain the cell takes there, and stays a projection, so LS-24 and LS-28 hold as they
+    P0 then also gives the mean strain the cell takes there, and stays a projection, so LS-10 and LS-9 hold as they
     are."""
     def __init__(self, clusters, C0, stress_free=None):
         super().__init__(clusters, clusters.cluster_count, stress_free)
@@ -149,11 +149,11 @@ class SpectralLSSolver(Solver):
         self.to_matrix_units = get_matrix_units_operator(self.P0_transformed, self.C0, get_matrix_L())
 
     def measure_residual(self, residual):
-        """The residual in matrix units, M_m⁻¹ r (LS-24), which convergence and the line search judge."""
+        """The residual in matrix units, M_m⁻¹ r (LS-10), which convergence and the line search judge."""
         return apply_on_lattice(self.to_matrix_units, residual)
 
     def evaluate(self, strain, macro_strain, plastic_history):
-        """The LS-18 residual r = ε − ε̄ − P0 μ*, with μ* = ε − C0⁻¹ σ the equivalent eigenstrain (LS-6), and the
+        """The LS-7 residual r = ε − ε̄ − P0 μ*, with μ* = ε − C0⁻¹ σ the equivalent eigenstrain (LS-3), and the
         candidate plastic state and stress. With stress-free components, ε̄ is joined by the mean strain it frees
         itself (SF-2 without its polarization, which P0 covers at frequency zero)."""
         plastic_state, stress = radial_return(strain, self.clusters.materials, plastic_history)
@@ -163,9 +163,9 @@ class SpectralLSSolver(Solver):
         return Evaluation(strain, plastic_state, stress, residual)
 
     def get_newton_correction(self, current, plastic_history):
-        """Solves J δε = −r (LS-20), J v = v − P0 (D v) with D = I − C0⁻¹ L_t, by conjugate gradients in the C0 inner
+        """Solves J δε = −r (LS-8), J v = v − P0 (D v) with D = I − C0⁻¹ L_t, by conjugate gradients in the C0 inner
         product ⟨u, v⟩ = Σ uᵀ C0 v, in which J is symmetric and positive definite on the compatible strains that r and
-        every correction lie in (LS-28). It stops once ‖r + J δε‖ is below krylov_tolerance ‖r‖. Returns δε and the
+        every correction lie in (LS-9). It stops once ‖r + J δε‖ is below krylov_tolerance ‖r‖. Returns δε and the
         number of CG iterations."""
         tangent = get_algorithmic_stiffness(current.strain, self.clusters.materials, plastic_history)
         D_blocks = np.eye(6) - np.linalg.solve(self.C0, tangent)
@@ -184,7 +184,7 @@ class SpectralLSSolver(Solver):
             jacobian_direction = direction - apply_on_lattice(self.P0_transformed, apply_blocks(D_blocks, direction))
             curvature = inner_product(direction, jacobian_direction)
             if curvature <= 0:
-                raise SolverDidNotConverge("CG met a direction of non-positive curvature: LS-28 needs a positive "
+                raise SolverDidNotConverge("CG met a direction of non-positive curvature: LS-9 needs a positive "
                                            "definite tangent, so a yielding phase needs a positive hardening modulus")
             step = residual_product / curvature
             correction += step * direction
