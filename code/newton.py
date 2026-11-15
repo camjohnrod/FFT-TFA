@@ -59,8 +59,10 @@ def apply_sparse(matrix, rows):
 
 ## ------- Residual Size ------- ##
 
-# Engineering shear (ER-2) is twice the tensor shear, so its squares are weighted by ½ to give the tensor norm.
+# The tensor norm from Voigt components. A strain's engineering shear (ER-2) is twice the tensor shear, so its squares
+# are weighted by ½; a stress holds each shear once, while the tensor has it twice, so its squares are weighted by 2.
 tensor_norm_weights = np.array([1, 1, 1, 0.5, 0.5, 0.5])
+stress_norm_weights = 1 / tensor_norm_weights
 
 def get_strain_norm(strain, average=np.mean):
     """The root mean square of each row's tensor norm, the mean taken by average (a volume average for clusters of
@@ -173,9 +175,11 @@ class Solver:
         return residual
 
     def divergence_limit(self):
+        """How far the relative residual may grow before the step counts as diverging (solve_step)."""
         return config.divergence_limit
 
     def get_relative_residual(self, evaluation, macro_strain):
+        """The measured residual's size relative to the imposed strain, which convergence and the line search judge."""
         return get_relative_residual(self.measure_residual(evaluation.residual), macro_strain,
                                      self.clusters.average)
 

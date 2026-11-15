@@ -86,6 +86,7 @@ def get_cyclic_load(max_strain):
     return {"all_load_paths": {"check": [max_strain, opposite, strain()]}, "steps_to_first_turning_point": 4}
 
 def get_monotonic_load(max_strain):
+    """Straight out to the given strain."""
     return {"all_load_paths": {"check": [max_strain]}, "steps_to_first_turning_point": 12}
 
 # The problems' geometries.
@@ -111,7 +112,8 @@ pinned_inputs = {
     "convergence_tolerance": 1e-6, "residual_strain_scale_floor": 1e-4, "newton_max_iterations": 50,
     "krylov_tolerance": 1e-3, "gmres_restart": 50, "gmres_max_restarts": None, "cg_max_iterations": None,
     "divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "tfa_columns_per_solve": 100,
-    "sca_reference_tolerance": 1e-3, "sca_max_reference_updates": 10,
+    "sca_reference_tolerance": 1e-3, "sca_max_reference_updates": 10, "sca_pure_shear_tolerance": 1e-12,
+    "sca_kernel_parts_tolerance": 1e-10, "sca_assembly_rows": 600,
     "tfa_factorization_ordering": "MMD_AT_PLUS_A",
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
     "k_means_iterations": 50, "k_means_seed": 0, "k_means_start": "++", "placement_attempts": 100000,
@@ -287,10 +289,11 @@ def get_interaction_error(clusters, get_strain_change):
         kernel, np.linalg.solve(matrix_L, polarization[clusters.element_cluster].T).T)
     element_average = np.zeros((clusters.cluster_count, 6))
     np.add.at(element_average, clusters.element_cluster, element_strain)
-    element_average /= np.bincount(clusters.element_cluster)[:, None]
+    element_average /= clusters.element_counts[:, None]
     return get_relative_difference(get_strain_change(polarization), element_average)
 
 def solve_load_path(solver):
+    """A solver's LoadPathResult along the problem's load path, quietly, with fields at every step."""
     load_path = run.get_load_path()
     with contextlib.redirect_stdout(io.StringIO()):
         return run.run_load_path("check", solver, load_path.applied_macro_strain,
@@ -322,6 +325,7 @@ def get_basis_error(block_shape, degree):
     return max(np.abs(basis.T @ basis - np.eye(basis.shape[1])).max(), np.abs(basis[:, 0] - constant).max())
 
 def check_polynomial_basis():
+    """FFT-TFA's polynomial basis on every shape of basis_check_shapes, at degrees 0, 2 and full."""
     all_passed = True
     for block_shape in basis_check_shapes:
         full = int(np.sum(np.array(block_shape) - 1))
@@ -333,6 +337,7 @@ def check_polynomial_basis():
     return all_passed
 
 def solve_at_full_degree(clusters):
+    """FFT-TFA at full degree along the load path: the exact clustered equation, with no far-field summary."""
     return solve_load_path(fft_tfa_model.FFTTFASolver(clusters, "full"))
 
 def get_split_clusters(mesh):
@@ -428,6 +433,7 @@ def solve_check_problem(problem_inputs, cache_folder):
     return results
 
 def report(passed, description):
+    """Prints a check's PASS or FAIL line and returns whether it passed."""
     print(f"[{'PASS' if passed else 'FAIL'}] {description}")
     return passed
 
@@ -487,6 +493,7 @@ def check_reference(problem_name, spectral_ls_result):
                   "back from its cache unchanged")
 
 def check_stopping_accuracy(problem_name, problem_inputs, results, cache_folder):
+    """Every method's results against its own at tight_convergence_tolerance, so none stops less accurately."""
     tolerance = config.tight_convergence_tolerance
     tight_results = solve_check_problem({**problem_inputs, "convergence_tolerance": tolerance}, cache_folder)
     all_passed = True
@@ -548,6 +555,7 @@ def check_problem(problem_name, problem_inputs, saved_results, cache_folder):
     return all_passed, arrays
 
 def main():
+    """Runs every check (python code/check.py), and with save, saves the results if all pass."""
     mode = sys.argv[1] if len(sys.argv) > 1 else "check"
     if mode not in ("check", "save"):
         sys.exit(f"unknown option {mode!r}: use no option, or save")

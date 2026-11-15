@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker
 import matplotlib.colors
 import matplotlib.lines
+import matplotlib.transforms
 
 ## ------- Shared Style ------- ##
 
@@ -69,6 +70,7 @@ def plot_lines(axis, x_values, values_per_label, line_styles):
         mark_method_failure(axis, x_values[1:], values[1:], len(values) - 1, line_styles[label]['color'])
 
 def style_panel(axis, ylabel, x_locator):
+    """A load-path panel's label, ticks and light grid behind the curves."""
     axis.set_ylabel(ylabel)
     axis.xaxis.set_major_locator(x_locator)
     axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
@@ -76,9 +78,14 @@ def style_panel(axis, ylabel, x_locator):
     axis.set_axisbelow(True)
 
 def add_legend(figure, axis, columns=legend_columns):
-    """One legend above the figure for the lines of the given axis, wrapping past the given number of columns."""
+    """One legend above the figure for the lines of the given axis, wrapping past the given number of columns, or
+    sooner if a row would be wider than the figure."""
     handles, labels = axis.get_legend_handles_labels()
-    figure.legend(handles, labels, ncols=min(len(handles), columns), columnspacing=2.4, **legend_style)
+    for column_count in range(min(len(handles), columns), 0, -1):
+        legend = figure.legend(handles, labels, ncols=column_count, columnspacing=2.4, **legend_style)
+        if column_count == 1 or legend.get_window_extent(figure.canvas.get_renderer()).width <= figure.bbox.width:
+            return
+        legend.remove()
 
 def save_panel_figure(row_count, draw_panels, xlabel, plot_path):
     """A figure of panels three to a row on a shared x axis, drawn by draw_panels(axes), with one legend above."""
@@ -194,25 +201,57 @@ def plot_macro_stress_errors(error_percent_per_method, components, step_count, s
 
 ## ------- Error Against Time ------- ##
 
+# Where a point's label goes, tried in this order: (x, y offset in points, horizontal and vertical alignment), from
+# above right round to below left.
+point_label_places = [(6, 5, 'left', 'bottom'), (6, -5, 'left', 'top'), (-6, 5, 'right', 'bottom'),
+                      (-6, -5, 'right', 'top')]
+error_marker_size = 6
+
+def label_points(figure, axis, points, marker_size):
+    """Labels each point (label, x, y) at the first of point_label_places where it stays inside the axes and overlaps
+    no marker and no label placed before. A label that fits at none is left out, since overlapping labels cannot be
+    read; the line still shows its point. Call it once the figure is otherwise complete, so the layout no longer moves
+    the points."""
+    renderer = figure.canvas.get_renderer()
+    half_marker = renderer.points_to_pixels(marker_size) / 2
+    centres = axis.transData.transform([(x, y) for _, x, y in points])
+    occupied = [matplotlib.transforms.Bbox.from_extents(cx - half_marker, cy - half_marker, cx + half_marker,
+                                                        cy + half_marker) for cx, cy in centres]
+    frame = axis.get_window_extent(renderer)
+    for label, x, y in points:
+        for dx, dy, horizontal, vertical in point_label_places:
+            text = axis.annotate(get_display_label(label), (x, y), textcoords='offset points', xytext=(dx, dy),
+                                 ha=horizontal, va=vertical, fontsize=11, color='0.25')
+            text.set_in_layout(False)
+            box = text.get_window_extent(renderer)
+            is_inside = frame.x0 <= box.x0 and box.x1 <= frame.x1 and frame.y0 <= box.y0 and box.y1 <= frame.y1
+            if is_inside and not any(box.overlaps(other) for other in occupied):
+                occupied.append(box)
+                break
+            text.remove()
+
 def plot_error_against_time(schemes, panel_titles, plot_path):
     """Each scheme's relative macroscopic stress error (%) against online time, one panel per title (a turning point),
-    one line per scheme through its entries in the order listed, each point marked with what tells it from the scheme's
-    others. schemes: one dict per scheme, with its method, its place among its method's schemes (index), its name, and
-    its points, (point label, seconds, its error in each panel)."""
+    one line per scheme through its entries in the order listed, each point labelled with what tells it from the
+    scheme's others (label_points). schemes: one dict per scheme, with its method, its place among its method's schemes
+    (index), its name, and its points, (point label, seconds, its error in each panel)."""
     with plt.rc_context(load_path_style):
         figure, axes = plt.subplots(1, len(panel_titles), squeeze=False, layout='constrained',
                                     figsize=(7, 5) if len(panel_titles) == 1 else (6 * len(panel_titles), 5))
+        panel_points = []
         for panel, (axis, title) in enumerate(zip(axes.flat, panel_titles)):
+            ends, middles = [], []    # each scheme's coarsest and finest points are labelled first
             for scheme in schemes:
                 style = method_styles[scheme["method"]]
                 point_labels, seconds, errors = zip(*scheme["points"])
                 panel_errors = [error[panel] for error in errors]
                 axis.plot(seconds, panel_errors, marker=scheme_markers[scheme["index"] % len(scheme_markers)],
-                          markersize=6, color=get_scheme_color(scheme["method"], scheme["index"]),
+                          markersize=error_marker_size, color=get_scheme_color(scheme["method"], scheme["index"]),
                           linestyle=style['linestyle'], label=get_display_label(scheme["name"]))
-                for point_label, x, y in zip(point_labels, seconds, panel_errors):
-                    axis.annotate(get_display_label(point_label), (x, y), textcoords='offset points', xytext=(6, 5),
-                                  fontsize=11, color='0.25')
+                points = list(zip(point_labels, seconds, panel_errors))
+                ends += [points[-1], points[0]] if len(points) > 1 else points
+                middles += points[1:-1]
+            panel_points.append(ends + middles)
             axis.set_xscale('log')
             axis.set_yscale('log')
             for log_axis in (axis.xaxis, axis.yaxis):
@@ -225,6 +264,9 @@ def plot_error_against_time(schemes, panel_titles, plot_path):
             axis.set_axisbelow(True)
         axes[0, 0].set_ylabel(r"$\|\bar\sigma - \bar\sigma^{\mathrm{ref}}\| \,/\, \|\bar\sigma^{\mathrm{ref}}\|$ (%)")
         add_legend(figure, axes[0, 0], columns=2 if len(panel_titles) == 1 else 3)
+        figure.canvas.draw()     # settles the layout, so the labels are placed where they will be drawn
+        for axis, points in zip(axes.flat, panel_points):
+            label_points(figure, axis, points, error_marker_size)
         figure.savefig(plot_path)
     plt.close(figure)
 

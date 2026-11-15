@@ -217,6 +217,11 @@ class Clusters(NamedTuple):
     def partition_count(self):
         return self.cluster_partition[-1] + 1
 
+    @property
+    def element_counts(self):
+        """The number of elements in each cluster."""
+        return np.bincount(self.element_cluster, minlength=self.cluster_count)
+
     def average(self, values):
         """The volume average over the cell of one value per cluster (rows of values). The cell's volume is
         partition_count partition volumes."""

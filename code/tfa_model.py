@@ -97,6 +97,7 @@ class FEModel:
         self.element_dofs = get_element_dofs(mesh)
 
     def get_K(self):
+        """The global stiffness matrix K, assembled from every element's."""
         K_elements = np.array([get_K_element(self.B, self.gauss_point_volume, L) for L in self.L_per_element])
         return assemble_blocks(K_elements, self.element_dofs, self.element_dofs, (self.dof_count, self.dof_count))
 
@@ -231,6 +232,7 @@ class TFASolver(Solver):
         self.induced_strain_history = None
 
     def divergence_limit(self):
+        """TFA's own limit: it starts each step from the exact elastic predictor, so any growth means divergence."""
         return config.tfa_divergence_limit
 
     def start_step(self, macro_strain, plastic_history):

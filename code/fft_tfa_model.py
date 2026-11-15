@@ -123,6 +123,7 @@ class PartitionSlots(NamedTuple):
     cluster_slot: np.ndarray     # clusters: each cluster's slot in its partition
 
 def get_partition_slots(clusters):
+    """The clusters' PartitionSlots: every partition's clusters in its slots, with their indicators on its elements."""
     mesh = clusters.mesh
     block_shape = mesh.partition_size
     partition_count = clusters.partition_count
@@ -192,13 +193,16 @@ class Interaction(NamedTuple):
     own_strain_change: np.ndarray                # FT-7's own blocks, one 6 × 6 block per cluster
 
 def get_own_strain_change(clusters, moments, self_kernels, correction_blocks):
-    """FT-7: for every cluster a, the strain change at a from a unit polarization of a itself: the far field's
-    self-term Σ_ji (m_j(a) / n_a) K_ji(0) m_i(a), plus its own correction, less its share of FT-4's cell mean (the far
-    field adds nothing to it), less what subtracting the mean polarization before the corrections takes,
-    w_a (S(a) − Σ_q w_q S(q)), with S(a) the sum of a's corrections and w the clusters' shares of the cell."""
-    element_counts = np.bincount(clusters.element_cluster, minlength=clusters.cluster_count)
-    own = np.einsum('aj,ai,jxiy->axy', moments / element_counts[:, None], moments, self_kernels)
+    """FT-7's G_aa: for every cluster a, the strain change at a per unit polarization of a itself, the 6 × 6 block of
+    get_strain_change on the diagonal. With C the corrections, w_a = v(a) / N_part a's share of the cell, and S(a) =
+    Σ_b C_ab the sum of a's row of corrections, it has four terms:
+      G_aa = Σ_ji (m_j(a) / n_a) K_ji(0) m_i(a)    the far field's self-term, a's moments through its own partition
+           + C_aa                                  a's own correction
+           − Σ_r w_r C_ra                          the change of FT-4's cell mean (the far field adds nothing to it)
+           − w_a (S(a) − Σ_q w_q S(q))             the corrections act on τ − ⟨τ⟩, and ⟨τ⟩ holds w_a τ_a."""
+    own = np.einsum('aj,ai,jxiy->axy', moments / clusters.element_counts[:, None], moments, self_kernels)
     weights = clusters.share / clusters.partition_count
+    # The correction blocks' rows and columns, read off the block-sparse (BSR) storage.
     block_rows = np.repeat(np.arange(clusters.cluster_count), np.diff(correction_blocks.indptr))
     block_columns = correction_blocks.indices
     on_diagonal = block_rows == block_columns
@@ -227,7 +231,7 @@ def get_interaction(clusters, degree):
 
     # Moments ordered partition by partition, then polynomial by polynomial: one row of 6 per polynomial.
     moments = get_cluster_moments(clusters, basis)
-    element_counts = np.bincount(clusters.element_cluster, minlength=clusters.cluster_count)
+    element_counts = clusters.element_counts
     rows = (clusters.cluster_partition[:, None] * p + np.arange(p)).ravel()
     columns = np.repeat(np.arange(clusters.cluster_count), p)
     shape = (p * clusters.partition_count, clusters.cluster_count)

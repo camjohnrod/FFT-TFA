@@ -172,6 +172,12 @@ tfa_divergence_limit        = 1.0
 # Liu–Bessa–Liu 2016 use 0.1 %), at most sca_max_reference_updates times.
 sca_reference_tolerance     = 1e-3
 sca_max_reference_updates   = 10
+# A load step counts as pure shear, its λ kept from the last step, when its volume change is below
+# sca_pure_shear_tolerance times its shear. The fixed kernels D is assembled from must rebuild Γ0 of a test medium to
+# sca_kernel_parts_tolerance (relative), and D is assembled sca_assembly_rows rows at a time (memory against speed).
+sca_pure_shear_tolerance    = 1e-12
+sca_kernel_parts_tolerance  = 1e-10
+sca_assembly_rows           = 600
 
 # k-means: Lloyd iterations from a seeded start (scipy's minit), on features from six elastic Spectral LS solves with
 # this reference stiffness.

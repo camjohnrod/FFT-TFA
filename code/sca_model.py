@@ -26,10 +26,7 @@ from cell import get_matrix_L
 from ls_model import get_P0_transformed
 from material import get_algorithmic_stiffness, radial_return
 from newton import (Evaluation, Solver, SolverDidNotConverge, apply_blocks, get_free_compliance, get_free_strain,
-                    solve_by_gmres, tensor_norm_weights)
-
-# The tensor norm of a stress in Voigt form, each shear once: its squares are weighted by 2.
-stress_norm_weights = 1 / tensor_norm_weights
+                    solve_by_gmres, stress_norm_weights)
 
 ## ------- Isotropic Reference Media ------- ##
 
@@ -62,9 +59,16 @@ def get_kernel_parts(lattice_shape):
     C0 = get_isotropic_stiffness(check_lambda, check_mu)
     reconstructed = np.einsum('k,k...->...', get_kernel_coefficients(check_lambda, check_mu), parts)
     exact = get_P0_transformed(lattice_shape, C0) @ np.linalg.inv(C0)
-    if np.abs(reconstructed - exact).max() > 1e-10 * np.abs(exact).max():
+    if np.abs(reconstructed - exact).max() > config.sca_kernel_parts_tolerance * np.abs(exact).max():
         raise ValueError("the element kernel is not a combination of the three isotropic kernels SCA assumes")
     return [(k, part) for k, part in enumerate(parts) if np.abs(part).max() > 0]
+
+def get_stored_matrix_count(C0):
+    """How many dense (6 × clusters)² matrices SCA stores: D alone for a fixed C0; for a self-consistent one also D's
+    parts, one per kernel of get_kernel_parts, two for Willot's kernel and three for Moulinec–Suquet's."""
+    if C0 != "self-consistent":
+        return 1
+    return 1 + (3 if config.element_kernel == "Moulinec-Suquet" else 2)
 
 ## ------- Interaction (SC-2) ------- ##
 
@@ -78,7 +82,7 @@ def get_interaction(clusters, Gamma_transformed):
     mesh, cluster_count = clusters.mesh, clusters.cluster_count
     shape = mesh.element_shape
     axes = tuple(axis for axis in range(3) if shape[axis] > 1)       # a transform of length one is the identity
-    element_counts = np.bincount(clusters.element_cluster)
+    element_counts = clusters.element_counts
     to_cluster_averages = scipy.sparse.csr_matrix(
         (1 / element_counts[clusters.element_cluster], (clusters.element_cluster, np.arange(mesh.element_count))),
         shape=(cluster_count, mesh.element_count))
@@ -102,7 +106,9 @@ def fit_reference(macro_strain_increment, macro_stress_increment, previous_lambd
     trace_term = macro_strain_increment[:3].sum() * np.array([1, 1, 1, 0, 0, 0], dtype=float)
     shear_term = macro_strain_increment * np.array([2, 2, 2, 1, 1, 1])
     weighted = lambda u, v: np.sum(stress_norm_weights * u * v)
-    if abs(macro_strain_increment[:3].sum()) < 1e-12 * np.sqrt(weighted(shear_term, shear_term)):
+    is_pure_shear = (abs(macro_strain_increment[:3].sum())
+                     < config.sca_pure_shear_tolerance * np.sqrt(weighted(shear_term, shear_term)))
+    if is_pure_shear:
         return previous_lambda, weighted(shear_term, macro_stress_increment) / weighted(shear_term, shear_term)
     normal_matrix = np.array([[weighted(trace_term, trace_term), weighted(trace_term, shear_term)],
                               [weighted(trace_term, shear_term), weighted(shear_term, shear_term)]])
@@ -139,13 +145,13 @@ class SCASolver(Solver):
         self.step_start = None                        # set by solve_step
 
     def set_reference(self, lame_lambda, mu):
-        """C0 = the isotropic medium (λ, μ), and D assembled from its parts, a block of rows at a time so that no
+        """C0 = the isotropic medium (λ, μ), and D assembled from its parts, sca_assembly_rows rows at a time so that no
         full-size temporary is made."""
         self.lame_lambda, self.mu = lame_lambda, mu
         self.C0 = get_isotropic_stiffness(lame_lambda, mu)
         self.free_compliance = get_free_compliance(self.C0, self.stress_free)
         coefficients = get_kernel_coefficients(lame_lambda, mu)
-        for rows in np.array_split(np.arange(len(self.D)), max(1, len(self.D) // 600)):
+        for rows in np.array_split(np.arange(len(self.D)), max(1, len(self.D) // config.sca_assembly_rows)):
             self.D[rows] = sum(coefficients[k] * part[rows] for k, part in self.parts)
 
     def start_over(self):

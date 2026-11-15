@@ -7,42 +7,25 @@ Commands (defined first below):
   replot [folder]   redraw a saved run (default: the latest) with config.py's figure settings
   cache             list what code/cache/ holds
 
-A run, in order: the load path (get_load_path), the reference (get_reference, cached), every entry built and solved in
-a process of its own (solve_all), then saved (save_run) and drawn (draw_run). Its folder holds:
-  config.py                    the settings it ran with
-  run.json, results.npz        what each entry did and cost, and its results (read them with get_saved_run): the
-                               macroscopic stress and strain at every step, and maps of the element layer at
-                               mid-thickness (each element's cluster, partition and phase; its stress and accumulated
-                               plastic strain at every turning point)
-  summary.txt                  each entry's clusters, times, iterations and peak memory, and with the reference on,
-                               its relative macroscopic stress error (|Σ − Σ_ref| / |Σ_ref|) at the first step and
-                               the turning points, and its error per loaded component
-  stress_strain.png            macroscopic stress against applied strain, every entry and the reference
-  macro_stress_error.png       with the reference on: each entry's macroscopic stress error in every loaded component
-  error_against_time.png       with the reference on and several entries of a method: the relative error against
-                               online time, one panel per turning point away from zero strain
-  cross_section.png            each entry's elements, clusters and partitions
-  plastic_strain.png           the accumulated plastic strain at config.map_turning_point, one map per entry
-  plastic_strain_profile.png   the same along the middle element row, every entry on one plot
-code/output/latest points at the last run.
+A run, in order: the load path (get_load_path), the reference (get_reference, cached), every entry built from its
+settings (get_entries, get_solver) and solved along the load path in a process of its own (solve_all), then saved and
+drawn by report.py, whose docstring lists what a run's folder holds.
 """
 
 import datetime
 import json
 import multiprocessing
-import re
 import resource
-import shutil
 import sys
 import time
 import traceback
-from typing import Callable, NamedTuple
+from typing import NamedTuple
 
 import config  # first: it sets the thread count before numpy loads
 import numpy as np
 import tqdm
 
-import plots
+import report
 from cell import (Clusters, cluster_by_k_means, cluster_by_phase, get_cache_entries, get_cache_path, get_cached,
                   get_clusters, get_geometry, get_geometry_parameters, get_inclusion_L, get_matrix_L,
                   get_memory_MB, get_mesh, get_random_radius, is_shape_constant_along_z, random_shape_dimensions)
@@ -50,7 +33,7 @@ from fft_tfa_model import FFTTFASolver, get_polynomial_basis, resolve_degree
 from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_element_clusters
 from material import get_unloaded_plastic_state
 from newton import SolverDidNotConverge, get_stress_free_components
-from sca_model import SCASolver
+from sca_model import SCASolver, get_stored_matrix_count
 from tfa_model import TFASolver
 
 ## ------- Commands ------- ##
@@ -66,8 +49,8 @@ def run():
             sys.exit(f"The reference failed: {failure_reason}")
         results["Reference"], reference = value
     entry_results, entries = solve_all(load_path)
-    folder = save_run(load_path, results | entry_results, entries, reference)
-    draw_run(folder)
+    folder = report.save_run(load_path, results | entry_results, entries, reference)
+    report.draw_run(folder)
     print(f"Saved to {folder}")
 
 def replot(name):
@@ -75,7 +58,7 @@ def replot(name):
     folder = config.output_folder / name
     if not (folder / "results.npz").exists():
         sys.exit(f"No saved run at {folder}")
-    draw_run(folder.resolve())
+    report.draw_run(folder.resolve())
     print(f"Redrawn in {folder.resolve()}")
 
 def preview():
@@ -98,7 +81,7 @@ def preview():
     for entry in get_entries():
         clusters = get_entry_clusters(entry)
         print(f"{entry.label}: {clusters.cluster_count} clusters, {describe_storage(entry, clusters)}")
-        arrays |= get_cluster_maps(entry.label, clusters)
+        arrays |= report.get_cluster_maps(entry.label, clusters)
         entries.append({"label": entry.label, "method": entry.method, "settings": entry.settings,
                         "cluster_count": clusters.cluster_count})
     if config.reference is not None:
@@ -107,22 +90,25 @@ def preview():
               f"{'cached' if is_cached else 'NOT cached, a run would solve it first'}")
     config.output_folder.mkdir(parents=True, exist_ok=True)
     path = config.output_folder / "preview_cross_section.png"
-    plots.plot_cross_section([get_cell_map(entry, arrays) for entry in entries], path)
+    report.draw_cross_section(entries, arrays, path)
     print(f"Cross-section drawn in {path}")
 
 def describe_storage(entry, clusters):
     """What an entry stores, in MB: FFT-TFA's moment kernels (one 6p × 6p block per frequency, p the polynomials of its
-    degree) and one 6 × 6 block per pair of clusters in the same partition (FT-3), SCA's dense D and TFA's dense P,
-    Spectral LS's kernel and LS-24's operator."""
+    degree) and one 6 × 6 block per pair of clusters in the same partition (FT-3), SCA's dense D (and with a
+    self-consistent C0, D's parts) and TFA's dense P, Spectral LS's kernel and LS-24's operator."""
     mesh = clusters.mesh
     partition_shape = mesh.partition_shape
     frequencies = partition_shape[0] * partition_shape[1] * (partition_shape[2] // 2 + 1)     # rfftn's half
     kernel_MB = 36 * 16 * frequencies / 1024**2                     # one complex 6 × 6 block per frequency
+    dense_MB = (6 * clusters.cluster_count)**2 * 8 / 1024**2        # one dense (6 × clusters)² matrix
     if entry.method == "Spectral LS":
         return f"kernels {2 * kernel_MB:.0f} MB"
-    if entry.method in ("SCA", "TFA"):
-        name = "D" if entry.method == "SCA" else "P"
-        return f"{name} {(6 * clusters.cluster_count)**2 * 8 / 1024**2:.0f} MB"
+    if entry.method == "TFA":
+        return f"P {dense_MB:.0f} MB"
+    if entry.method == "SCA":
+        count = get_stored_matrix_count(entry.settings["C0"])
+        return f"D {dense_MB:.0f} MB" + (f", with its parts {count * dense_MB:.0f} MB" if count > 1 else "")
     block = mesh.partition_size
     polynomials = get_polynomial_basis(block, resolve_degree(entry.settings["degree"], mesh)).shape[-1]
     counts = np.bincount(clusters.cluster_partition, minlength=clusters.partition_count)
@@ -140,7 +126,7 @@ def list_cache():
     for path, description in get_cache_entries():
         rows.append((path.name, f"{path.stat().st_size / 1024**2:.1f}",
                      datetime.datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M"), description))
-    print("\n".join(format_table(rows)))
+    print("\n".join(report.format_table(rows)))
     print(f"In {config.cache_folder}; delete what you no longer need, it is solved again when asked for.")
 
 def main():
@@ -176,26 +162,45 @@ def format_setting(name, value):
     return {"matrix_clusters": f"m={value}", "inclusion_clusters": f"i={value}", "degree": f"degree {value}",
             "C0": f"C0 {value}"}[name]
 
+def describe_settings(settings):
+    """Settings as a label shows them, for example "8² m=4 i=1"."""
+    return " ".join(format_setting(name, value) for name, value in settings.items())
+
+def get_shared_settings(scheme):
+    """The settings every entry of a scheme has in common."""
+    return {name: value for name, value in scheme[0].items() if all(entry[name] == value for entry in scheme)}
+
+def get_scheme_names(method, shared_per_scheme):
+    """Each scheme's name: the method, then those of the scheme's shared settings that tell it from the method's other
+    schemes, numbered if two names still come out alike. A method with one scheme is named by the method alone."""
+    names = []
+    for shared in shared_per_scheme:
+        distinct = {name: value for name, value in shared.items()
+                    if any(other.get(name) != value for other in shared_per_scheme)}
+        names.append(" ".join([method, describe_settings(distinct)]) if distinct else method)
+    if len(set(names)) < len(names):
+        names = [f"{name} ({index + 1})" for index, name in enumerate(names)]
+    return names
+
 def get_entries():
-    """Every entry config.py lists, scheme by scheme, in the order of the table. A scheme is named by its method and the
-    settings its entries share that differ between the method's schemes; an entry within it, by the settings that
-    differ among the scheme's entries. A method with one scheme is named by the method alone."""
+    """Every entry config.py lists, scheme by scheme, in the order of the table. Its label is its scheme's name followed
+    by its point: the settings that tell it from the scheme's other entries."""
     entries = []
     for method, listed in (("FFT-TFA", config.fft_tfa), ("SCA", config.sca), ("Spectral LS", config.spectral_ls),
                            ("TFA", config.tfa)):
         schemes = config.get_schemes(listed)
-        shared = [{name: value for name, value in scheme[0].items() if all(entry[name] == value for entry in scheme)}
-                  for scheme in schemes]
-        names = [" ".join([method, *(format_setting(name, value) for name, value in scheme_shared.items()
-                                     if any(other.get(name) != value for other in shared))])
-                 for scheme_shared in shared]
-        if len(set(names)) < len(names):
-            names = [f"{name} ({index + 1})" for index, name in enumerate(names)]
-        for index, (scheme, scheme_shared, name) in enumerate(zip(schemes, shared, names)):
+        shared_per_scheme = [get_shared_settings(scheme) for scheme in schemes]
+        names = get_scheme_names(method, shared_per_scheme)
+        for index, (scheme, shared, name) in enumerate(zip(schemes, shared_per_scheme, names)):
             for settings in scheme:
-                point = " ".join(format_setting(setting, value) for setting, value in settings.items()
-                                 if setting not in scheme_shared)
-                label = name if not point else f"{name} {point}" if name == method else f"{name}, {point}"
+                point = describe_settings({setting: value for setting, value in settings.items()
+                                           if setting not in shared})
+                if not point:
+                    label = name
+                elif name == method:
+                    label = f"{name} {point}"
+                else:
+                    label = f"{name}, {point}"
                 entries.append(Entry(method, label, settings, name, index, point))
     return entries
 
@@ -238,6 +243,7 @@ def get_solver(entry):
 ## ------- Load Path ------- ##
 
 class LoadPath(NamedTuple):
+    """The load steps along config.load_path."""
     applied_macro_strain: np.ndarray   # the imposed macroscopic strain at every load step, one row per step; zero in
                                        # the stress-free components (config.unloaded_directions), which the cell sets
     turning_steps: np.ndarray          # the load step of each turning point
@@ -396,12 +402,16 @@ def solve_all(load_path, field_steps=None):
 # Increase whenever a code change alters the reference, so caches made by the old code are recomputed.
 reference_cache_version = 4
 
+def get_lattice_label(lattice_shape):
+    """A lattice of shape [z, y, x] as "N×N" when its cells are columns through the thickness, "N×N×N_z" otherwise."""
+    counts = [lattice_shape[2], lattice_shape[1]] + ([lattice_shape[0]] if lattice_shape[0] > 1 else [])
+    return "×".join(map(str, counts))
+
 def get_reference_parameters(load_path):
     """Every input that changes the reference's answer, its cache key. The keys' names are hashed into the cache file's
-    name, so they keep their names even where the inputs were renamed."""
+    name, so renaming one makes every cached reference unreachable; some differ from the config.py names for that
+    reason ("discretization" holds element_kernel). A strain-controlled load path leaves "stress_free" out."""
     elements = config.reference["elements"]
-    # The stress-free components join the key only when there are some, so references solved before they existed, all
-    # strain-controlled, still load.
     stress_free = get_stress_free_components()
     return {**({"stress_free": stress_free} if stress_free.any() else {}),
             "cache_version": reference_cache_version, "discretization": config.element_kernel,
@@ -433,7 +443,7 @@ def get_reference(load_path):
         if result.completed_step_count < step_count:
             raise RuntimeError(f"The reference stopped at load step {result.completed_step_count + 1}: "
                                f"{result.failure_reason}")
-        # The arrays keep the names older caches were saved with, so those still load.
+        # Under the names the cache files use: "material_ids" for the phases, "macroscopic_stress" for macro_stress.
         return {"material_ids": clusters.materials.phase,
                 "macroscopic_stress": result.macro_stress, "macro_strain": result.macro_strain,
                 "stress": result.cluster_stress,
@@ -443,331 +453,13 @@ def get_reference(load_path):
     description = f"reference, {voxels} voxels, {config.geometry}, {config.materials}, {config.load_path}"
     arrays = get_cached("reference", get_reference_parameters(load_path), description, compute)
     no_iterations = np.zeros(step_count, dtype=int)
-    # References cached before the reached strain was kept are strain-controlled: theirs is the imposed one.
+    # A cache file without the reached strain holds a strain-controlled reference, which reached the imposed strain.
     macro_strain = arrays.get("macro_strain", load_path.applied_macro_strain)
     result = LoadPathResult(clusters, arrays["macroscopic_stress"], macro_strain, load_path.turning_steps,
                             arrays["stress"],
                             arrays["accumulated_plastic_strain"], no_iterations, no_iterations, np.zeros(step_count),
                             step_count, "")
     return result, {"settings": config.reference, "voxels": voxels, "build_seconds": float(arrays["build_seconds"])}
-
-## ------- Saving a Run ------- ##
-
-def get_lattice_label(lattice_shape):
-    """A lattice of shape [z, y, x] as "N×N" when its cells are columns through the thickness, "N×N×N_z" otherwise."""
-    counts = [lattice_shape[2], lattice_shape[1]] + ([lattice_shape[0]] if lattice_shape[0] > 1 else [])
-    return "×".join(map(str, counts))
-
-def get_mid_layer_clusters(clusters):
-    """The cluster of every element on the element layer at mid-thickness, which the maps show. A finer mesh's layer
-    there (the reference's) lies in a coarser one's, since its elements subdivide them."""
-    shape = clusters.mesh.element_shape
-    return clusters.element_cluster.reshape(shape)[shape[0] // 2]
-
-def get_cluster_maps(label, clusters):
-    """Each element's cluster, partition and phase on the mid-thickness layer: what the cross-section shows."""
-    layer = get_mid_layer_clusters(clusters)
-    return {f"{label}/element_cluster": layer, f"{label}/element_partition": clusters.cluster_partition[layer],
-            f"{label}/element_phase": clusters.materials.phase[layer]}
-
-def save_run(load_path, results, entries, reference):
-    """A new folder in config.output_folder with the settings, run.json (the run, each entry's line from solve_all and
-    the reference's from get_reference) and results.npz (every result, the reference's under "Reference"), and
-    code/output/latest pointing at it."""
-    date = datetime.datetime.now()
-    folder = config.output_folder / f"{date:%Y-%m-%d_%H%M%S}_{re.sub(r'[^A-Za-z0-9.-]+', '-', config.results_name)}"
-    folder.mkdir(parents=True)
-    shutil.copy(config.__file__, folder / "config.py")
-    info = {"results_name": config.results_name, "date": date.isoformat(timespec="seconds"),
-            "geometry": config.geometry, "materials": config.materials, "load_path": config.load_path,
-            "unloaded_directions": config.unloaded_directions,
-            "clustered_mesh": config.clustered_mesh, "element_kernel": config.element_kernel,
-            "side_length_mm": 1e3 * config.cell_side,
-            "reference": reference, "entries": entries}
-    (folder / "run.json").write_text(json.dumps(info, indent=1))
-
-    arrays = {"applied_macro_strain": load_path.applied_macro_strain, "turning_steps": load_path.turning_steps}
-    for label, result in results.items():
-        if result is None:
-            continue
-        layer = get_mid_layer_clusters(result.clusters)
-        arrays |= get_cluster_maps(label, result.clusters)
-        # The fields at the turning points in single precision, since they are only drawn.
-        arrays |= {f"{label}/macro_stress": result.macro_stress, f"{label}/macro_strain": result.macro_strain,
-                   f"{label}/stress": result.cluster_stress[:, layer].astype(np.float32),
-                   f"{label}/accumulated_plastic_strain": result.accumulated_plastic_strain[:, layer].astype(np.float32)}
-    np.savez_compressed(folder / "results.npz", **arrays)
-
-    latest = config.output_folder / "latest"
-    latest.unlink(missing_ok=True)
-    latest.symlink_to(folder.name)
-    return folder
-
-def get_saved_run(folder):
-    """A saved run's run.json, and its results.npz as a dict of arrays."""
-    with np.load(folder / "results.npz") as saved:
-        return json.loads((folder / "run.json").read_text()), {name: saved[name] for name in saved.files}
-
-## ------- Tables ------- ##
-
-def format_table(rows):
-    """Rows of cells as aligned text lines: the first column left-aligned, the others right-aligned."""
-    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
-    return ["   ".join(cell.ljust(width) if column == 0 else cell.rjust(width)
-                       for column, (cell, width) in enumerate(zip(row, widths))) for row in rows]
-
-def get_timing_table(info, step_count):
-    """Offline: building the entry's solver. Online: solving the load steps it completed, with its Newton and Krylov
-    (GMRES, or CG for Spectral LS) iterations over them. Peaks: the largest memory it held in each. Then why an entry
-    stopped early."""
-    rows = [("Entry", "Clusters", "Offline (s)", "Online (s)", "Newton its", "Krylov its", "Steps", "Offline peak (MB)",
-             "Online peak (MB)")]
-    for entry in info["entries"]:
-        rows.append((entry["label"], str(entry["cluster_count"]), f"{entry['offline_seconds']:.2f}",
-                     f"{entry['online_seconds']:.2f}", str(entry["newton_iterations"]), str(entry["krylov_iterations"]),
-                     f"{entry['completed_step_count']}/{step_count}", f"{entry['peak_offline_MB']:.0f}",
-                     f"{entry['peak_online_MB']:.0f}"))
-    lines = format_table(rows)
-    lines += [f"{entry['label']} stopped at step {entry['completed_step_count'] + 1}: {entry['failure_reason']}"
-              for entry in info["entries"] if entry["completed_step_count"] < step_count]
-    if info["reference"] is not None:
-        lines.append(f"Reference: Spectral LS on {info['reference']['voxels']} voxels, built in "
-                     f"{info['reference']['build_seconds']:.0f} s (not timed against the entries)")
-    return "\n".join(lines)
-
-# Voigt stress holds each shear once, so its squares are weighted by 2 to give the tensor norm.
-stress_norm_weights = np.array([1, 1, 1, 2, 2, 2])
-
-def get_relative_stress_errors(info, arrays):
-    """Each entry's relative macroscopic stress error |Σ − Σ_ref| / |Σ_ref| (%, tensor norms) at every step it solved:
-    Schneider 2019's eq. (5.1), there for Σ11, on the whole tensor, so it depends on no choice of axes."""
-    reference_stress = arrays["Reference/macro_stress"]
-    errors = {}
-    for entry in info["entries"]:
-        solved = entry["completed_step_count"]
-        if solved > 0:
-            difference = arrays[f"{entry['label']}/macro_stress"][:solved] - reference_stress[:solved]
-            errors[entry["label"]] = 100 * np.sqrt(
-                (stress_norm_weights * difference**2).sum(axis=1)
-                / (stress_norm_weights * reference_stress[:solved]**2).sum(axis=1))
-    return errors
-
-def get_error_turning_points(arrays):
-    """The turning points the relative error is reported at, as (turning point index, step): all but those at zero
-    strain, where the reference stress is only the residual stress and the ratio means nothing."""
-    return [(index, step) for index, step in enumerate(arrays["turning_steps"])
-            if np.any(arrays["applied_macro_strain"][step] != 0)]
-
-def get_relative_error_table(info, relative_errors, error_turning_points, step_count):
-    """The relative errors of get_relative_stress_errors at the first step (elastic, or nearly) and at the reported
-    turning points; – where an entry stopped before."""
-    columns = [("Step 1", 0), *((f"TP {index + 1} (step {step + 1})", step) for index, step in error_turning_points)]
-    rows = [("Entry", *(name for name, _ in columns), "Steps")]
-    for label, error in relative_errors.items():
-        rows.append((label, *(f"{error[step]:.2f}" if step < len(error) else "–" for _, step in columns),
-                     f"{len(error)}/{step_count}"))
-    return "\n".join([f"Relative macroscopic stress error |Σ − Σ_ref| / |Σ_ref| (%, tensor norms; Schneider 2019, eq. "
-                      f"5.1) against the reference (Spectral LS on {info['reference']['voxels']} voxels), at the first "
-                      "step and the turning points (TP):", *format_table(rows)])
-
-def get_loaded_components(reference_stress):
-    """The stress components the load path produces: those whose reference value reaches config.loaded_stress_fraction
-    of the largest reference component somewhere along the path."""
-    largest_per_component = np.abs(reference_stress).max(axis=0)
-    return np.flatnonzero(largest_per_component >= config.loaded_stress_fraction * largest_per_component.max())
-
-def get_macro_stress_errors(info, arrays, components):
-    """Each entry's signed macroscopic stress error in the given components at every step it solved, in % of each
-    component's largest reference value along the path, so a smaller component is read on its own scale."""
-    reference_stress = arrays["Reference/macro_stress"][:, components]
-    scale = np.abs(reference_stress).max(axis=0)
-    errors = {}
-    for entry in info["entries"]:
-        solved = entry["completed_step_count"]
-        if solved > 0:
-            stress = arrays[f"{entry['label']}/macro_stress"][:solved, components]
-            errors[entry["label"]] = 100 * (stress - reference_stress[:solved]) / scale
-    return errors
-
-def get_error_table(info, macro_stress_errors, components, step_count):
-    """The errors of get_macro_stress_errors summarized per component, to see where an error comes from: the largest
-    magnitude over the steps an entry solved, and their root mean square."""
-    rows = [("Entry", *(f"σ{plots.stress_component_subscripts[component]} max / rms (%)" for component in components),
-             "Steps")]
-    for label, error in macro_stress_errors.items():
-        rows.append((label, *(f"{np.abs(error[:, column]).max():.2f} / {np.sqrt(np.mean(error[:, column]**2)):.2f}"
-                              for column in range(len(components))), f"{len(error)}/{step_count}"))
-    return "\n".join([f"Macroscopic stress error against the reference (Spectral LS on {info['reference']['voxels']} "
-                      "voxels), per loaded component, in % of its largest reference value along the path:",
-                      *format_table(rows)])
-
-## ------- Figures ------- ##
-
-class Field(NamedTuple):
-    """A field drawn at config.map_turning_point: one map per entry (name.png) and a profile (name_profile.png)."""
-    name: str                   # its figures' file names
-    label: str                  # its colour bar's and axis's label
-    get_values: Callable        # its value at every element, from the maps of stress (Pa) and accumulated plastic strain
-    range_setting: str          # the config.py setting that holds its colour range
-
-# The fields drawn. Another is one more line, for example the von Mises stress (material.get_von_mises_stress), with a
-# von_mises_range_MPa = (None, None) in config.py:
-#   Field("von_mises_stress", "von Mises stress (MPa)", lambda stress, _: get_von_mises_stress(stress) / 1e6,
-#         "von_mises_range_MPa")
-fields = [Field("plastic_strain", "Accumulated plastic strain (%)", lambda _, plastic_strain: 100 * plastic_strain,
-                "plastic_strain_range_percent")]
-
-def get_scheme_indices(info):
-    """Every drawn label's place among its method's schemes, which sets its colour (the reference's is 0)."""
-    return {"Reference": 0, **{entry["label"]: entry.get("scheme_index", 0) for entry in info["entries"]}}
-
-def get_finest_entries(entries):
-    """Each scheme's last entry that solved a load step: the one the line figures draw."""
-    finest = {}
-    for entry in entries:
-        if entry["completed_step_count"] > 0:
-            finest[entry["method"], entry.get("scheme", entry["label"])] = entry
-    return list(finest.values())
-
-def get_scheme_points(entries, relative_errors, error_turning_points):
-    """The error-against-time plot's schemes, from the entries that completed the load path: one dict per scheme, its
-    points in the order listed, each with its relative error at every reported turning point."""
-    schemes = {}
-    for entry in entries:
-        key = entry["method"], entry.get("scheme", entry["method"])
-        scheme = schemes.setdefault(key, {"method": entry["method"], "index": entry.get("scheme_index", 0),
-                                          "name": key[1], "points": []})
-        scheme["points"].append((entry.get("point", entry["label"]), entry["online_seconds"],
-                                 [relative_errors[entry["label"]][step] for _, step in error_turning_points]))
-    return list(schemes.values())
-
-def get_cell_map(entry, arrays):
-    """An entry's discretization on its element grid at mid-thickness, with its settings: k-means clusters coloured in.
-    """
-    label, settings = entry["label"], entry["settings"]
-    cluster_ids, element_phase = arrays[f"{label}/element_cluster"], arrays[f"{label}/element_phase"]
-    is_k_means = max(settings.get("matrix_clusters", 1), settings.get("inclusion_clusters", 1)) > 1
-    fill = cluster_ids if is_k_means else None
-    clusters_line = f"{entry['cluster_count']} {'k-means' if is_k_means else 'partition phase'} clusters"
-    if entry["method"] == "Spectral LS":
-        return plots.CellMap(label, f"{settings['elements']} voxels per side, C0: {settings['C0']}",
-                             {"voxel": cluster_ids}, element_phase)
-    if entry["method"] == "SCA":
-        return plots.CellMap(label, f"over the whole cell, C0: {settings['C0']}\n{clusters_line}",
-                             {"cluster": cluster_ids}, element_phase, fill)
-    if entry["method"] == "TFA":
-        return plots.CellMap(label, f"{settings['partitions']} partitions per side\n{clusters_line}",
-                             {"cluster": cluster_ids}, element_phase, fill)
-    return plots.CellMap(label, f"{settings['partitions']} partitions per side, degree {settings['degree']}\n"
-                                f"{clusters_line}",
-                         {"cluster": cluster_ids, "partition": arrays[f"{label}/element_partition"]},
-                         element_phase, fill)
-
-def get_color_limits(field_maps, value_min, value_max):
-    """A map figure's colour limits: the given ones, and those left at None from the finest field's map, the reference's
-    or else Spectral LS's when no map is finer, so the others are read against it (values beyond it are clipped);
-    otherwise from every map. Elements without a value (NaN, the inclusion in a matrix-only map) are left out."""
-    finest_side = max(len(field_map.values) for field_map in field_maps)
-    scale_maps = ([field_map.values for field_map in field_maps if field_map.title == "Reference"]
-                  or [field_map.values for field_map in field_maps
-                      if field_map.title.startswith("Spectral LS") and len(field_map.values) == finest_side]
-                  or [field_map.values for field_map in field_maps])
-    return (min(map(np.nanmin, scale_maps)) if value_min is None else value_min,
-            max(map(np.nanmax, scale_maps)) if value_max is None else value_max)
-
-def get_field_maps(info, arrays, turning_point, field):
-    """A field's map for the reference and every entry that reached the turning point, each on its own elements, and
-    each one's map of its inclusion, by label."""
-    turning_step = arrays["turning_steps"][turning_point]
-    labels = (["Reference"] if info["reference"] is not None else []) + [
-        entry["label"] for entry in info["entries"] if entry["completed_step_count"] > turning_step]
-    field_maps = [plots.FieldMap(label, field.get_values(arrays[f"{label}/stress"][turning_point],
-                                                         arrays[f"{label}/accumulated_plastic_strain"][turning_point]))
-                  for label in labels]
-    return field_maps, {label: arrays[f"{label}/element_phase"] == 1 for label in labels}
-
-def get_matrix_only(field_maps, inclusion_maps):
-    """The maps with their inclusion elements hidden (NaN) when config.field_maps_matrix_only is on."""
-    if not config.field_maps_matrix_only:
-        return field_maps
-    return [plots.FieldMap(field_map.title, np.where(inclusion_maps[field_map.title], np.nan, field_map.values))
-            for field_map in field_maps]
-
-def draw_load_path_figures(folder, info, arrays, drawn):
-    """The figures along the load path, each scheme's finest entry in the stress-strain and stress-error figures, every
-    entry in the error-against-time plot; and with the reference on, the error tables of every entry."""
-    applied_macro_strain = arrays["applied_macro_strain"]
-    step_count = len(applied_macro_strain)
-    finest = get_finest_entries(drawn)
-    scheme_indices = get_scheme_indices(info)
-    stress_MPa = {entry["label"]: arrays[f"{entry['label']}/macro_stress"] / 1e6 for entry in finest}
-    completed_step_counts = {entry["label"]: entry["completed_step_count"] for entry in finest}
-    error_table = ""
-    if info["reference"] is not None:
-        reference_stress = arrays["Reference/macro_stress"]
-        stress_MPa = {"Reference": reference_stress / 1e6, **stress_MPa}
-        completed_step_counts["Reference"] = step_count
-        relative_errors = get_relative_stress_errors(info, arrays)
-        error_turning_points = get_error_turning_points(arrays)
-        components = get_loaded_components(reference_stress)
-        errors = get_macro_stress_errors(info, arrays, components)
-        error_table = "\n\n".join([get_relative_error_table(info, relative_errors, error_turning_points, step_count),
-                                   get_error_table(info, errors, components, step_count)])
-        plots.plot_macro_stress_errors({entry["label"]: errors[entry["label"]] for entry in finest}, components,
-                                       step_count, scheme_indices, folder / "macro_stress_error.png")
-        schemes = get_scheme_points([entry for entry in drawn if entry["completed_step_count"] == step_count],
-                                    relative_errors, error_turning_points)
-        if any(len(scheme["points"]) > 1 for scheme in schemes):
-            plots.plot_error_against_time(schemes, [f"Turning point {index + 1} (step {step + 1})"
-                                                    for index, step in error_turning_points],
-                                          folder / "error_against_time.png")
-    plots.plot_stress_strain(stress_MPa, completed_step_counts, applied_macro_strain, scheme_indices,
-                             folder / "stress_strain.png")
-    return error_table
-
-def draw_field_figures(folder, info, arrays):
-    """Every field's maps and profile at config.map_turning_point. A saved run may have fewer turning points than
-    config.py's load path."""
-    turning_steps = arrays["turning_steps"]
-    turning_point = (len(turning_steps) if config.map_turning_point == "last"
-                     else min(config.map_turning_point, len(turning_steps))) - 1
-    title = (f"Turning point {turning_point + 1} of {len(turning_steps)}: load step {turning_steps[turning_point] + 1} "
-             f"of {len(arrays['applied_macro_strain'])}")
-    # The profile follows the middle row of the mesh's elements, which the reference's subdivide; a map on other
-    # elements (Spectral LS's) shows its row at that height. The inclusion's stretches come from the finest map.
-    profile_height = (info["clustered_mesh"] // 2 + 0.5) / info["clustered_mesh"]
-    reached = [entry for entry in info["entries"] if entry["completed_step_count"] > turning_steps[turning_point]]
-    profile_labels = {"Reference", *(entry["label"] for entry in get_finest_entries(reached))}
-    for field in fields:
-        field_maps, inclusion_maps = get_field_maps(info, arrays, turning_point, field)
-        if not field_maps:
-            print(f"No entry reached turning point {turning_point + 1}, so no maps: see config.map_turning_point.")
-            return
-        shown_maps = get_matrix_only(field_maps, inclusion_maps)
-        plots.plot_field_maps(shown_maps, field.label, title,
-                              *get_color_limits(shown_maps, *getattr(config, field.range_setting)),
-                              folder / f"{field.name}.png")
-        plots.plot_field_profiles([field_map for field_map in field_maps if field_map.title in profile_labels],
-                                  profile_height, max(inclusion_maps.values(), key=len), field.label, title,
-                                  info["side_length_mm"], get_scheme_indices(info), folder / f"{field.name}_profile.png")
-
-def draw_run(folder):
-    """Every table and figure of a saved run, from what it saved, with config.py's figure settings: the tables printed
-    and written to summary.txt."""
-    info, arrays = get_saved_run(folder)
-    # Runs saved before element_kernel existed all used Moulinec–Suquet's.
-    problem = (f"{info['geometry']}, {info['materials']}, {info['load_path']} (unloaded directions "
-               f"{info.get('unloaded_directions', 'fixed')}); element kernel "
-               f"{info.get('element_kernel', 'Moulinec-Suquet')}")
-    tables = [problem, get_timing_table(info, len(arrays["applied_macro_strain"]))]
-    drawn = [entry for entry in info["entries"] if entry["completed_step_count"] > 0]
-    if drawn:
-        tables.append(draw_load_path_figures(folder, info, arrays, drawn))
-        plots.plot_cross_section([get_cell_map(entry, arrays) for entry in drawn], folder / "cross_section.png")
-        draw_field_figures(folder, info, arrays)
-    summary = "\n\n".join(table for table in tables if table)
-    print(f"\n{summary}\n")
-    (folder / "summary.txt").write_text(summary + "\n")
 
 if __name__ == "__main__":
     main()
