@@ -41,6 +41,11 @@ steps_to_first_turning_point = 15      # the load path's other lines keep the sa
 # FFT-TFA, SCA and TFA all group the elements of one fine mesh, which resolves the geometry, into clusters. Spectral LS
 # and the reference set their own elements.
 clustered_mesh              = 512        # elements per side
+# How every method's k-means clusters are found: "plain", one k-means into all of a part's clusters; or "nested",
+# halving the cluster with the largest spread until there are enough, so clusters at a larger count split those at a
+# smaller one. Nested is far faster to compute (seconds against minutes for many clusters) and slightly less accurate
+# at equal count.
+k_means_method              = "nested"
 
 # The element kernel Γ0 of every LS method: FFT-TFA, SCA, Spectral LS, the reference and the k-means features, so all
 # share one discretization. "Willot", the rotated staggered grid (Willot 2015): smaller errors at equal resolution and
@@ -184,8 +189,8 @@ sca_pure_shear_tolerance    = 1e-12
 sca_kernel_parts_tolerance  = 1e-10
 sca_assembly_rows           = 600
 
-# k-means: Lloyd iterations from a seeded start (scipy's minit), on features from six elastic Spectral LS solves with
-# this reference stiffness.
+# k-means (each k-means of k_means_method): Lloyd iterations from a seeded start (scipy's minit), on features from six
+# elastic Spectral LS solves with this reference stiffness.
 k_means_iterations          = 50
 k_means_seed                = 0
 k_means_start               = "++"
@@ -301,6 +306,8 @@ def check_inputs():
 
     if not (fft_tfa or sca or spectral_ls or tfa):
         raise ValueError("Nothing to run: fft_tfa, sca, spectral_ls and tfa are all empty.")
+    if k_means_method not in ("plain", "nested"):
+        raise ValueError(f"k_means_method must be \"plain\" or \"nested\". Got {k_means_method!r}.")
     if element_kernel not in ("Willot", "Moulinec-Suquet"):
         raise ValueError(f"element_kernel must be \"Willot\" or \"Moulinec-Suquet\". Got {element_kernel!r}.")
     check_entries("fft_tfa", fft_tfa, ("partitions", "matrix_clusters", "inclusion_clusters", "degree"))

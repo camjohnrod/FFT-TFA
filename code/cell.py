@@ -12,6 +12,7 @@ clustering, peak memory and the cache of expensive results (E and P, the referen
 """
 
 import hashlib
+import heapq
 import re
 import warnings
 from typing import NamedTuple
@@ -238,15 +239,53 @@ def cluster_by_phase(mesh):
     _, element_cluster = np.unique(2 * mesh.element_partition + mesh.element_phase, return_inverse=True)
     return element_cluster
 
+def run_k_means(features, cluster_count, rng):
+    """scipy's k-means (Lloyd iterations from a seeded start) into cluster_count clusters: each row's label."""
+    with warnings.catch_warnings():
+        # An empty cluster is dropped by the caller, and run.py prints how many clusters there are.
+        warnings.filterwarnings("ignore", "One of the clusters is empty")
+        _, labels = scipy.cluster.vq.kmeans2(features, cluster_count, iter=config.k_means_iterations,
+                                             minit=config.k_means_start, rng=rng)
+    return labels
+
+def run_nested_k_means(features, cluster_count, rng):
+    """Nested (bisecting) k-means: start from one cluster, and split the cluster with the largest squared distance to
+    its mean in two by k-means, until there are cluster_count clusters or none can be split. Each cluster is a union of
+    clusters of any larger count, so refining nests, and every split is a k-means of 2, much cheaper than one of
+    cluster_count. Returns each row's label."""
+    labels = np.zeros(len(features), dtype=int)
+
+    def candidate(label):
+        """(minus the cluster's squared error, its label, its rows): heapq pops the largest error first."""
+        rows = np.flatnonzero(labels == label)
+        return -np.sum((features[rows] - features[rows].mean(axis=0))**2), label, rows
+
+    candidates = [candidate(0)]
+    label_count = 1
+    while label_count < cluster_count and candidates:
+        squared_error, label, rows = heapq.heappop(candidates)
+        if squared_error == 0:       # one distinct feature left: the largest error is zero, none can be split
+            break
+        halves = run_k_means(features[rows], 2, rng)
+        if halves.min() == halves.max():
+            continue                 # k-means left one half empty: keep the cluster whole
+        labels[rows[halves == 1]] = label_count
+        heapq.heappush(candidates, candidate(label))
+        heapq.heappush(candidates, candidate(label_count))
+        label_count += 1
+    return labels
+
 def cluster_by_k_means(mesh, element_features, matrix_clusters, inclusion_clusters):
     """Clusters by k-means: each partition's part in each phase is split by k-means on its elements' features (one row
-    per element: the elastic strain concentration, Liu–Bessa–Liu 2016, section 2.2.1). Returns every element's cluster.
+    per element: the elastic strain concentration, Liu–Bessa–Liu 2016, section 2.2.1), plain or nested as
+    config.k_means_method says. Returns every element's cluster.
 
     A partition's matrix part gets up to matrix_clusters clusters and its inclusion part up to inclusion_clusters, fewer
     when a part has fewer distinct features; clusters k-means leaves empty are dropped. A cluster's key is
     (2 × partition + phase) × the larger count + its label in its part, so the clusters are numbered partition by
     partition, matrix first, and with one cluster per part this is cluster_by_phase."""
     rng = np.random.default_rng(config.k_means_seed)
+    split = run_k_means if config.k_means_method == "plain" else run_nested_k_means
     cluster_counts = (matrix_clusters, inclusion_clusters)
     part_keys = 2 * mesh.element_partition + mesh.element_phase
     part_order = np.argsort(part_keys, kind="stable")
@@ -258,12 +297,7 @@ def cluster_by_k_means(mesh, element_features, matrix_clusters, inclusion_cluste
                             len(np.unique(features, axis=0)))
         if cluster_count == 1:
             continue
-        with warnings.catch_warnings():
-            # An empty cluster is dropped below, and run.py prints how many clusters there are.
-            warnings.filterwarnings("ignore", "One of the clusters is empty")
-            _, part_labels = scipy.cluster.vq.kmeans2(features, cluster_count, iter=config.k_means_iterations,
-                                                      minit=config.k_means_start, rng=rng)
-        labels[elements] = part_labels
+        labels[elements] = split(features, cluster_count, rng)
     _, element_cluster = np.unique(part_keys * max(cluster_counts) + labels, return_inverse=True)
     return element_cluster
 

@@ -67,6 +67,18 @@ increments and repeated solves, and SCA's own numbers show no gain at equal time
 clustering (start untrained, split clusters where the plastic strain jumps, as Ferreira et al. 2022 do for SCA; for
 FFT-TFA a split changes only its partition's corrections, not the moment kernels).
 
+**Findings (2026-11-15, later): material states, not the interaction, limit plasticity.** On the 35 % fibers (1 %
+then γ12 1 %, uniaxial stress, 1024² reference), error against the number of material states: in the elastic step
+the methods differ by how they see the geometry (untrained FFT-TFA about 20× better than Spectral LS per state);
+after yield FFT-TFA, k-means or untrained, lies on Spectral LS's line, so states inside partitions are worth no more
+than voxels, while SCA's cell-wide clusters are about 10× better per state at a few hundred. The rates differ: about
+0.7 for voxels, 0.4–0.5 for clusters inside partitions, and 0.25–0.35 for cell-wide clusters, falling as they are
+refined. Cell-wide clusters for FFT-TFA were estimated and dropped: memory stays under 1 GB, but 256–4096 clusters
+fragment into 41k–111k parts per partition lattice, and FFT-TFA's cost grows with the parts, 3–4× more than today's
+clusters for the same accuracy. Nested (bisecting) k-means against plain, for SCA with C0 = L_m on cell-wide
+clusters: about 15 % more error at equal count (7.03 → 8.22 % at 256, 4.99 → 5.71 % at 1024), the same rate, and
+clustering in 4.6 / 6.4 s instead of 65 / 915 s; added as `k_means_method`.
+
 **Tried and set aside** (not to redo without a new reason):
 - For FFT-TFA, one fiber part per fiber in each partition: stiffer and less accurate.
 - A per-partition block-Jacobi preconditioner: fewer GMRES iterations, slower overall.
@@ -80,8 +92,9 @@ FFT-TFA a split changes only its partition's corrections, not the moment kernels
   clusters in a partition, which is SCA's case.
 - A C0 stiffer than every phase, 2026-11-13 (lecture, section 4): every error part stiff, but 8–25 times less
   accurate and 2–3 times slower; the setting was removed.
-- Cell-wide k-means for FFT-TFA and TFA: it fragments into many parts per partition, which breaks FFT-TFA's memory
-  advantage.
+- Cell-wide k-means for FFT-TFA and TFA: it fragments into many parts per partition, and FFT-TFA's cost grows with
+  the parts (re-estimated 2026-11-15 with the polynomial far field: 3–4× the cost of today's clusters at equal
+  accuracy).
 - SCA's residual in total form with a self-consistent C0, 2026-11-12: C0 then moves the whole solution, the fit has no
   root and the loop runs away; hence SC-1 in increments.
 - Removed in the cleanups (git tags `pre-cleanup`, `pre-cleanup-2`, `pre-cleanup-3`): fixed-point solvers,

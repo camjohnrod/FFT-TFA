@@ -99,7 +99,8 @@ FFT, clusters for the material states.
 | **Clusters** $a$ | elements of one phase inside one partition, sharing **one material state**: one strain, stress and plastic strain | accuracy |
 
 A partition holds one cluster per phase, or more, found by k-means on each element's elastic strain concentration
-(`cell.cluster_by_k_means`, as in SCA: Liu–Bessa–Liu 2016, §2.2.1). Each cluster lies inside one partition: that is
+(`cell.cluster_by_k_means`, as in SCA: Liu–Bessa–Liu 2016, §2.2.1), either in one go or nested, by halving the most
+spread cluster until there are enough (`config.k_means_method`). Each cluster lies inside one partition: that is
 what connects the two coarse grids. $v(a)=\lvert a\rvert/\lvert A\rvert$ is cluster $a$'s share of its partition, with
 $\lvert a\rvert$, $\lvert A\rvert$ their numbers of elements.
 

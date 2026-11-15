@@ -116,7 +116,8 @@ pinned_inputs = {
     "sca_kernel_parts_tolerance": 1e-10, "sca_assembly_rows": 600,
     "tfa_factorization_ordering": "MMD_AT_PLUS_A",
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
-    "k_means_iterations": 50, "k_means_seed": 0, "k_means_start": "++", "placement_attempts": 100000,
+    "k_means_method": "plain", "k_means_iterations": 50, "k_means_seed": 0, "k_means_start": "++",
+    "placement_attempts": 100000,
     "push_margin": 1e-3, "push_passes": 10000, "reference": None, "k_means_features_C0": "midpoint",
     "memory_limit_GB": None, "map_turning_point": "last"}
 
@@ -154,6 +155,10 @@ check_problems = {
     # The shape config.py sets up by default: fibers at random positions, with k-means clusters.
     "random fibers": {"geometry": "random fibers",
                       **get_check_entries(partitions=9, spectral_elements=27, matrix_clusters=2)},
+    # The same with nested k-means (k_means_method "nested"), four matrix clusters per part so that clusters are split
+    # more than once: the only test of nested k-means.
+    "random fibers, nested k-means": {"geometry": "random fibers", "k_means_method": "nested",
+                                      **get_check_entries(partitions=9, spectral_elements=27, matrix_clusters=4)},
     # Spheres at random positions on a 12³ mesh, with k-means clusters: the only test of random placement in 3D.
     "random spheres": {"geometry": "random spheres", "clustered_mesh": 12,
                        **get_monotonic_load(strain(e11=0.015, e33=0.020, g13=0.03)),
