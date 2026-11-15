@@ -11,14 +11,16 @@ A run, in order: the load path (get_load_path), the reference (get_reference, ca
 a process of its own (solve_all), then saved (save_run) and drawn (draw_run). Its folder holds:
   config.py                    the settings it ran with
   run.json, results.npz        what each entry did and cost, and its results (read them with get_saved_run): the
-                               macroscopic stress at every step, and maps of the element layer at mid-thickness (each
-                               element's cluster, partition and phase; its stress and accumulated plastic strain at
-                               every turning point)
+                               macroscopic stress and strain at every step, and maps of the element layer at
+                               mid-thickness (each element's cluster, partition and phase; its stress and accumulated
+                               plastic strain at every turning point)
   summary.txt                  each entry's clusters, times, iterations and peak memory, and with the reference on,
-                               its macroscopic stress errors
+                               its relative macroscopic stress error (|Σ − Σ_ref| / |Σ_ref|) at the first step and
+                               the turning points, and its error per loaded component
   stress_strain.png            macroscopic stress against applied strain, every entry and the reference
   macro_stress_error.png       with the reference on: each entry's macroscopic stress error in every loaded component
-  error_against_time.png       with the reference on and several entries of a method: rms error against online time
+  error_against_time.png       with the reference on and several entries of a method: the relative error against
+                               online time, one panel per turning point away from zero strain
   cross_section.png            each entry's elements, clusters and partitions
   plastic_strain.png           the accumulated plastic strain at config.map_turning_point, one map per entry
   plastic_strain_profile.png   the same along the middle element row, every entry on one plot
@@ -47,7 +49,7 @@ from cell import (Clusters, cluster_by_k_means, cluster_by_phase, get_cache_entr
 from fft_tfa_model import FFTTFASolver, get_polynomial_basis, resolve_degree
 from ls_model import SpectralLSSolver, get_elastic_strain_concentration, get_element_clusters
 from material import get_unloaded_plastic_state
-from newton import SolverDidNotConverge
+from newton import SolverDidNotConverge, get_stress_free_components
 from sca_model import SCASolver
 from tfa_model import TFASolver
 
@@ -87,6 +89,10 @@ def preview():
     print(f"Materials {config.materials!r}: contrast {phases['inclusion']['E'] / phases['matrix']['E']:.3g}")
     print(f"Load path {config.load_path!r}: {len(load_path.applied_macro_strain)} steps, turning points at steps "
           f"{', '.join(str(step + 1) for step in load_path.turning_steps)}")
+    stress_free = [label for label, is_free in zip(("σ11", "σ22", "σ33", "σ12", "σ23", "σ13"),
+                                                   get_stress_free_components()) if is_free]
+    print(f"Unloaded directions {config.unloaded_directions}: "
+          + (f"zero macroscopic stress {', '.join(stress_free)}" if stress_free else "every strain component imposed"))
     print(f"Element kernel of the LS methods: {config.element_kernel}")
     entries, arrays = [], {}
     for entry in get_entries():
@@ -232,7 +238,8 @@ def get_solver(entry):
 ## ------- Load Path ------- ##
 
 class LoadPath(NamedTuple):
-    applied_macro_strain: np.ndarray   # the macroscopic strain at every load step, one row per step
+    applied_macro_strain: np.ndarray   # the imposed macroscopic strain at every load step, one row per step; zero in
+                                       # the stress-free components (config.unloaded_directions), which the cell sets
     turning_steps: np.ndarray          # the load step of each turning point
 
 def get_load_path():
@@ -248,11 +255,13 @@ def get_load_path():
     return LoadPath(np.vstack(lines), np.cumsum([len(line) for line in lines]) - 1)
 
 class LoadPathResult(NamedTuple):
-    """One solver's results at every load step: the stress's volume average over the cell and each step's iterations and
-    time; at field_steps only, the stress and accumulated plastic strain per cluster (cell.Clusters), a fine lattice's
-    fields at every step not fitting in memory. Steps past completed_step_count were not solved and hold zeros."""
+    """One solver's results at every load step: the stress's and the strain's volume average over the cell (the strain
+    is the imposed one, but for the stress-free components) and each step's iterations and time; at field_steps only,
+    the stress and accumulated plastic strain per cluster (cell.Clusters), a fine lattice's fields at every step not
+    fitting in memory. Steps past completed_step_count were not solved and hold zeros."""
     clusters: Clusters
     macro_stress: np.ndarray
+    macro_strain: np.ndarray
     field_steps: np.ndarray
     cluster_stress: np.ndarray
     accumulated_plastic_strain: np.ndarray
@@ -268,7 +277,7 @@ def run_load_path(label, solver, applied_macro_strain, field_steps):
     clusters = solver.clusters
     plastic_history = get_unloaded_plastic_state(clusters.cluster_count)
     step_count = len(applied_macro_strain)
-    macro_stress = np.zeros((step_count, 6))
+    macro_stress, reached_macro_strain = np.zeros((step_count, 6)), np.zeros((step_count, 6))
     cluster_stress = np.zeros((len(field_steps), clusters.cluster_count, 6))
     accumulated_plastic_strain = np.zeros((len(field_steps), clusters.cluster_count))
     newton_iterations_per_step = np.zeros(step_count, dtype=int)
@@ -290,14 +299,15 @@ def run_load_path(label, solver, applied_macro_strain, field_steps):
         newton_iterations_per_step[step] = step_result.newton_iteration_count
         krylov_iterations_per_step[step] = step_result.krylov_iteration_count
         macro_stress[step] = clusters.average(step_result.stress)
+        reached_macro_strain[step] = solver.get_mean_strain(step_result.strain, macro_strain)
         for position in np.flatnonzero(field_steps == step):
             cluster_stress[position] = step_result.stress
             accumulated_plastic_strain[position] = step_result.plastic_state.accumulated_plastic_strain
         plastic_history = step_result.plastic_state
     load_steps.close()
-    return LoadPathResult(clusters, macro_stress, field_steps, cluster_stress, accumulated_plastic_strain,
-                          newton_iterations_per_step, krylov_iterations_per_step, solve_time_per_step,
-                          completed_step_count, failure_reason)
+    return LoadPathResult(clusters, macro_stress, reached_macro_strain, field_steps, cluster_stress,
+                          accumulated_plastic_strain, newton_iterations_per_step, krylov_iterations_per_step,
+                          solve_time_per_step, completed_step_count, failure_reason)
 
 ## ------- One Entry at a Time, Each in its Own Process ------- ##
 
@@ -384,13 +394,17 @@ def solve_all(load_path, field_steps=None):
 # cached (cell.get_cached) under every input that changes its answer, like E and P.
 
 # Increase whenever a code change alters the reference, so caches made by the old code are recomputed.
-reference_cache_version = 3
+reference_cache_version = 4
 
 def get_reference_parameters(load_path):
     """Every input that changes the reference's answer, its cache key. The keys' names are hashed into the cache file's
     name, so they keep their names even where the inputs were renamed."""
     elements = config.reference["elements"]
-    return {"cache_version": reference_cache_version, "discretization": config.element_kernel,
+    # The stress-free components join the key only when there are some, so references solved before they existed, all
+    # strain-controlled, still load.
+    stress_free = get_stress_free_components()
+    return {**({"stress_free": stress_free} if stress_free.any() else {}),
+            "cache_version": reference_cache_version, "discretization": config.element_kernel,
             **get_geometry_parameters(), "elements_per_side": elements, "constant_along_z": is_shape_constant_along_z(),
             "L_matrix": get_matrix_L(), "L_inclusion": get_inclusion_L(),
             "yield_stress": [phase["yield_stress"] for phase in config.all_materials[config.materials].values()],
@@ -421,14 +435,18 @@ def get_reference(load_path):
                                f"{result.failure_reason}")
         # The arrays keep the names older caches were saved with, so those still load.
         return {"material_ids": clusters.materials.phase,
-                "macroscopic_stress": result.macro_stress, "stress": result.cluster_stress,
+                "macroscopic_stress": result.macro_stress, "macro_strain": result.macro_strain,
+                "stress": result.cluster_stress,
                 "accumulated_plastic_strain": result.accumulated_plastic_strain,
                 "build_seconds": time.perf_counter() - start_time}
 
     description = f"reference, {voxels} voxels, {config.geometry}, {config.materials}, {config.load_path}"
     arrays = get_cached("reference", get_reference_parameters(load_path), description, compute)
     no_iterations = np.zeros(step_count, dtype=int)
-    result = LoadPathResult(clusters, arrays["macroscopic_stress"], load_path.turning_steps, arrays["stress"],
+    # References cached before the reached strain was kept are strain-controlled: theirs is the imposed one.
+    macro_strain = arrays.get("macro_strain", load_path.applied_macro_strain)
+    result = LoadPathResult(clusters, arrays["macroscopic_stress"], macro_strain, load_path.turning_steps,
+                            arrays["stress"],
                             arrays["accumulated_plastic_strain"], no_iterations, no_iterations, np.zeros(step_count),
                             step_count, "")
     return result, {"settings": config.reference, "voxels": voxels, "build_seconds": float(arrays["build_seconds"])}
@@ -462,6 +480,7 @@ def save_run(load_path, results, entries, reference):
     shutil.copy(config.__file__, folder / "config.py")
     info = {"results_name": config.results_name, "date": date.isoformat(timespec="seconds"),
             "geometry": config.geometry, "materials": config.materials, "load_path": config.load_path,
+            "unloaded_directions": config.unloaded_directions,
             "clustered_mesh": config.clustered_mesh, "element_kernel": config.element_kernel,
             "side_length_mm": 1e3 * config.cell_side,
             "reference": reference, "entries": entries}
@@ -474,7 +493,7 @@ def save_run(load_path, results, entries, reference):
         layer = get_mid_layer_clusters(result.clusters)
         arrays |= get_cluster_maps(label, result.clusters)
         # The fields at the turning points in single precision, since they are only drawn.
-        arrays |= {f"{label}/macro_stress": result.macro_stress,
+        arrays |= {f"{label}/macro_stress": result.macro_stress, f"{label}/macro_strain": result.macro_strain,
                    f"{label}/stress": result.cluster_stress[:, layer].astype(np.float32),
                    f"{label}/accumulated_plastic_strain": result.accumulated_plastic_strain[:, layer].astype(np.float32)}
     np.savez_compressed(folder / "results.npz", **arrays)
@@ -516,6 +535,41 @@ def get_timing_table(info, step_count):
                      f"{info['reference']['build_seconds']:.0f} s (not timed against the entries)")
     return "\n".join(lines)
 
+# Voigt stress holds each shear once, so its squares are weighted by 2 to give the tensor norm.
+stress_norm_weights = np.array([1, 1, 1, 2, 2, 2])
+
+def get_relative_stress_errors(info, arrays):
+    """Each entry's relative macroscopic stress error |Σ − Σ_ref| / |Σ_ref| (%, tensor norms) at every step it solved:
+    Schneider 2019's eq. (5.1), there for Σ11, on the whole tensor, so it depends on no choice of axes."""
+    reference_stress = arrays["Reference/macro_stress"]
+    errors = {}
+    for entry in info["entries"]:
+        solved = entry["completed_step_count"]
+        if solved > 0:
+            difference = arrays[f"{entry['label']}/macro_stress"][:solved] - reference_stress[:solved]
+            errors[entry["label"]] = 100 * np.sqrt(
+                (stress_norm_weights * difference**2).sum(axis=1)
+                / (stress_norm_weights * reference_stress[:solved]**2).sum(axis=1))
+    return errors
+
+def get_error_turning_points(arrays):
+    """The turning points the relative error is reported at, as (turning point index, step): all but those at zero
+    strain, where the reference stress is only the residual stress and the ratio means nothing."""
+    return [(index, step) for index, step in enumerate(arrays["turning_steps"])
+            if np.any(arrays["applied_macro_strain"][step] != 0)]
+
+def get_relative_error_table(info, relative_errors, error_turning_points, step_count):
+    """The relative errors of get_relative_stress_errors at the first step (elastic, or nearly) and at the reported
+    turning points; – where an entry stopped before."""
+    columns = [("Step 1", 0), *((f"TP {index + 1} (step {step + 1})", step) for index, step in error_turning_points)]
+    rows = [("Entry", *(name for name, _ in columns), "Steps")]
+    for label, error in relative_errors.items():
+        rows.append((label, *(f"{error[step]:.2f}" if step < len(error) else "–" for _, step in columns),
+                     f"{len(error)}/{step_count}"))
+    return "\n".join([f"Relative macroscopic stress error |Σ − Σ_ref| / |Σ_ref| (%, tensor norms; Schneider 2019, eq. "
+                      f"5.1) against the reference (Spectral LS on {info['reference']['voxels']} voxels), at the first "
+                      "step and the turning points (TP):", *format_table(rows)])
+
 def get_loaded_components(reference_stress):
     """The stress components the load path produces: those whose reference value reaches config.loaded_stress_fraction
     of the largest reference component somewhere along the path."""
@@ -535,13 +589,9 @@ def get_macro_stress_errors(info, arrays, components):
             errors[entry["label"]] = 100 * (stress - reference_stress[:solved]) / scale
     return errors
 
-def get_root_mean_square_error(error):
-    """An entry's one number: the root mean square over the path of each component's error, then over the components."""
-    return np.sqrt(np.mean(np.mean(error**2, axis=0)))
-
 def get_error_table(info, macro_stress_errors, components, step_count):
-    """The errors of get_macro_stress_errors summarized per component: the largest magnitude over the steps an entry
-    solved, and their root mean square."""
+    """The errors of get_macro_stress_errors summarized per component, to see where an error comes from: the largest
+    magnitude over the steps an entry solved, and their root mean square."""
     rows = [("Entry", *(f"σ{plots.stress_component_subscripts[component]} max / rms (%)" for component in components),
              "Steps")]
     for label, error in macro_stress_errors.items():
@@ -579,16 +629,16 @@ def get_finest_entries(entries):
             finest[entry["method"], entry.get("scheme", entry["label"])] = entry
     return list(finest.values())
 
-def get_scheme_points(entries, errors):
+def get_scheme_points(entries, relative_errors, error_turning_points):
     """The error-against-time plot's schemes, from the entries that completed the load path: one dict per scheme, its
-    points in the order listed."""
+    points in the order listed, each with its relative error at every reported turning point."""
     schemes = {}
     for entry in entries:
         key = entry["method"], entry.get("scheme", entry["method"])
         scheme = schemes.setdefault(key, {"method": entry["method"], "index": entry.get("scheme_index", 0),
                                           "name": key[1], "points": []})
         scheme["points"].append((entry.get("point", entry["label"]), entry["online_seconds"],
-                                 get_root_mean_square_error(errors[entry["label"]])))
+                                 [relative_errors[entry["label"]][step] for _, step in error_turning_points]))
     return list(schemes.values())
 
 def get_cell_map(entry, arrays):
@@ -645,7 +695,7 @@ def get_matrix_only(field_maps, inclusion_maps):
 
 def draw_load_path_figures(folder, info, arrays, drawn):
     """The figures along the load path, each scheme's finest entry in the stress-strain and stress-error figures, every
-    entry in the error-against-time plot; and with the reference on, the error table of every entry."""
+    entry in the error-against-time plot; and with the reference on, the error tables of every entry."""
     applied_macro_strain = arrays["applied_macro_strain"]
     step_count = len(applied_macro_strain)
     finest = get_finest_entries(drawn)
@@ -657,14 +707,20 @@ def draw_load_path_figures(folder, info, arrays, drawn):
         reference_stress = arrays["Reference/macro_stress"]
         stress_MPa = {"Reference": reference_stress / 1e6, **stress_MPa}
         completed_step_counts["Reference"] = step_count
+        relative_errors = get_relative_stress_errors(info, arrays)
+        error_turning_points = get_error_turning_points(arrays)
         components = get_loaded_components(reference_stress)
         errors = get_macro_stress_errors(info, arrays, components)
-        error_table = get_error_table(info, errors, components, step_count)
+        error_table = "\n\n".join([get_relative_error_table(info, relative_errors, error_turning_points, step_count),
+                                   get_error_table(info, errors, components, step_count)])
         plots.plot_macro_stress_errors({entry["label"]: errors[entry["label"]] for entry in finest}, components,
                                        step_count, scheme_indices, folder / "macro_stress_error.png")
-        schemes = get_scheme_points([entry for entry in drawn if entry["completed_step_count"] == step_count], errors)
+        schemes = get_scheme_points([entry for entry in drawn if entry["completed_step_count"] == step_count],
+                                    relative_errors, error_turning_points)
         if any(len(scheme["points"]) > 1 for scheme in schemes):
-            plots.plot_error_against_time(schemes, folder / "error_against_time.png")
+            plots.plot_error_against_time(schemes, [f"Turning point {index + 1} (step {step + 1})"
+                                                    for index, step in error_turning_points],
+                                          folder / "error_against_time.png")
     plots.plot_stress_strain(stress_MPa, completed_step_counts, applied_macro_strain, scheme_indices,
                              folder / "stress_strain.png")
     return error_table
@@ -700,7 +756,8 @@ def draw_run(folder):
     and written to summary.txt."""
     info, arrays = get_saved_run(folder)
     # Runs saved before element_kernel existed all used Moulinec–Suquet's.
-    problem = (f"{info['geometry']}, {info['materials']}, {info['load_path']}; element kernel "
+    problem = (f"{info['geometry']}, {info['materials']}, {info['load_path']} (unloaded directions "
+               f"{info.get('unloaded_directions', 'fixed')}); element kernel "
                f"{info.get('element_kernel', 'Moulinec-Suquet')}")
     tables = [problem, get_timing_table(info, len(arrays["applied_macro_strain"]))]
     drawn = [entry for entry in info["entries"] if entry["completed_step_count"] > 0]

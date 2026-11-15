@@ -17,7 +17,7 @@ import scipy.fft
 import config
 from cell import cluster_by_phase, get_clusters, get_inclusion_L, get_matrix_L, get_mesh
 from material import get_algorithmic_stiffness, get_unloaded_plastic_state, radial_return
-from newton import Evaluation, Solver, SolverDidNotConverge, apply_blocks
+from newton import Evaluation, Solver, SolverDidNotConverge, apply_blocks, get_free_compliance, get_free_strain
 
 ## ------- Convolution on a Lattice ------- ##
 
@@ -133,13 +133,19 @@ def get_element_clusters(elements):
 class SpectralLSSolver(Solver):
     """Spectral LS: the LS equation LS-18 on the elements, each element its own partition and cluster. Newton on the
     element strains, each correction by conjugate gradients (LS-28), convergence judged in matrix units (LS-24).
-    clusters: one per element (get_element_clusters); C0: the reference stiffness's name, "midpoint" or "matrix"."""
-    def __init__(self, clusters, C0):
-        super().__init__(clusters, clusters.cluster_count)
+    clusters: one per element (get_element_clusters); C0: the reference stiffness's name, "midpoint" or "matrix".
+
+    With stress-free components, P̂0 at frequency zero, which acts on the cell's mean, is S_F C0 instead of zero (SF-4):
+    P0 then also gives the mean strain the cell takes there, and stays a projection, so LS-24 and LS-28 hold as they
+    are."""
+    def __init__(self, clusters, C0, stress_free=None):
+        super().__init__(clusters, clusters.cluster_count, stress_free)
         if clusters.cluster_count != clusters.mesh.element_count:
             raise ValueError("Spectral LS needs exactly one cluster per element.")
         self.C0 = get_spectral_C0(C0)
         self.P0_transformed = get_P0_transformed(clusters.mesh.element_shape, self.C0)
+        self.free_compliance = get_free_compliance(self.C0, self.stress_free)
+        self.P0_transformed[0, 0, 0] += self.free_compliance @ self.C0
         self.to_matrix_units = get_matrix_units_operator(self.P0_transformed, self.C0, get_matrix_L())
 
     def measure_residual(self, residual):
@@ -148,10 +154,12 @@ class SpectralLSSolver(Solver):
 
     def evaluate(self, strain, macro_strain, plastic_history):
         """The LS-18 residual r = ε − ε̄ − P0 μ*, with μ* = ε − C0⁻¹ σ the equivalent eigenstrain (LS-6), and the
-        candidate plastic state and stress."""
+        candidate plastic state and stress. With stress-free components, ε̄ is joined by the mean strain it frees
+        itself (SF-2 without its polarization, which P0 covers at frequency zero)."""
         plastic_state, stress = radial_return(strain, self.clusters.materials, plastic_history)
         equivalent_eigenstrain = strain - np.linalg.solve(self.C0, stress.T).T
-        residual = strain - macro_strain - apply_on_lattice(self.P0_transformed, equivalent_eigenstrain)
+        free_strain = get_free_strain(self.free_compliance, self.C0, np.zeros(6), macro_strain)
+        residual = strain - (macro_strain + free_strain) - apply_on_lattice(self.P0_transformed, equivalent_eigenstrain)
         return Evaluation(strain, plastic_state, stress, residual)
 
     def get_newton_correction(self, current, plastic_history):
@@ -182,7 +190,9 @@ class SpectralLSSolver(Solver):
             correction += step * direction
             linear_residual = linear_residual - step * jacobian_direction   # not in place: direction may be it
             if np.linalg.norm(linear_residual) <= tolerance:
-                return correction, iteration
+                # The correction projected onto the strains J is symmetric on (P0 is their projection), so the
+                # round-off CG leaves outside them does not build up from one Newton iteration to the next.
+                return apply_on_lattice(self.P0_transformed, correction), iteration
             next_residual_product = inner_product(linear_residual, linear_residual)
             direction = linear_residual + (next_residual_product / residual_product) * direction
             residual_product = next_residual_product
@@ -192,10 +202,11 @@ class SpectralLSSolver(Solver):
 def get_elastic_strain_concentration(clusters, C0):
     """The strain of every element per unit macro strain in elasticity, elements × 6 × 6 (column k for the k-th unit
     macro strain): the strain concentration tensor that k-means clusters on (Liu–Bessa–Liu 2016, section 2.2.1). Each
-    column is one Spectral LS load step from zero, with every phase elastic."""
+    column is one Spectral LS load step from zero, with every phase elastic and every strain component imposed, whatever
+    the load path frees."""
     materials = clusters.materials
     elastic_materials = materials._replace(yield_stress=np.full(len(materials.yield_stress), np.inf))
-    solver = SpectralLSSolver(clusters._replace(materials=elastic_materials), C0)
+    solver = SpectralLSSolver(clusters._replace(materials=elastic_materials), C0, stress_free=np.zeros(6, dtype=bool))
     unloaded = get_unloaded_plastic_state(clusters.cluster_count)
     columns = []
     for unit_strain in np.eye(6):

@@ -29,7 +29,7 @@ from cell import Clusters, get_matrix_L
 from ls_model import apply_on_lattice, get_element_kernel, to_fourier_blocks
 from material import get_algorithmic_stiffness, radial_return
 from newton import (Evaluation, Solver, apply_blocks, apply_sparse, assemble_blocks, get_block_indices,
-                    solve_by_gmres)
+                    get_free_compliance, get_free_strain, solve_by_gmres)
 
 ## ------- Polynomials on a Partition ------- ##
 
@@ -264,28 +264,34 @@ class FFTTFASolver(Solver):
     def __init__(self, clusters, degree):
         super().__init__(clusters, clusters.cluster_count)
         self.interaction = get_interaction(clusters, degree)
+        self.free_compliance = get_free_compliance(self.interaction.matrix_L, self.stress_free)
 
     def evaluate(self, strain, macro_strain, plastic_history):
         """FT-5: r = ε − ε̄ + (FT-2's strain change), with each cluster's polarization (FT-1)
         τ_a = (L_a − C0) ε_a − L_a μ_a, which is −L_m μ_a in a matrix cluster, and its eigenstrain μ_a from the radial
-        return at its strain."""
-        materials = self.clusters.materials
+        return at its strain. With stress-free components, ε̄ is joined by the mean strain the cell takes there
+        (SF-2)."""
+        materials, C0 = self.clusters.materials, self.interaction.matrix_L
         plastic_state, stress = radial_return(strain, materials, plastic_history)
-        polarization = (apply_blocks(materials.L - self.interaction.matrix_L, strain)
-                        - apply_blocks(materials.L, plastic_state.plastic_strain))
-        residual = strain - macro_strain + get_strain_change(self.interaction, polarization)
+        polarization = apply_blocks(materials.L - C0, strain) - apply_blocks(materials.L, plastic_state.plastic_strain)
+        free_strain = get_free_strain(self.free_compliance, C0, self.clusters.average(polarization), macro_strain)
+        residual = strain - macro_strain - free_strain + get_strain_change(self.interaction, polarization)
         return Evaluation(strain, plastic_state, stress, residual)
 
     def get_newton_correction(self, current, plastic_history):
         """FT-6: J v = v + (FT-2's strain change of the polarization change T v), with T = L_t − C0 and L_t each
-        cluster's algorithmic stiffness. GMRES solves it with J's diagonal blocks inverted (block-Jacobi, FT-7) on the
-        right."""
-        interaction = self.interaction
-        T = (get_algorithmic_stiffness(current.strain, self.clusters.materials, plastic_history) - interaction.matrix_L)
+        cluster's algorithmic stiffness; with stress-free components, less the mean strain T v frees (SF-2). GMRES
+        solves it with J's diagonal blocks inverted (block-Jacobi, FT-7) on the right."""
+        interaction, clusters, free_compliance = self.interaction, self.clusters, self.free_compliance
+        T = get_algorithmic_stiffness(current.strain, clusters.materials, plastic_history) - interaction.matrix_L
 
         def apply_jacobian(vector):
-            return vector + get_strain_change(interaction, apply_blocks(T, vector))
+            polarization_change = apply_blocks(T, vector)
+            return (vector + free_compliance @ clusters.average(polarization_change)
+                    + get_strain_change(interaction, polarization_change))
 
-        inverse_blocks = np.linalg.inv(np.eye(6) + interaction.own_strain_change @ T)      # FT-7: J_aa = I + G_aa T_a
+        # FT-7: J_aa = I + G_aa T_a, G_aa joined by the cluster's share of the cell times the free compliance (SF-2).
+        cell_share = (clusters.share / clusters.partition_count)[:, None, None]
+        inverse_blocks = np.linalg.inv(np.eye(6) + (interaction.own_strain_change + cell_share * free_compliance) @ T)
         return solve_by_gmres(apply_jacobian, current.residual,
                               apply_preconditioner=lambda vector: apply_blocks(inverse_blocks, vector))

@@ -18,13 +18,18 @@ Each check prints PASS or FAIL with the number it judged. The problems are in ch
   error, from a wrong law or Newton solve.
 - On the laminate, FFT-TFA at full degree and TFA must also reproduce it with each partition's matrix part cut into two
   clusters, since each phase's exact state is uniform: that tests clusters dividing a partition's phase.
-- On every laminate, where SCA is exact whatever its C0, its self-consistent c after each load step must be SC-3
-  applied to the exact solution's macroscopic increments. And SC-3 itself must match its definition, a least-squares
-  fit on the 3 × 3 tensors, for random increments.
+- On every laminate, where SCA is exact whatever its C0, its self-consistent Lamé constants after each load step must
+  be SC-3 applied to the exact solution's macroscopic increments. And SC-3 itself must match its definition, a
+  least-squares fit on the 3 × 3 tensors, for random increments.
 - On every problem, SCA with C0 = L_m and FFT-TFA on one partition, two codes for the same clustered equation, must
   agree along the load path to stopping_accuracy_tolerance.
-- On the fiber and the sphere, every method must stop at the same accuracy: its stresses at convergence_tolerance
-  within stopping_accuracy_tolerance of its own solution at tight_convergence_tolerance. (Not with k-means clusters
+- On every problem with stress-free directions (unloaded_directions "free"; SF-1), every method's macroscopic stress
+  must vanish in them, to stopping_accuracy_tolerance of its largest stress. The laminate's exact solution is then
+  taken at the strain each method reached, so matching it and carrying no stress there is the exact uniaxial-stress
+  solution.
+- On the fiber and the sphere, strain-controlled and stress-free, every method must stop at the same accuracy: its
+  stresses at convergence_tolerance within stopping_accuracy_tolerance of its own solution at
+  tight_convergence_tolerance. (Not with k-means clusters
   of a few elements: there a cluster on the verge of yielding can converge elastic at one tolerance and plastic at the
   other, for TFA too.)
 - On the fiber, the reference, solved at the working resolution, must equal Spectral LS bit for bit, and load back
@@ -53,6 +58,7 @@ import numpy as np
 import cell
 import fft_tfa_model
 import ls_model
+import newton
 import run
 import sca_model
 import tfa_model
@@ -99,6 +105,7 @@ pinned_inputs = {
     "cell_side": 1e-3, "all_geometries": check_geometries, "geometry": "fiber", "clustered_mesh": 27,
     "element_kernel": "Willot",
     "all_materials": {"check": check_materials}, "materials": "check", "load_path": "check",
+    "unloaded_directions": "fixed",
     **get_check_entries(partitions=9, spectral_elements=27),
     **get_monotonic_load(strain(e11=0.015, e22=0.020, g12=0.03)),
     "convergence_tolerance": 1e-6, "residual_strain_scale_floor": 1e-4, "newton_max_iterations": 50,
@@ -149,6 +156,23 @@ check_problems = {
     "random spheres": {"geometry": "random spheres", "clustered_mesh": 12,
                        **get_monotonic_load(strain(e11=0.015, e33=0.020, g13=0.03)),
                        **get_check_entries(partitions=4, spectral_elements=12, matrix_clusters=2)},
+    # Stress-free directions (unloaded_directions "free"): the laminate pulled across its layers and sheared, back and
+    # forth, its other four directions free; the fiber and the sphere in uniaxial stress. The stiff inclusion then
+    # carries a hundred times less stress, and the checks judge each phase on its own stress, so these run at a tighter
+    # tolerance; the laminate at a tighter one still, since SC-3 fits lateral strain increments a thousand times
+    # smaller than the driven one. SCA's self-consistent loop settles too slowly on one cluster per phase in uniaxial
+    # stress, so the sphere gives it four; on the fiber, where its stopping accuracy is checked, its C0 is the matrix,
+    # since a self-consistent C0 settles only to sca_reference_tolerance.
+    "laminate, stress-free": {"geometry": "laminate", "unloaded_directions": "free", "convergence_tolerance": 1e-8,
+                              **get_cyclic_load(strain(e11=0.015, g12=0.03)),
+                              **get_check_entries(partitions=9, spectral_elements=9)},
+    "fiber, stress-free": {"unloaded_directions": "free", "convergence_tolerance": 1e-7,
+                           **get_monotonic_load(strain(e11=0.02)),
+                           "sca": [dict(matrix_clusters=1, inclusion_clusters=1, C0="matrix")]},
+    "sphere, stress-free": {"geometry": "sphere", "clustered_mesh": 12, "unloaded_directions": "free",
+                            "convergence_tolerance": 1e-7, **get_monotonic_load(strain(e33=0.02)),
+                            **get_check_entries(partitions=4, spectral_elements=12),
+                            "sca": [dict(matrix_clusters=4, inclusion_clusters=4, C0="self-consistent")]},
 }
 
 # Two problems once more on Moulinec–Suquet's kernel, so both kernels stay tested: a laminate's exact solution, and
@@ -160,7 +184,7 @@ for name in ("laminate", "fiber"):
 inexact_methods = {"cut laminate": ("FFT-TFA",)}
 
 # The problems on which every method's stopping accuracy is checked.
-stopping_check_problems = ("fiber", "sphere")
+stopping_check_problems = ("fiber", "sphere", "fiber, stress-free", "sphere, stress-free")
 
 ## ------- Exact Laminate Solution ------- ##
 
@@ -240,7 +264,10 @@ def get_stress_error(result, other_macro_stress, other_cluster_stress):
                *(get_relative_difference(result.cluster_stress[:, in_phase], other_cluster_stress[:, in_phase])
                  for in_phase in (phase == 0, phase == 1)))
 
-def get_laminate_error(result, exact_phase_stress):
+def get_laminate_error(result):
+    """A result against the laminate's exact solution at the macroscopic strain it reached, which is the imposed one
+    but for the stress-free components."""
+    exact_phase_stress = get_laminate_phase_stress(result.clusters, result.macro_strain)
     exact_cluster_stress = exact_phase_stress[:, result.clusters.materials.phase]
     return get_stress_error(result, result.clusters.average(np.moveaxis(exact_cluster_stress, 1, 0)),
                             exact_cluster_stress)
@@ -336,32 +363,42 @@ def to_tensor(voigt, shear_factor):
     return np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]])
 
 def get_reference_fit_error():
-    """SC-3 against its definition, for random macroscopic increments: fit_reference_scale's c against the c of
-    Δσ ≈ c Δε solved by least squares on the 3 × 3 tensors themselves, where every component counts once and no Voigt
-    weight enters. The largest relative difference."""
+    """SC-3 against its definition, for random macroscopic increments: fit_reference's (λ, μ) against those of
+    Δσ ≈ λ tr(Δε) I + 2μ Δε solved by least squares on the 3 × 3 tensors themselves, where every component counts once
+    and no Voigt weight enters. The largest relative difference."""
     rng = np.random.default_rng(0)
     errors = []
     for _ in range(10):
         strain_increment, stress_increment = rng.standard_normal(6), rng.standard_normal(6)
         strain_tensor, stress_tensor = to_tensor(strain_increment, 0.5), to_tensor(stress_increment, 1.0)
-        (scale,), *_ = np.linalg.lstsq(strain_tensor.reshape(-1, 1), stress_tensor.reshape(-1), rcond=None)
-        errors.append(abs(sca_model.fit_reference_scale(strain_increment, stress_increment) - scale) / abs(scale))
+        columns = np.column_stack([(np.trace(strain_tensor) * np.eye(3)).ravel(), 2 * strain_tensor.ravel()])
+        exact, *_ = np.linalg.lstsq(columns, stress_tensor.reshape(-1), rcond=None)
+        fitted = np.array(sca_model.fit_reference(strain_increment, stress_increment, previous_lambda=0.0))
+        errors.append(np.abs(fitted - exact).max() / np.abs(exact).max())
     return max(errors)
 
-def get_self_consistent_error(exact_phase_stress):
-    """SCA's self-consistent loop on a laminate, where SCA is exact whatever its C0: after each load step, c must be
-    SC-3 applied to the exact solution's macroscopic increments, since the loop stops where the fit to the step's own
-    increments returns c. A wrong step start or average shows here. The largest relative difference."""
+def get_self_consistent_error():
+    """SCA's self-consistent loop on a laminate, where SCA is exact whatever its C0: after each load step, (λ, μ) must
+    be SC-3 applied to the exact solution's macroscopic increments (at the strain SCA reached), since the loop stops
+    where the fit to the step's own increments returns them. A wrong step start or average shows here. The largest
+    relative difference."""
     clusters = get_sca_clusters()
     solver = sca_model.SCASolver(clusters, "self-consistent")
-    exact_macro_stress = clusters.average(np.moveaxis(exact_phase_stress[:, clusters.materials.phase], 1, 0))
     plastic_history = get_unloaded_plastic_state(clusters.cluster_count)
+    reached_macro_strain, fitted = [], []
+    for macro_strain in run.get_load_path().applied_macro_strain:
+        step_result = solver.solve_step(macro_strain, plastic_history)
+        plastic_history = step_result.plastic_state
+        reached_macro_strain.append(solver.get_mean_strain(step_result.strain, macro_strain))
+        fitted.append((solver.lame_lambda, solver.mu))
+    exact_phase_stress = get_laminate_phase_stress(clusters, reached_macro_strain)
+    exact_macro_stress = clusters.average(np.moveaxis(exact_phase_stress[:, clusters.materials.phase], 1, 0))
     previous_macro_strain, previous_macro_stress, errors = np.zeros(6), np.zeros(6), []
-    for macro_strain, macro_stress in zip(run.get_load_path().applied_macro_strain, exact_macro_stress):
-        plastic_history = solver.solve_step(macro_strain, plastic_history).plastic_state
-        exact_scale = sca_model.fit_reference_scale(macro_strain - previous_macro_strain,
-                                                    macro_stress - previous_macro_stress)
-        errors.append(abs(solver.reference_scale - exact_scale) / exact_scale)
+    exact_lambda = sca_model.get_matrix_lame_constants()[0]
+    for macro_strain, macro_stress, (lame_lambda, mu) in zip(reached_macro_strain, exact_macro_stress, fitted):
+        exact_lambda, exact_mu = sca_model.fit_reference(macro_strain - previous_macro_strain,
+                                                         macro_stress - previous_macro_stress, exact_lambda)
+        errors.append(max(abs(lame_lambda - exact_lambda) / abs(exact_lambda), abs(mu - exact_mu) / exact_mu))
         previous_macro_strain, previous_macro_stress = macro_strain, macro_stress
     return max(errors)
 
@@ -402,26 +439,35 @@ def report_error(description, error, tolerance):
 def check_laminate(problem_name, results):
     """Every method, and FFT-TFA at full degree, against the laminate's exact solution."""
     clusters = run.get_partition_clusters(config.fft_tfa[0])
-    exact_phase_stress = get_laminate_phase_stress(clusters, run.get_load_path().applied_macro_strain)
     tolerance = config.laminate_tolerance
     all_passed = True
     for method, result in results.items():
-        error = get_laminate_error(result, exact_phase_stress)
+        error = get_laminate_error(result)
         if method in inexact_methods.get(problem_name, ()):
             print(f"[INFO] {problem_name}: {method} differs from the exact solution by {error:.1e} (not exact by "
                   "design)")
             continue
         all_passed &= report_error(f"{problem_name}: {method} matches the exact solution", error, tolerance)
-    error = get_laminate_error(solve_at_full_degree(clusters), exact_phase_stress)
+    error = get_laminate_error(solve_at_full_degree(clusters))
     all_passed &= report_error(f"{problem_name}: FFT-TFA at full degree matches the exact solution", error, tolerance)
-    error = get_self_consistent_error(exact_phase_stress)
-    all_passed &= report_error(f"{problem_name}: SCA's self-consistent c fits the exact solution's increments", error,
+    error = get_self_consistent_error()
+    all_passed &= report_error(f"{problem_name}: SCA's self-consistent (λ, μ) fit the exact solution's increments", error,
                                tolerance)
-    if problem_name == "laminate":
+    if problem_name in ("laminate", "laminate, stress-free"):
         for method, result in solve_on_split_clusters(clusters.mesh).items():
-            error = get_laminate_error(result, exact_phase_stress)
+            error = get_laminate_error(result)
             all_passed &= report_error(f"{problem_name}: {method} on clusters dividing a partition's matrix part "
                                        "matches the exact solution", error, tolerance)
+    return all_passed
+
+def check_stress_free(problem_name, results):
+    """Every method's macroscopic stress in the stress-free components, relative to its largest stress."""
+    stress_free = newton.get_stress_free_components()
+    all_passed = True
+    for method, result in results.items():
+        free_stress = np.abs(result.macro_stress[:, stress_free]).max() / np.abs(result.macro_stress).max()
+        all_passed &= report_error(f"{problem_name}: {method} carries no macroscopic stress in the stress-free "
+                                   "directions", free_stress, config.stopping_accuracy_tolerance)
     return all_passed
 
 def check_reference(problem_name, spectral_ls_result):
@@ -467,6 +513,8 @@ def check_problem(problem_name, problem_inputs, saved_results, cache_folder):
         all_passed &= report(result.completed_step_count == step_count,
                              f"{problem_name}: {method} completed {result.completed_step_count} of {step_count} "
                              "load steps")
+    if config.unloaded_directions == "free":
+        all_passed &= check_stress_free(problem_name, results)
     if cell.get_geometry()["shape"] in interface_normal_components_by_shape:
         all_passed &= check_laminate(problem_name, results)
     if config.reference is not None:
@@ -478,7 +526,7 @@ def check_problem(problem_name, problem_inputs, saved_results, cache_folder):
     all_passed &= report_error(f"{problem_name}: FFT-TFA's interaction at full degree matches the element-level LS "
                                "operator", interaction_error, config.interaction_check_tolerance)
     sca_clusters = get_sca_clusters()
-    D = sca_model.get_interaction(sca_clusters, cell.get_matrix_L())
+    D = sca_model.SCASolver(sca_clusters, "matrix").D
     interaction_error = get_interaction_error(
         sca_clusters, lambda polarization: sca_model.get_strain_change(D, polarization))
     all_passed &= report_error(f"{problem_name}: SCA's interaction with C0 = L_m matches the element-level LS operator",
@@ -509,7 +557,7 @@ def main():
             saved_results = {name: saved[name] for name in saved.files}
 
     all_passed = check_polynomial_basis()
-    all_passed &= report_error("SC-3: SCA's fit of c matches least squares on the tensors", get_reference_fit_error(),
+    all_passed &= report_error("SC-3: SCA's fit of (λ, μ) matches least squares on the tensors", get_reference_fit_error(),
                                config.interaction_check_tolerance)
     result_arrays = {}
     with tempfile.TemporaryDirectory() as cache_folder:

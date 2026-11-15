@@ -67,6 +67,12 @@ should communicate what it does").
   checks. SCA uses Newton–GMRES too, though Liu–Bessa–Liu solve directly: GMRES is faster past a few dozen clusters
   (lecture E.4). The papers are in
   `references/`; cite only papers read cover to cover, never from a title or abstract.
+- **Stress-free directions** (`unloaded_directions`, since 2026-11-14; lecture appendix F, SF-*): `"fixed"` is
+  strain control, the default; `"free"` makes the macroscopic stress zero in the components the load path never
+  strains (uniaxial stress for a one-component path, Schneider's and Liu's loading). Only zero stress, no prescribed
+  values. It is one term per method, the mean strain the cell takes there (SF-2: the kernel's frequency zero), with no
+  new unknown and no outer loop, so every method solves the same condition exactly; k-means features stay
+  strain-controlled. `"fixed"` must stay bit for bit what it was: the term is then an exact zero.
 - **Small codebase:** one file per method and concept, the current eleven; don't add modules without asking, and don't bring
   back what the cleanups removed (tags `pre-cleanup`, `pre-cleanup-2` and `pre-cleanup-3`: fixed-point solvers,
   FFT-preconditioned TFA, the FE kernel for P0, the coarse LS lattice, CP, the Fourier preconditioner, softening, FFT-TFA's
@@ -145,6 +151,12 @@ layer (cluster, partition, phase; stress and accumulated plastic strain at the t
   min); change them only with a version bump, on purpose. The reference's `"discretization"` key holds
   `config.element_kernel`, so references solved before it existed (all Moulinec–Suquet) still load.
 - **Strain convention (ER-2):** engineering shear, `(ε11, ε22, ε33, 2ε12, 2ε23, 2ε13)`.
+- **Spectral LS projects each Newton correction by P0** once CG stops: outside P0's range J is not symmetric, and the
+  round-off CG leaves there built up over Newton iterations until CG stalled (seen on strongly plastic steps with
+  lateral contraction, and at tight tolerances).
+- **Under stress-free loading** the stiff inclusion carries far less stress, so a strain residual is a larger share
+  of its stress: `check.py`'s stress-free problems run at a tighter `convergence_tolerance`. SCA's self-consistent C0
+  with one cluster per phase settles too slowly there (more than `sca_max_reference_updates` solves).
 - **Convergence (LS-24):** Spectral LS's residual is a strain of its reference medium, so convergence and the line search
   judge M_m⁻¹ r (the correction an all-matrix cell would need, `measure_residual`), while the Newton correction still solves
   for r. `get_relative_residual` weights shear by ½ and divides by the imposed strain's norm, never by less than
@@ -180,8 +192,9 @@ layer (cluster, partition, phase; stress and accumulated plastic strain at the t
   uniform increment; TFA starts from the exact elastic predictor, so LS spends Newton iterations on elastic steps.
 - **SCA's residual is in increments** from the last accepted step (SC-1, Liu–Bessa–Liu's eq. 28), not total: with a
   self-consistent C0 the total form makes C0 move the whole solution, the fit then has no root and the loop runs away
-  (tried 2026-11-12). Its self-consistent C0 is c I (Schneider 2019, §5.1), so D is built once for I and rescaled by
-  1/c; Liu's two Lamé constants would need D in two parts (three with Moulinec–Suquet's kernel). Its Newton and Krylov
+  (tried 2026-11-12). Its self-consistent C0 is isotropic with Liu's two Lamé constants (their Box II, since 2026-11-13; before,
+  Schneider's c I), so D is built once per fixed kernel (two parts with Willot's kernel, three with Moulinec–Suquet's,
+  `sca_model.get_kernel_parts`) and assembled at each refit; the pure-shear case keeps λ. Its Newton and Krylov
   counts sum every re-solve of a step. D is not cached.
 
 ## Status

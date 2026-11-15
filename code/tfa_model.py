@@ -21,7 +21,8 @@ import config
 from cell import (get_cache_path, get_cached, get_geometry_parameters, get_inclusion_L, get_matrix_L, get_memory_MB,
                   get_value_per_phase)
 from material import get_eigenstrain_sensitivity, radial_return, get_yielding_clusters
-from newton import (Evaluation, Solver, apply_blocks, assemble_blocks, get_block_indices, solve_by_gmres)
+from newton import (Evaluation, Solver, apply_blocks, assemble_blocks, get_block_indices, get_free_compliance,
+                    solve_by_gmres)
 
 ## ------- Element Matrices ------- ##
 
@@ -215,10 +216,15 @@ def apply_P_to_clusters(P, cluster_field, clusters):
 
 class TFASolver(Solver):
     """TFA on the given clusters, which E and P were built on. Each step starts from the exact elastic predictor
-    E ε̄ + P μₙ, and every evaluation solves the clusters that stay elastic exactly (evaluate)."""
+    E ε̄ + P μₙ, and every evaluation solves the clusters that stay elastic exactly (evaluate).
+
+    With stress-free components, the macro strain E acts on is ε̄ plus the mean strain the cell takes there (SF-5)."""
     def __init__(self, clusters):
         super().__init__(clusters, clusters.cluster_count)
         self.E, self.P, self.offline_from_cache = get_E_and_P(clusters)
+        # SF-5's free compliance: that of the cell's elastic stiffness, the average of L E over the clusters.
+        elastic_stiffness = clusters.average(clusters.materials.L @ self.E.reshape(-1, 6, 6))
+        self.free_compliance = get_free_compliance(elastic_stiffness, self.stress_free)
         # Set at the start of each step (start_step): b = E ε̄, the strain the macro strain alone causes (ER-4), and
         # P μₙ, the strain the accepted eigenstrains cause.
         self.b = None
@@ -231,7 +237,15 @@ class TFASolver(Solver):
         """The exact elastic predictor: the strain if no cluster yields further in this step."""
         self.b = (self.E @ macro_strain).reshape(-1, 6)
         self.induced_strain_history = (self.P @ plastic_history.plastic_strain.reshape(-1)).reshape(-1, 6)
-        return self.b + self.induced_strain_history
+        return (self.b + self.induced_strain_history
+                + self.get_freed_strain(self.induced_strain_history, plastic_history.plastic_strain))
+
+    def get_freed_strain(self, induced_strain, eigenstrain):
+        """SF-5: the strain every cluster takes from the mean strain the cell takes in its stress-free components,
+        E f with f = −S_F ⟨L (b + Pμ − μ)⟩: the average is the mean stress the cell would carry at the imposed mean
+        strain, and S_F the free compliance of the cell's elastic stiffness. Linear in the eigenstrains, as Pμ is."""
+        held_stress = apply_blocks(self.clusters.materials.L, self.b + induced_strain - eigenstrain)
+        return (self.E @ (-self.free_compliance @ self.clusters.average(held_stress))).reshape(-1, 6)
 
     def get_induced_strain(self, plastic_state, plastic_history):
         """Pμ = Pμₙ + PΔμ, where Δμ is zero outside the clusters yielding in this step, so only their columns of P are
@@ -244,33 +258,43 @@ class TFASolver(Solver):
 
     def evaluate(self, strain, macro_strain, plastic_history):
         """Updates the material at the given strain, solves the clusters that stay elastic exactly, and returns the
-        residual r = ε - b - Pμ(ε) of ER-4, which is then zero in every elastic cluster.
+        residual r = ε - b - Pμ(ε) of ER-4, less SF-5's freed strain, which is then zero in every elastic cluster.
 
-        An elastic cluster's eigenstrain stays at its accepted value, so setting its strain to b + Pμ zeroes its
-        residual without changing μ. Yielding clusters keep their strain, so their μ does not change either. The second
-        material update catches elastic clusters that the reset pushed past yield: only then does μ, and so Pμ, change.
+        An elastic cluster's eigenstrain stays at its accepted value, so setting its strain to b + Pμ (and the freed
+        strain, which depends on the strains only through μ) zeroes its residual without changing μ. Yielding clusters
+        keep their strain, so their μ does not change either. The second material update catches elastic clusters that
+        the reset pushed past yield: only then does μ, and so Pμ, change.
         """
         materials = self.clusters.materials
         plastic_state, stress = radial_return(strain, materials, plastic_history)
         induced_strain = self.get_induced_strain(plastic_state, plastic_history)
+        freed_strain = self.get_freed_strain(induced_strain, plastic_state.plastic_strain)
         yielding_clusters = get_yielding_clusters(plastic_state, plastic_history)
 
         strain = strain.copy()
-        strain[~yielding_clusters] = self.b[~yielding_clusters] + induced_strain[~yielding_clusters]
+        strain[~yielding_clusters] = (self.b[~yielding_clusters] + induced_strain[~yielding_clusters]
+                                      + freed_strain[~yielding_clusters])
 
         plastic_state, stress = radial_return(strain, materials, plastic_history)
         if not np.array_equal(get_yielding_clusters(plastic_state, plastic_history), yielding_clusters):
             induced_strain = self.get_induced_strain(plastic_state, plastic_history)
+            freed_strain = self.get_freed_strain(induced_strain, plastic_state.plastic_strain)
 
-        return Evaluation(strain, plastic_state, stress, strain - self.b - induced_strain)
+        return Evaluation(strain, plastic_state, stress, strain - self.b - induced_strain - freed_strain)
 
     def get_newton_correction(self, current, plastic_history):
-        """Solves J δε = -r (ER-18) by GMRES, with the matrix-free product J v = v - P (H_μ v) of ER-21. H_μ is zero
-        outside the yielding clusters, so each product reads only their columns of P."""
-        sensitivity = get_eigenstrain_sensitivity(current.strain, self.clusters.materials, plastic_history)
+        """Solves J δε = -r (ER-18) by GMRES, with the matrix-free product J v = v - P (H_μ v) of ER-21, less the
+        freed strain's change (SF-5). H_μ is zero outside the yielding clusters, so each product reads only their
+        columns of P."""
+        materials, average = self.clusters.materials, self.clusters.average
+        sensitivity = get_eigenstrain_sensitivity(current.strain, materials, plastic_history)
         yielding_clusters = np.any(sensitivity != 0, axis=(1, 2))
 
         def apply_jacobian(vector):
-            return vector - apply_P_to_clusters(self.P, apply_blocks(sensitivity, vector), yielding_clusters)
+            eigenstrain_change = apply_blocks(sensitivity, vector)
+            induced_change = apply_P_to_clusters(self.P, eigenstrain_change, yielding_clusters)
+            held_stress_change = apply_blocks(materials.L, induced_change - eigenstrain_change)
+            freed_change = (self.E @ (-self.free_compliance @ average(held_stress_change))).reshape(-1, 6)
+            return vector - induced_change - freed_change
 
         return solve_by_gmres(apply_jacobian, current.residual)

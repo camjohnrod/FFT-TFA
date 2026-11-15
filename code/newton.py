@@ -5,7 +5,8 @@ or per element for Spectral LS) and solves it by Newton: at the current strain, 
 J δε = −r for a correction δε by a Krylov method (GMRES here, or conjugate gradients for Spectral LS, in ls_model), step
 along it with a backtracking line search, and repeat until the residual is small. Solver runs that loop; a method only
 says how to evaluate its residual (evaluate) and how to compute a Newton correction (get_newton_correction).
-Also here: helpers for fields of 6 × 6 blocks, which every method uses.
+Also here: helpers for fields of 6 × 6 blocks, which every method uses, and which directions of the cell are stress-free
+(config.unloaded_directions; lecture, appendix F, equations SF-*).
 """
 
 from typing import NamedTuple
@@ -73,6 +74,33 @@ def get_relative_residual(residual, macro_strain, average):
     strain_scale = max(get_strain_norm(macro_strain), config.residual_strain_scale_floor)
     return get_strain_norm(residual, average) / strain_scale
 
+## ------- Stress-Free Directions (SF-1, SF-3) ------- ##
+
+def get_stress_free_components():
+    """Which of the six components of the macroscopic stress are kept at zero, the cell's mean strain there being free
+    (SF-1): none when config.unloaded_directions is "fixed"; when "free", those the load path never strains, so a path
+    along one component is uniaxial stress (Liu–Bessa–Liu 2016, eq. 11)."""
+    if config.unloaded_directions == "fixed":
+        return np.zeros(6, dtype=bool)
+    return ~np.any(np.array(config.all_load_paths[config.load_path], dtype=float) != 0, axis=0)
+
+def get_free_compliance(stiffness, stress_free):
+    """SF-3: the compliance of the stress-free components alone, the inverse of the stiffness's block on them, and zero
+    on the others. It is the mean strain the cell gives way by per unit of mean stress it would otherwise carry there;
+    with no stress-free component it is zero."""
+    free_compliance = np.zeros((6, 6))
+    free_block = np.ix_(stress_free, stress_free)
+    free_compliance[free_block] = np.linalg.inv(stiffness[free_block])
+    return free_compliance
+
+def get_free_strain(free_compliance, C0, mean_polarization, macro_strain):
+    """SF-2: the mean strain an LS method's cell takes in its stress-free components, on top of the imposed strain ε̄:
+    −S_F (C0 ε̄ + ⟨τ⟩), with S_F the free compliance of its reference medium C0 and ⟨τ⟩ the cell's mean polarization.
+    C0 ε̄ + ⟨τ⟩ is the mean stress the cell would carry if its mean strain stayed ε̄; the cell gives way until that
+    stress is gone from the stress-free components (Schneider 2021, section 4.2, there for C0 a multiple of the
+    identity)."""
+    return -free_compliance @ (C0 @ macro_strain + mean_polarization)
+
 ## ------- Newton Correction by GMRES ------- ##
 
 def solve_by_gmres(apply_jacobian, residual, apply_preconditioner=None):
@@ -107,7 +135,9 @@ def solve_by_gmres(apply_jacobian, residual, apply_preconditioner=None):
 
 class Solver:
     """One method along the load path. solve_step(macro_strain, plastic_history) solves one load step; its stress and
-    plastic state have one row per cluster (cell.Clusters).
+    plastic state have one row per cluster (cell.Clusters). macro_strain is the imposed strain; in the stress-free
+    components (stress_free: the load path's, unless given), where it is zero, the cell's mean strain is the method's
+    to find (SF-1).
 
     A method (a subclass) supplies
       evaluate(strain, macro_strain, plastic_history)      an Evaluation of its residual at the given strain,
@@ -119,8 +149,9 @@ class Solver:
     run.py counts it as if it were done now."""
     offline_from_cache = (0.0, 0.0)
 
-    def __init__(self, clusters, unknown_count):
+    def __init__(self, clusters, unknown_count, stress_free=None):
         self.clusters = clusters
+        self.stress_free = get_stress_free_components() if stress_free is None else stress_free
         self.previous_strain = np.zeros((unknown_count, 6))
         self.previous_macro_strain = np.zeros(6)
 
@@ -132,6 +163,10 @@ class Solver:
     def start_step(self, macro_strain, plastic_history):
         """The step's first strain: the previous step's, shifted by the macro strain increment."""
         return self.previous_strain + (macro_strain - self.previous_macro_strain)
+
+    def get_mean_strain(self, strain, macro_strain):
+        """The cell's mean strain: the imposed one, and in the stress-free components the clusters' own average."""
+        return np.where(self.stress_free, self.clusters.average(strain), macro_strain)
 
     def measure_residual(self, residual):
         """The residual as convergence judges it: the residual itself, unless a method says otherwise."""

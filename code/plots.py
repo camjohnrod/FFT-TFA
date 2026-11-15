@@ -194,33 +194,37 @@ def plot_macro_stress_errors(error_percent_per_method, components, step_count, s
 
 ## ------- Error Against Time ------- ##
 
-def plot_error_against_time(schemes, plot_path):
-    """Each scheme's root-mean-square macroscopic stress error (%) against online time, one line per scheme through its
-    entries in the order listed, each point marked with what tells it from the scheme's others. schemes: one dict per
-    scheme, with its method, its place among its method's schemes (index), its name, and its points, (point label,
-    seconds, error)."""
+def plot_error_against_time(schemes, panel_titles, plot_path):
+    """Each scheme's relative macroscopic stress error (%) against online time, one panel per title (a turning point),
+    one line per scheme through its entries in the order listed, each point marked with what tells it from the scheme's
+    others. schemes: one dict per scheme, with its method, its place among its method's schemes (index), its name, and
+    its points, (point label, seconds, its error in each panel)."""
     with plt.rc_context(load_path_style):
-        figure, axis = plt.subplots(figsize=(7, 5), layout='constrained')
-        for scheme in schemes:
-            style = method_styles[scheme["method"]]
-            point_labels, seconds, errors = zip(*scheme["points"])
-            axis.plot(seconds, errors, marker=scheme_markers[scheme["index"] % len(scheme_markers)], markersize=6,
-                      color=get_scheme_color(scheme["method"], scheme["index"]), linestyle=style['linestyle'],
-                      label=get_display_label(scheme["name"]))
-            for point_label, x, y in zip(point_labels, seconds, errors):
-                axis.annotate(get_display_label(point_label), (x, y), textcoords='offset points', xytext=(6, 5),
-                              fontsize=11, color='0.25')
-        axis.set_xscale('log')
-        axis.set_yscale('log')
-        for log_axis in (axis.xaxis, axis.yaxis):
-            log_axis.set_major_locator(matplotlib.ticker.LogLocator(subs=(1, 2, 5)))
-            log_axis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%g'))
-            log_axis.set_minor_formatter(matplotlib.ticker.NullFormatter())
-        axis.set_xlabel("Online time (s)")
-        axis.set_ylabel("Macroscopic stress error, rms (%)")
-        axis.grid(True, which='both', color='0.92', linewidth=0.8)
-        axis.set_axisbelow(True)
-        add_legend(figure, axis, columns=2)
+        figure, axes = plt.subplots(1, len(panel_titles), squeeze=False, layout='constrained',
+                                    figsize=(7, 5) if len(panel_titles) == 1 else (6 * len(panel_titles), 5))
+        for panel, (axis, title) in enumerate(zip(axes.flat, panel_titles)):
+            for scheme in schemes:
+                style = method_styles[scheme["method"]]
+                point_labels, seconds, errors = zip(*scheme["points"])
+                panel_errors = [error[panel] for error in errors]
+                axis.plot(seconds, panel_errors, marker=scheme_markers[scheme["index"] % len(scheme_markers)],
+                          markersize=6, color=get_scheme_color(scheme["method"], scheme["index"]),
+                          linestyle=style['linestyle'], label=get_display_label(scheme["name"]))
+                for point_label, x, y in zip(point_labels, seconds, panel_errors):
+                    axis.annotate(get_display_label(point_label), (x, y), textcoords='offset points', xytext=(6, 5),
+                                  fontsize=11, color='0.25')
+            axis.set_xscale('log')
+            axis.set_yscale('log')
+            for log_axis in (axis.xaxis, axis.yaxis):
+                log_axis.set_major_locator(matplotlib.ticker.LogLocator(subs=(1, 2, 5)))
+                log_axis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%g'))
+                log_axis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+            axis.set_title(title, fontsize=13)
+            axis.set_xlabel("Online time (s)")
+            axis.grid(True, which='both', color='0.92', linewidth=0.8)
+            axis.set_axisbelow(True)
+        axes[0, 0].set_ylabel(r"$\|\bar\sigma - \bar\sigma^{\mathrm{ref}}\| \,/\, \|\bar\sigma^{\mathrm{ref}}\|$ (%)")
+        add_legend(figure, axes[0, 0], columns=2 if len(panel_titles) == 1 else 3)
         figure.savefig(plot_path)
     plt.close(figure)
 

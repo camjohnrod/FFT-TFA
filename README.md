@@ -15,7 +15,7 @@ Every method keeps one material state per cluster. They differ only in how those
 | Method | How clusters interact |
 |---|---|
 | **FFT-TFA** | The method under development. TFA's clusters, interacting through the Lippmann–Schwinger (LS) equation of a homogeneous medium of the matrix's stiffness: exact for the matrix's polarization, uniform per cluster in the inclusion. Inside each partition the clusters interact exactly; beyond it, each partition's polarization is summarized by its polynomial moments up to a `degree`, and every partition acts on every other through one FFT on the partitions. Raising the degree converges to the exact clustered equation. |
-| **SCA** | Self-consistent clustering analysis (Liu, Bessa & Liu 2016): the exact clustered equation FFT-TFA converges to, on k-means clusters over the whole cell, through a dense interaction matrix built by FFT. Its reference medium is the matrix (then it is FFT-TFA on one partition) or self-consistent, refitted at every load step (Schneider 2019). |
+| **SCA** | Self-consistent clustering analysis (Liu, Bessa & Liu 2016): the exact clustered equation FFT-TFA converges to, on k-means clusters over the whole cell, through a dense interaction matrix built by FFT. Its reference medium is the matrix (then it is FFT-TFA on one partition) or self-consistent, its two Lamé constants refitted at every load step (Liu, Bessa & Liu's Box II). |
 | **Spectral LS** | The LS equation on the elements, each its own cluster: the standard method of Moulinec and Suquet, as a comparison. |
 | **TFA** | The baseline. Clusters interact through the composite's exact FE influence functions E and P: exact in elasticity, but P is dense. |
 
@@ -40,6 +40,9 @@ It needs Linux (or WSL), and Python 3.12 with `numpy`, `scipy`, `matplotlib` and
 **What to run:** every setting is in `code/config.py`, with what it means. Its first screen is all you normally touch:
 the problem (a geometry, materials and a load path, each one name from the lists further down, where you can add your
 own) and the entries of each method to compare, which you can group into schemes, say degree 2 against degree 3.
+`unloaded_directions` chooses what happens in the directions the load path does not strain: `"fixed"` keeps their
+strain at zero (strain-controlled), `"free"` keeps their stress at zero, so a path along one component is a tensile
+test (uniaxial stress), as in Liu–Bessa–Liu 2016 and Schneider 2019 (lecture, appendix F).
 
 **What a run gives:** a folder in `code/output/` with a summary table, figures, and the results; the top of
 `code/run.py` lists its files.
@@ -96,12 +99,57 @@ its self-consistent C0; SCA with C0 = L_m is FFT-TFA's own equation solved dense
 512 + 512 clusters 5.6 % in 63 s online and 88 s offline; Spectral LS on a 16³ image 8.0 % in 6.5 s. At 32³ the exact
 solve takes only 59 s; 64³ is where the advantage has to show. In order:
 
+**Findings (2026-11-14): plasticity limits every clustered method.** On Schneider 2019's §5.3 setting (100 fibers at
+50 %, glass/PA, transverse to 2.5 %) under uniaxial stress (`unloaded_directions = "free"`, new that day), against a
+1024² Spectral LS reference, the σ̄11 error at the end of the path was 36 / 13.9 / 4.4 % for Spectral LS on 64² /
+128² / 256²; 9.1 % (32²) and 4.8 % (64²) for FFT-TFA with 16 k-means matrix clusters per partition, about level with
+Spectral LS at equal online time; 12.3 % for self-consistent SCA at 256 + 256 (Schneider reports 22.9 % at 32 + 32,
+ours 30 %). Without training (one cluster per phase part) FFT-TFA's elastic step is 20–100× more accurate than Spectral
+LS on the same grid (0.72 / 0.15 / 0.02 % at 64² / 128² / 256²), but at the end of the path it loses at equal time
+(21.5 / 12.3 / 5.9 %). The error is one plastic state per cluster: the plastic strain covers most of the matrix with
+steep gradients (90 % of it in 57 % of the matrix), so no placement of clusters gains much (allocating them by k-means
+misfit: under 0.4 points; SCA's cell-wide clusters on the same equation: about 2×, which is the cost of keeping clusters
+inside partitions). Under strain control the same runs looked far better, since the mostly elastic mean stress dilutes
+the plastic error. Rejected as directions by the user (2026-11-15): FFT-TFA as a geometry-aware coarse FFT solver
+(composite-voxel framing), FFT-TFA as a preconditioner for the element-level solve, and richer (linear) plastic states
+per cluster (convoluted, and not specific to FFT-TFA). Wanted: a new solver. Open.
+
 1. **Literature.** The scheme is the precorrected-FFT idea (and kin of the fast multipole method and particle–mesh
    Ewald) applied to clusters. Find and read, cover to cover, those methods' foundational papers and any use of them for
    SCA, TFA or LS homogenization, before claiming anything new. The cheapest step, and it decides the paper's framing.
-2. **Error measure.** The macroscopic error as the relative tensor norm ‖Σ − Σ_ref‖ / ‖Σ_ref‖ (shears counted twice),
-   Schneider 2019's eq. (5.1) extended to the whole tensor, at the turning points and the first (elastic) step. It
-   replaces today's per-component rms, which depends on the axes and inflates small components.
+   Read so far (2026-11-13, cover to cover):
+   - Zhang, Tang, Yu, Zhu & Liu, Comput. Mech. 64 (2019) 351–364: the closest prior art. SCA's interaction tensors
+     from a coarse grid of cells, the cell-averaged Green operator weighted by each cluster's share of a cell (FFT-TFA's
+     degree 0), but inside a cell only each voxel with itself (no exact near field), cell-wide clusters and a dense D
+     (only its offline build is faster). Coarser cells answered stiffer. FFT-TFA must cite it and state what it adds:
+     clusters inside partitions (no dense D, one FFT), exact corrections, moments converging to the exact equation.
+   - Ferreira, Andrade Pires & Bessa, CMAME 2022: adaptive SCA (split clusters where the plastic strain jumps,
+     during the solve). Nothing new on C0 (Liu's self-consistent fit). Updating D dominated their adaptivity's cost,
+     which FFT-TFA's partition-local interaction would avoid.
+   - Gierden, Waimann, Svendsen & Reese, CMAME 2021: reduced Fourier modes chosen from the phase map's spectrum; a
+     different reduction (the material law still at every voxel), to cite in an FFT framing.
+   No paper read gives a principled C0; Zhang et al. choose it arbitrarily, the others fit it self-consistently. To
+   read: Wulfinghoff, Cavaliere & Reese, CMAME 330 (2018), and Nie, Cheng et al., Comput. Mech. 64 (2019), the
+   variational (Hashin–Shtrikman, complementary energy) clustered methods.
+   - **The variational framework** (read 2026-11-13: Brisard & Dormieux 2010 and 2012, Schneider 2019 §2–4). The
+     clustered equation is the Galerkin discretization of the Hashin–Shtrikman weak form with the polarization
+     constant per cluster, the internal variables included (Schneider §2.2, §4): one state per cluster is the Galerkin
+     space, not a further approximation. It has a unique solution for any positive-definite C0 and converges on
+     cluster refinement, in plasticity with hardening too (Schneider eq. 3.9, a Céa-type bound). A *bound* on the
+     energy needs C0 on one side of every phase and the exactly averaged Green operator (Brisard); then refinement on
+     nested spaces is monotone. For FFT-TFA against Spectral LS on the same voxel grid that holds in elasticity with
+     C0 = L_m: the elastic step of every C0 = L_m entry of the 64³ spheres run is soft and monotone in partitions and
+     clusters, while self-consistent SCA and coarse Spectral LS are stiff. In plasticity C0 = L_m lies above the
+     matrix's plastic tangent, so the functional is no longer one-sided: convergent but unsigned, which is the stiff
+     matrix part the decomposition found. The far field at finite degree adds a consistency error on top (Strang),
+     exact at full degree. This is the theory the lecture should be written against; see the error decomposition
+     (step 5) and the "clusters and degree" question in the status.
+2. **Error measure.** Done 2026-11-13: the macroscopic error is the relative tensor norm ‖Σ − Σ_ref‖ / ‖Σ_ref‖
+   (shears counted twice), Schneider 2019's eq. (5.1) extended to the whole tensor, reported at the first (elastic)
+   step and at every turning point away from zero strain (at zero strain Σ_ref is only the residual stress); the
+   error-against-time plot draws one panel per such turning point. It replaced the per-component rms, which depends on
+   the axes and inflates small components; that stays in `summary.txt` and `macro_stress_error.png` to show where an
+   error comes from. The rms figures quoted elsewhere in this README predate it.
 3. **A modern element kernel.** Done 2026-11-12: `element_kernel` in `config.py` chooses Willot 2015's rotated
    staggered grid (the default) or Moulinec–Suquet's, for every LS method and the reference alike. Willot's is the
    standard alternative (Schneider 2021's review, §2.5) and equals trilinear hexahedra with one Gauss point (TFA's

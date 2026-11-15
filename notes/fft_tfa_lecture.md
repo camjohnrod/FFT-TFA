@@ -11,7 +11,7 @@ $O(N_{\text{part}})$, whatever the number of material states inside the blocks. 
 a box where it is made. Each section opens by saying what we have so far, what is missing, and what the section does
 about it. Every step says what it does (substitute, rearrange, define, average) and shows the result. The lecture
 assumes small-strain elasticity and knowing what an FFT does. The labels LS-\*, FT-\*, SC-\*, ER-\* are the ones the
-code's comments cite, which is why they are not consecutive. Every figure is computed by the code
+code's comments cite, which is why they are not consecutive; HS-\* (section 5.1) are the lecture's own. Every figure is computed by the code
 (`notes/figures/make_figures.py`). Papers are cited by author and year.
 
 **The road.** Each assumption buys fewer unknowns or a cheaper interaction:
@@ -24,8 +24,9 @@ code's comments cite, which is why they are not consecutive. Every figure is com
 | A3 | the equation holds on average over each cluster | 5 | $N_{\text{clust}}$ | $N_{\text{clust}}$ | $O(N_{\text{clust}}^2)$, dense: **SCA** with $\mathbf C_0=\mathbf L_M$ |
 | A4 | between partitions, each cluster is seen through its polynomial fit of degree $d$ | 6, 7 | $N_{\text{clust}}$ | $N_{\text{clust}}$ | $O(N_{\text{part}}\log N_{\text{part}})$ + a few blocks per partition: **FFT-TFA** |
 
-One ingredient is a choice, not an assumption: the matrix as reference medium, $\mathbf C_0=\mathbf L_M$ (section 4).
-A4 becomes exact as the degree is raised, so FFT-TFA converges to the clustered equation of A0–A3.
+One ingredient is a choice, not an assumption: the matrix as reference medium, $\mathbf C_0=\mathbf L_M$ (section 4;
+the theory behind it in 5.1). A4 becomes exact as the degree is raised, so FFT-TFA converges to the clustered equation
+of A0–A3, which is a Galerkin method with a bound and monotone convergence in elasticity (5.1).
 
 **Contents.** 1 The problem · 2 Three grids · 3 The Lippmann–Schwinger equation · 4 One state per cluster · 5 The
 clustered equation · 6 FFT-TFA at degree 0: each other partition by its mean · 7 Beyond the mean: polynomial moments ·
@@ -37,7 +38,7 @@ TFA, D FFT-TFA's polynomials and tables, E SCA, F the equations in the code, G n
 $A, B$ are **partitions**. Every field is written as a function of where it lives: $\boldsymbol\varepsilon(\alpha)$ is
 the strain of element $\alpha$, $\boldsymbol\varepsilon(a)$ the strain of cluster $a$, and $\langle f\rangle_a$,
 $\langle f\rangle_A$ are averages over a cluster, a partition. $\boldsymbol\Gamma_0$ is the element kernel; a **hat**
-marks its average over groups of elements, $\hat{\boldsymbol\Gamma}$. Every symbol is listed in Appendix H.
+marks its average over groups of elements, $\hat{\boldsymbol\Gamma}$. Every symbol is listed in Appendix I.
 
 ---
 
@@ -291,8 +292,9 @@ with $\boldsymbol\mu(a)$ from the radial return at $\boldsymbol\varepsilon(a)$.
 
 FT-1 holds for any $\mathbf C_0$; what $\mathbf C_0$ decides is where A2 acts, and the sign of its error. A2 restricts
 the polarization to one value per cluster, a Galerkin approximation of the Hashin–Shtrikman principle
-(Brisard–Dormieux 2010): with $\mathbf C_0$ below a phase's stiffness, restricting that phase's polarization errs soft;
-above it, stiff.
+(Brisard–Dormieux 2010; derived in 5.1): with $\mathbf C_0$ below a phase's stiffness, restricting that phase's
+polarization errs soft; above it, stiff. Here is what was measured; 5.1 gives the theory's own reasons for
+$\mathbf L_M$.
 
 - **$\mathbf C_0=\mathbf L_M$:** A2 acts in the inclusion only, which is stiffer, so it errs soft, while A1 errs stiff
   once the matrix yields. The two partly cancel, so the total error has no fixed sign (section 10).
@@ -374,6 +376,191 @@ It has the form of the element equation, one level up: clusters instead of eleme
   the heterogeneous composite's response, so moving a pair of clusters changes what lies around them. The clustered
   equation averages first, and keeps only $\boldsymbol\Gamma_0$, whose kernel is a convolution whatever the geometry.
   Schneider (2019, §4) compares the two: they differ only in whether the Green operator is averaged over the clusters.
+
+### 5.1 What the clustered equation guarantees
+
+**So far.** The clustered equation: one unknown and one equation per cluster, both built from the cluster indicators.
+
+**Missing.** What that buys beyond fewer unknowns. Does the equation always have a solution? Does refining the
+clusters converge to the element solution, and from which side? And section 4 chose $\mathbf C_0=\mathbf L_M$ for a
+practical reason, where the approximation lands; is there a reason in the theory?
+
+**This section.** Shows that the clustered equation is the stationarity condition of one quadratic functional, the
+principle of Hashin and Shtrikman, restricted to polarizations constant on each cluster. That restriction is a Galerkin
+method, and Galerkin methods come with three guarantees: a unique solution, convergence under refinement, and, when the
+functional has a definite sign, a bound. The conditions for each are read off, in elasticity first, then in
+plasticity. The derivation follows Brisard–Dormieux (2010, §3.1–3.2; 2012, §2.3–2.4, §4.2) on the elements and
+Schneider (2019, §2.2) on the clusters; what is new is reading them at the level of the mesh, against Spectral LS.
+
+#### Step 1 · Write the element equation as a weak form
+
+Take elasticity first, $\boldsymbol\mu=\mathbf 0$. By LS-4, wherever $\mathbf L\neq\mathbf C_0$ the strain follows
+from the polarization, $\boldsymbol\varepsilon=(\mathbf L-\mathbf C_0)^{-1}\boldsymbol\tau$; wherever
+$\mathbf L=\mathbf C_0$ the polarization is zero. Substitute into the element equation (section 3, step 7) and move
+the kernel term to the left:
+
+$$
+\large
+(\mathbf L(\alpha)-\mathbf C_0)^{-1}\boldsymbol\tau(\alpha)+\sum_\beta\boldsymbol\Gamma_0(\alpha\leftarrow\beta)\,\boldsymbol\tau(\beta)=\bar{\boldsymbol\varepsilon}
+\qquad\text{on the elements where }\mathbf L\neq\mathbf C_0
+$$
+
+Define the inner product of two element fields, $\langle\mathbf u,\mathbf v\rangle=\frac1{N_{\text{elem}}}\sum_\alpha\mathbf u(\alpha)^{\mathsf T}\mathbf v(\alpha)$,
+and the space $V_h$ of polarizations that are uniform on each element (A0) and zero where $\mathbf L=\mathbf C_0$.
+Multiply the equation by a test polarization $\boldsymbol\omega$ in $V_h$ and average over the cell:
+
+$$
+\large
+a(\boldsymbol\tau,\boldsymbol\omega)=\langle\boldsymbol\omega\rangle^{\mathsf T}\bar{\boldsymbol\varepsilon}
+\quad\text{for every }\boldsymbol\omega\text{ in }V_h,
+\qquad
+a(\boldsymbol\tau,\boldsymbol\omega)=\big\langle\boldsymbol\omega,(\mathbf L-\mathbf C_0)^{-1}\boldsymbol\tau\big\rangle+\big\langle\boldsymbol\omega,\boldsymbol\Gamma_0\boldsymbol\tau\big\rangle
+\tag{HS-1}
+$$
+
+Since $\boldsymbol\omega$ ranges over every element value, HS-1 holds exactly when the element equation does: it is
+the same equation, written as "tested against $V_h$" (Brisard–Dormieux 2012, eq. 10). The form $a$ is symmetric,
+because $\boldsymbol\Gamma_0$ is (section 3, step 7).
+
+#### Step 2 · Recognize it as the stationarity of a functional
+
+Define
+
+$$
+\large
+W(\boldsymbol\tau)=\tfrac12\,\bar{\boldsymbol\varepsilon}^{\mathsf T}\mathbf C_0\,\bar{\boldsymbol\varepsilon}+\langle\boldsymbol\tau\rangle^{\mathsf T}\bar{\boldsymbol\varepsilon}-\tfrac12\,a(\boldsymbol\tau,\boldsymbol\tau)
+\tag{HS-2}
+$$
+
+Its derivative in the direction $\boldsymbol\omega$ is $\langle\boldsymbol\omega\rangle^{\mathsf T}\bar{\boldsymbol\varepsilon}-a(\boldsymbol\tau,\boldsymbol\omega)$,
+so HS-1 says exactly that $W$ is stationary at the solution. This is the **principle of Hashin and Shtrikman** (1962;
+Willis 1977; Brisard–Dormieux 2010, eq. 7), on the mesh. Two facts about it:
+
+- **Its value at the solution is the macroscopic work.** Test HS-1 with $\boldsymbol\omega=\boldsymbol\tau$:
+  $a(\boldsymbol\tau,\boldsymbol\tau)=\langle\boldsymbol\tau\rangle^{\mathsf T}\bar{\boldsymbol\varepsilon}$. Substitute
+  into HS-2, and use $\bar{\boldsymbol\sigma}=\mathbf C_0\bar{\boldsymbol\varepsilon}+\langle\boldsymbol\tau\rangle$
+  (section 3, step 1, averaged with LS-9):
+
+  $$
+  \large
+  W(\boldsymbol\tau_{\text{solution}})=\tfrac12\,\bar{\boldsymbol\varepsilon}^{\mathsf T}\big(\mathbf C_0\bar{\boldsymbol\varepsilon}+\langle\boldsymbol\tau\rangle\big)=\tfrac12\,\bar{\boldsymbol\varepsilon}^{\mathsf T}\bar{\boldsymbol\sigma}
+  $$
+
+- **Its sign is decided by $\mathbf C_0$.** The kernel term is never negative: by LS-21, at every frequency
+  $\hat{\boldsymbol\Gamma}_0=\mathbf B(\mathbf B^{\mathsf T}\mathbf C_0\mathbf B)^{-1}\mathbf B^{\mathsf T}$ is
+  symmetric and positive semidefinite, so $\langle\boldsymbol\tau,\boldsymbol\Gamma_0\boldsymbol\tau\rangle\ge0$ for
+  either element kernel. The local term has the sign of $\mathbf L-\mathbf C_0$. So if
+  $\mathbf C_0\le\mathbf L$ in every phase (as quadratic forms), $a(\boldsymbol\tau,\boldsymbol\tau)>0$ for every
+  nonzero $\boldsymbol\tau$ in $V_h$, $W$ is strictly concave, and its stationary point is its **maximum** over $V_h$.
+  (If $\mathbf C_0\ge\mathbf L$ everywhere, $a$ is negative definite and the solution is the minimum, by Willis's
+  argument, 1977; Brisard–Dormieux 2010, §3.1.) Section 4's choice $\mathbf C_0=\mathbf L_M$ is the first case:
+  $\mathbf L_M\le\mathbf L_I$, and in the matrix the polarization is zero, which is how Brisard–Dormieux treat a
+  reference medium equal to a phase (2012, after Assumption 1).
+
+#### Step 3 · Restrict to the clusters: the clustered equation is a Galerkin method
+
+Let $V_N$ be the polarizations uniform on each cluster (A1–A2) and zero on the elastic matrix: $V_N\subset V_h$, since
+every cluster is a set of elements. Require HS-1 only for test polarizations in $V_N$. With
+$\boldsymbol\omega=\chi_a\mathbf e$ for a unit vector $\mathbf e$ and $\boldsymbol\tau=\sum_b\chi_b\boldsymbol\tau(b)$,
+the inner products become sums over the elements of $a$, and dividing by $\lvert a\rvert/N_{\text{elem}}$:
+
+$$
+\large
+(\mathbf L(a)-\mathbf C_0)^{-1}\boldsymbol\tau(a)+\sum_b\hat{\boldsymbol\Gamma}(a\leftarrow b)\,\boldsymbol\tau(b)=\bar{\boldsymbol\varepsilon}
+$$
+
+with $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ of step 2 above. The first term is $\boldsymbol\varepsilon(a)$ by FT-1,
+and this is the **clustered equation**. So A2 chooses the trial space and A3 the test space, and they are the same:
+the clustered equation is the Galerkin discretization of HS-1 on $V_N$, the stationary point of $W$ on $V_N$. That is
+Schneider's reading (2019, §2.2, eqs. 2.14–2.16) and Brisard–Dormieux's for cells (2012, §4.2).
+
+#### Result · Three guarantees in elasticity
+
+Let $W_h$ and $W_N$ be the values of $W$ at the element solution and at the cluster solution, with the same mesh, the
+same element kernel, and $\mathbf C_0\le\mathbf L$ in every phase. Since $W$ is strictly concave, its maximum over the
+smaller space is at most its maximum over the larger:
+
+$$
+\large
+\boxed{\
+V_N\subset V_{N'}\subset V_h
+\ \Longrightarrow\
+W_N\le W_{N'}\le W_h,
+\qquad\text{that is}\qquad
+\bar{\boldsymbol\varepsilon}^{\mathsf T}\bar{\boldsymbol\sigma}_N\le\bar{\boldsymbol\varepsilon}^{\mathsf T}\bar{\boldsymbol\sigma}_{N'}\le\bar{\boldsymbol\varepsilon}^{\mathsf T}\bar{\boldsymbol\sigma}_h\ }
+\tag{HS-3}
+$$
+
+1. **One solution.** $a$ is definite on $V_N$, so the clustered equation has exactly one solution. (It has one for
+   any positive-definite $\mathbf C_0$ in fact, by a different argument: Brisard–Dormieux 2012, Theorem 6; Schneider
+   2019, §3.1.)
+2. **A sign.** The clustered model does less work than the element model under the same macroscopic strain: it is
+   **soft**, and so is any Galerkin restriction of it. That is the sign section 4 anticipated for A2, now with its
+   condition stated: $\mathbf C_0$ at or below every phase.
+3. **Monotone convergence.** Refining the clusters so that every old cluster is a union of new ones (nested spaces)
+   can only raise $W_N$, up to $W_h$ when every cluster is one element, where the clustered equation is the element
+   equation (6.4). Refining by halving the partitions with each partition's phase parts as clusters is nested;
+   k-means clusters are not, and their convergence is only logarithmic in the cluster count (Schneider 2019, §6,
+   citing Davydov).
+
+Three conditions, each visible in the derivation: the exact averaged kernel $\hat{\boldsymbol\Gamma}(a\leftarrow b)$
+(SCA, or FFT-TFA at full degree; at a finite degree A4 perturbs $a$ and the sign is no longer guaranteed, though
+sections 7 and 10 measure it to be small); the comparison is with the element solution *on the same mesh with the same
+kernel*, since $\boldsymbol\Gamma_0$ is the mesh's operator, not the continuum's (a bound against the continuum needs
+the exactly averaged continuum kernel, Brisard–Dormieux 2010, §3.4; Moulinec–Suquet's and Willot's are not it, 2012,
+§4.3); and $\mathbf C_0$ one-sided.
+
+**Measured** (16 spheres at 25 %, glass/PA, 64³ elements, the first load step, $\bar\varepsilon_{11}=0.08\,\%$;
+$\bar{\boldsymbol\varepsilon}^{\mathsf T}\Delta\bar{\boldsymbol\sigma}$ against Spectral LS on the same mesh, and
+$\Delta\bar\sigma_{11}/\bar\sigma_{11}$):
+
+| Entry | $\bar{\boldsymbol\varepsilon}^{\mathsf T}\Delta\bar{\boldsymbol\sigma}$ | $\Delta\bar\sigma_{11}/\bar\sigma_{11}$ (%) |
+|---|---|---|
+| FFT-TFA, phase parts, degree 3, 2³ / 4³ / 8³ / 16³ partitions | soft at each | −3.84, −3.55, −2.34, −1.76 |
+| SCA, $\mathbf C_0=\mathbf L_M$, 64 / 256 / 1024 k-means clusters | soft at each | −2.93, −2.21, −1.71 |
+| SCA, self-consistent $\mathbf C_0=c\,\mathbf I$, 64 / 256 / 1024 clusters | stiff at each | +5.18, +3.25, +1.98 |
+| Spectral LS on 16³ / 32³ elements | stiff at each | +12.98, +2.35 |
+
+Every $\mathbf C_0=\mathbf L_M$ entry is soft and monotone, as HS-3 says (the k-means sequence happens to be, with no
+guarantee); the self-consistent $\mathbf C_0$ lies between the phases, so $W$ has no sign there; the coarse meshes are
+not restrictions of the 64³ image's space, so no bound applies to them, and their error is the mesh's. FFT-TFA with
+four matrix clusters per partition gives the same four numbers as with one: in elasticity the matrix carries no
+polarization, so its clusters are invisible (step 2 of section 4).
+
+#### Step 4 · Plasticity
+
+Each load step solves for the strain with the plastic state frozen at the step's start and updated by the radial
+return at the end (Appendix A), so within a step the law is a nonlinear function $\boldsymbol\sigma(\boldsymbol\varepsilon)$
+of the strain alone. Schneider (2019, §2.1–2.2, §4) carries the whole of steps 1–3 over to that case: the quadratic
+local term of $W$ becomes the Legendre dual of the step's potential, and the clustered equation with the state uniform
+on each cluster is again the stationarity of that functional on $V_N$ (his eq. 2.16; the law at the cluster's strain,
+A1, is then not a further approximation: it is what Galerkin on $V_N$ evaluates). What survives, and what does not:
+
+- **One solution and convergence survive, for any $\mathbf C_0$**, as long as the law is strongly monotone, which
+  linear hardening above zero gives (his §3.1–3.2, by the Eyre–Milton identity). His eq. 3.9 bounds the error by the
+  best approximation of $\boldsymbol\sigma+\mathbf C_0\boldsymbol\varepsilon$ by cluster-uniform fields, times a
+  constant set by the moduli: a Céa-type estimate.
+- **The sign does not.** $W$ is concave only if $\mathbf C_0$ lies below the step's tangent $\mathbf L_T$ everywhere.
+  Once the matrix yields, its tangent is far below $\mathbf L_M$, so $\mathbf C_0=\mathbf L_M$ is no longer one-sided
+  and the clustered model can err either way. That is section 10's measurement: A2 keeps erring soft (the inclusion
+  stays elastic), while A1 errs stiff. A $\mathbf C_0$ below the plastic tangent would restore the sign at the price of
+  a very soft reference medium, and the bound would be loose: estimates are best when $\mathbf C_0$ is close to the
+  material (Bornert, cited by Schneider 2019, §2.2, remark 2), and section 4 measured what a far-off one-sided
+  $\mathbf C_0$ costs.
+
+#### Result · Why $\mathbf C_0=\mathbf L_M$
+
+Section 4 chose the matrix for where A2 lands. The theory adds three reasons, and together they are the case for it:
+
+1. **One-sided in elasticity**, $\mathbf L_M\le\mathbf L_I$: the bound and the monotone convergence of HS-3.
+2. **The elastic matrix has no polarization**, so the unknowns sit in the inclusion only, and A2 never touches the
+   matrix.
+3. **In plasticity the matrix's polarization is $-\mathbf L_M\boldsymbol\mu$**: restricting it to one value per
+   cluster is exactly "one state per cluster" (A1) and nothing more, so the Galerkin space is the material model
+   itself; and $\mathbf L_M$ is the stiffness closest to the yielded matrix, where estimates are best.
+
+What the theory does not give is a sign in plasticity, with any $\mathbf C_0$ worth using. The paper should state the
+plastic error as convergent and unsigned, and measure it (section 10), rather than rest on its cancellation.
 
 ---
 
@@ -863,14 +1050,16 @@ TFA averages over the clusters too, but after solving at every point (Appendix C
   more slowly in the clusters than with a reference medium refitted to the macroscopic response at every increment
   (§3.1–3.2, Figs. 4–5), which is their self-consistent scheme. FFT-TFA keeps $\mathbf L_M$ fixed, which makes the
   matrix's polarization exact (section 4) and leaves one kernel, built once.
-- **Schneider (2019):** for a fixed $\mathbf C_0$ and hardening materials, the clustered equation has one solution,
-  which converges to the cell problem's as the clusters are refined (§3), though only logarithmically in his tests
-  (§5). On glass fibers in polyamide, 50 % fibers loaded transversely, SCA with 32 + 32 clusters was still 22.9 % off,
+- **Schneider (2019):** the clustered equation is the Galerkin discretization of the Hashin–Shtrikman functional on
+  cluster-uniform polarizations, internal variables included (§2.2, §4; section 5.1). For a fixed $\mathbf C_0$ and
+  hardening materials it has one solution, which converges to the cell problem's as the clusters are refined (§3),
+  though only logarithmically in his tests (§5). On glass fibers in polyamide, 50 % fibers loaded transversely, SCA with 32 + 32 clusters was still 22.9 % off,
   an error already present in elasticity (§5.3); he sees SCA's use at low contrast or low filler fraction (§6).
 - **Brisard–Dormieux (2010, 2012):** the same regular cells, in linear elasticity, with a polarization constant on each
   cell, used both to approximate the polarization and to test the equation (2012, §4.1–4.2): FFT-TFA's far field at
-  degree 0. FFT-TFA adds polynomials up to a degree, and clusters inside the cells with the exact interaction among a
-  cell's own clusters.
+  degree 0. Their variational reading, a bound on the energy with a one-sided $\mathbf C_0$ and monotone convergence
+  on nested grids (2010, §3–4), is what 5.1 carries to clusters, at the level of the mesh. FFT-TFA adds polynomials
+  up to a degree, and clusters inside the cells with the exact interaction among a cell's own clusters.
 - **Zhang et al. (2019, §2.3):** cluster interactions on a uniform coarse grid too, by cell-to-cell integrals with the
   cross terms inside a cell set to zero, assembled into a dense matrix, with neither FFT nor corrections.
 - Whether polynomial moments on an FFT grid appear elsewhere, for instance in fast methods for integral equations, is
@@ -906,7 +1095,9 @@ Spectral LS on the same mesh, each part alone by refining the others to one clus
 signed by each step's stiffness. One polarization per inclusion cluster (A2) errs soft at 96–100 % of the steps
 (0.48 % rms in σ̄11, −1.9 % in every elastic step); one state per matrix cluster (A1) errs stiff at 84–96 % (0.15 %);
 the far field at degree 3 errs stiff at every step (0.10 %). The parts add up, to 0.06 % rms. So the total error's
-sign changes along the path, and an error against a reference can understate the model's.
+sign changes along the path, and an error against a reference can understate the model's. Section 5.1 says why: in
+elasticity $\mathbf C_0=\mathbf L_M$ lies below every phase and the clustered model is guaranteed soft (HS-3); once
+the matrix yields its tangent drops below $\mathbf L_M$, the guarantee lapses, and A1's part may err stiff.
 
 #### From A2: one polarization per inclusion cluster
 
@@ -1081,7 +1272,9 @@ $$
 
 which is symmetric, and positive definite when every yielding phase hardens (Appendix A). The code stops at a direction
 of non-positive curvature. CG stops, as GMRES does, once $\lVert\mathbf R+\mathbf J\,\delta\mathbf e\rVert$ is below
-`krylov_tolerance` times $\lVert\mathbf R\rVert$.
+`krylov_tolerance` times $\lVert\mathbf R\rVert$. The code then applies $\mathbf Q$ to the correction: outside
+$\mathbf Q$'s range $\mathbf J$ is not symmetric, and the round-off CG leaves there would otherwise build up from one
+Newton iteration to the next until CG stalls.
 
 #### B.3 A stopping test that does not depend on the reference medium
 
@@ -1384,22 +1577,33 @@ Unlike Spectral LS's, the clustered equation's solution depends on $\mathbf C_0$
 chooses:
 
 - **`"matrix"`:** $\mathbf C_0=\mathbf L_M$, fixed, as in FFT-TFA.
-- **`"self-consistent"`:** $\mathbf C_0=c\,\mathbf I$, with $\mathbf I$ the identity tensor (Schneider 2019, §5.1),
-  and $c$ the least-squares fit to the step's macroscopic increments (Liu–Bessa–Liu's eqs. 41–44, with one constant
-  instead of two):
+- **`"self-consistent"`:** $\mathbf C_0$ isotropic, with Lamé constants $(\lambda_0,\mu_0)$ fitted to the step's
+  macroscopic increments in least squares (Liu–Bessa–Liu, §2.3.2, eqs. 41–44):
 
 $$
 \large
-c=\arg\min_{c'}\big\lVert\Delta\bar{\boldsymbol\sigma}-c'\,\Delta\bar{\boldsymbol\varepsilon}\big\rVert^2=\frac{\Delta\bar{\boldsymbol\sigma}:\Delta\bar{\boldsymbol\varepsilon}}{\Delta\bar{\boldsymbol\varepsilon}:\Delta\bar{\boldsymbol\varepsilon}}
+(\lambda_0,\mu_0)=\arg\min_{\lambda',\mu'}\big\lVert\Delta\bar{\boldsymbol\sigma}-\lambda'\,\operatorname{tr}(\Delta\bar{\boldsymbol\varepsilon})\,\mathbf 1-2\mu'\,\Delta\bar{\boldsymbol\varepsilon}\big\rVert^2
 \tag{SC-3}
 $$
 
-As in their Box II, each step is solved, $c$ refitted, and the step solved again from that solution, until $c$
-changes by less than `sca_reference_tolerance` (0.1 %, theirs). $c$ starts at $2\mu_M$, the matrix's shear
-stiffness. Scaling $\mathbf C_0$ leaves $\hat{\mathbf P}_0$ unchanged, so $\hat{\boldsymbol\Gamma}_0$ for
-$c\,\mathbf I$ is $\hat{\boldsymbol\Gamma}_0$ for $\mathbf I$ divided by $c$: $\mathbf D$ is built once and
-rescaled. Liu–Bessa–Liu fit an isotropic $\mathbf C_0$ with two Lamé constants instead, which needs $\mathbf D$ in
-two parts (their eqs. 25–26), three with Moulinec–Suquet's kernel, whose highest frequencies split differently.
+two linear normal equations, since $\mathbf C_0\Delta\bar{\boldsymbol\varepsilon}$ is linear in the constants. Under
+pure shear $\operatorname{tr}(\Delta\bar{\boldsymbol\varepsilon})=0$, $\lambda_0$ drops out and keeps its last value
+(their remark after eq. 44). As in their Box II, each step is solved, the constants refitted, and the step solved
+again from that solution, until both change by less than `sca_reference_tolerance` (0.1 %, theirs). They start at the
+matrix's constants (our choice; theirs is not stated). $\mathbf D$ depends on $\mathbf C_0$, but for an isotropic
+medium $\hat{\boldsymbol\Gamma}_0$ is a sum of fixed kernels times functions of the constants (their eq. 25),
+
+$$
+\large
+\hat{\boldsymbol\Gamma}_0=\frac1{\mu_0}\,\hat{\boldsymbol\Phi}_1+\frac{\lambda_0+\mu_0}{\mu_0(\lambda_0+2\mu_0)}\,\hat{\boldsymbol\Phi}_2\ \Big(+\frac1{3\lambda_0+2\mu_0}\,\hat{\boldsymbol\Phi}_3\Big),
+$$
+
+so $\mathbf D$ is built once per kernel ($\mathbf D_1$, $\mathbf D_2$) and assembled at each refit. The third kernel is
+needed only by Moulinec–Suquet's, at its highest frequencies, where $\hat{\mathbf P}_0=\mathbf I$ and
+$\hat{\boldsymbol\Gamma}_0=\mathbf C_0^{-1}$, whose spherical part has its own coefficient; for Willot's it is zero.
+The code finds the kernels from $\hat{\boldsymbol\Gamma}_0$ at three sample media and checks them on a fourth
+(`sca_model.get_kernel_parts`). The self-consistent variant therefore stores two (three) dense matrices besides
+$\mathbf D$, as Liu–Bessa–Liu's does.
 
 #### E.4 Newton, by GMRES
 
@@ -1418,7 +1622,134 @@ iteration, a GMRES iteration one product, $2(6N_{\text{clust}})^2$. On 100 fiber
 the direct solve take under 0.2 s each at 16 clusters, and GMRES is 8 times faster at 256 clusters and 15 times at 512,
 with the same answers to the stopping accuracy.
 
-### F. The equations in the code
+### F. Stress-free directions (`newton.py`)
+
+**So far** every method imposes the whole macro strain $\bar{\boldsymbol\varepsilon}$: a cell pulled along one axis
+cannot contract sideways, and a pressure builds up. **Missing:** the tensile test, uniaxial stress, in which the cell
+contracts freely; it is how Liu–Bessa–Liu (2016, eq. 11) and Schneider (2019, §5.2) load their cells. **This section**
+lets chosen components of the cell's mean strain go free, with the mean stress zero there instead, by one term in each
+method and no new unknown. `config.unloaded_directions` switches it on: `"fixed"` is everything above; `"free"` frees
+the components the load path never strains.
+
+#### F.1 The condition
+
+Call $F$ the set of stress-free components (of the six Voigt components), and $\mathbf e=\langle\boldsymbol\varepsilon\rangle$
+the cell's mean strain. The imposed strain $\bar{\boldsymbol\varepsilon}$ is zero in $F$. The load step now asks for
+
+$$
+\large
+e_i=\bar\varepsilon_i\ \ (i\notin F),\qquad\qquad \langle\sigma_i\rangle=0\ \ (i\in F)
+\tag{SF-1}
+$$
+
+so the mean strain is the imposed one plus a part $\mathbf f$ that lives in $F$ only and is the cell's to find:
+$\mathbf e=\bar{\boldsymbol\varepsilon}+\mathbf f$.
+
+#### F.2 The LS methods: FFT-TFA and SCA
+
+**Step 1 · The mean stress, from the polarization.** By its definition (section 3, step 1),
+$\boldsymbol\sigma=\mathbf C_0\boldsymbol\varepsilon+\boldsymbol\tau$. Average over the cell:
+
+$$
+\large
+\langle\boldsymbol\sigma\rangle=\mathbf C_0\,\mathbf e+\langle\boldsymbol\tau\rangle=\mathbf C_0\,\bar{\boldsymbol\varepsilon}+\langle\boldsymbol\tau\rangle+\mathbf C_0\,\mathbf f
+$$
+
+The first two terms are the mean stress the cell would carry if its mean strain stayed $\bar{\boldsymbol\varepsilon}$.
+
+**Step 2 · Set its free components to zero.** Keep the rows in $F$; $\mathbf f$ has entries in $F$ only, so only the
+block of $\mathbf C_0$ on $F$, $\mathbf C_{0,FF}$, multiplies it:
+
+$$
+\large
+\mathbf C_{0,FF}\,\mathbf f_F=-\big(\mathbf C_0\,\bar{\boldsymbol\varepsilon}+\langle\boldsymbol\tau\rangle\big)_F
+$$
+
+**Step 3 · Solve for the free strain.**
+
+$$
+\large
+\mathbf f=-\mathbf S_F\,\big(\mathbf C_0\,\bar{\boldsymbol\varepsilon}+\langle\boldsymbol\tau\rangle\big)
+\tag{SF-2}
+$$
+
+$$
+\large
+\mathbf S_F=\mathbf C_{0,FF}^{-1}\ \text{on}\ F,\quad \mathbf 0\ \text{elsewhere}
+\tag{SF-3}
+$$
+
+$\mathbf S_F$ is the *free compliance*: the mean strain the cell gives way by, per unit of mean stress it would
+otherwise carry in $F$. With nothing free it is zero, and so is $\mathbf f$.
+
+**Step 4 · Put it in the equation.** The interaction leaves the mean strain alone (FT-4; SCA's $\mathbf D$ averages to
+zero), so the mean strain enters the clustered equation only where $\bar{\boldsymbol\varepsilon}$ stands. Replace
+$\bar{\boldsymbol\varepsilon}$ by $\bar{\boldsymbol\varepsilon}+\mathbf f$:
+
+- **Residuals:** FT-5 gains $-\mathbf f$, the same row of six for every cluster. SC-1, in increments, gains
+  $-\Delta\mathbf f$, SF-2 with increments (the mean stress in $F$ was zero at step $n$).
+- **Newton:** $\mathbf f$ depends on the strains through $\langle\boldsymbol\tau\rangle$, so FT-6 and SC-4 gain
+  $+\mathbf S_F\,\langle(\mathbf L_T-\mathbf C_0)\,\mathbf v\rangle$.
+- **Preconditioner:** each cluster's own block (FT-7) gains its share of the cell times $\mathbf S_F$.
+
+For $\mathbf C_0=\alpha_0\mathbf I$ this is the Lippmann–Schwinger equation with mixed boundary conditions of
+Schneider's review (2021, §4.2, who attributes it to Kabel et al. and to Lucarini–Segurado): there
+$\mathbf S_F$ is the projector onto $F$ over $\alpha_0$, and $\mathbf S_F\mathbf C_0\bar{\boldsymbol\varepsilon}=\mathbf 0$.
+Liu–Bessa–Liu instead keep the far-field strain as one more unknown, with the constraint as one more residual row
+(2016, eqs. 28–31); SF-2 is that row solved in closed form, so the solution is the same. SCA's self-consistent fit
+(SC-3) takes the mean strain increment the cell reached, $\Delta\bar{\boldsymbol\varepsilon}+\Delta\mathbf f$.
+
+#### F.3 Spectral LS
+
+Spectral LS writes the polarization as an equivalent eigenstrain, $\boldsymbol\tau=-\mathbf C_0\boldsymbol\mu^*$
+(LS-6), so SF-2 reads $\mathbf f=\mathbf S_F\mathbf C_0\,(\langle\boldsymbol\mu^*\rangle-\bar{\boldsymbol\varepsilon})$.
+A cell average is the frequency zero of a field, where $\hat{\mathbf P}_0$ was zero (LS-9). So:
+
+$$
+\large
+\hat{\mathbf P}_0(\mathbf 0)=\mathbf S_F\,\mathbf C_0,\qquad\qquad
+\bar{\boldsymbol\varepsilon}\ \to\ (\mathbf I-\mathbf S_F\,\mathbf C_0)\,\bar{\boldsymbol\varepsilon}\quad\text{in LS-18}
+\tag{SF-4}
+$$
+
+and nothing else changes. $\mathbf S_F\mathbf C_0$ is again a projection, orthogonal in the reference medium's inner
+product ($\mathbf S_F\mathbf C_0\mathbf S_F=\mathbf S_F$, and $\mathbf C_0\mathbf S_F\mathbf C_0$ is symmetric): it keeps
+the mean strains that lie in $F$. So $\mathbf P_0$ stays the projection $\mathbf Q$ of B.2, now onto the compatible
+strains whose mean lies in $F$, and conjugate gradients (LS-28) and the stopping test (LS-24) hold as they are.
+
+#### F.4 TFA
+
+TFA has no reference medium; its strains are $\boldsymbol\varepsilon=\mathbf E\,\mathbf e+\mathbf P\boldsymbol\mu$
+(ER-1), with $\mathbf e=\bar{\boldsymbol\varepsilon}+\mathbf f$ now. The same three steps, with
+$\boldsymbol\sigma=\mathbf L(\boldsymbol\varepsilon-\boldsymbol\mu)$:
+
+$$
+\large
+\langle\boldsymbol\sigma\rangle=\big\langle\mathbf L\,(\mathbf E\bar{\boldsymbol\varepsilon}+\mathbf P\boldsymbol\mu-\boldsymbol\mu)\big\rangle+\bar{\mathbf L}\,\mathbf f,
+\qquad \bar{\mathbf L}=\langle\mathbf L\,\mathbf E\rangle
+$$
+
+$$
+\large
+\mathbf f=-\mathbf S_F\,\big\langle\mathbf L\,(\mathbf E\bar{\boldsymbol\varepsilon}+\mathbf P\boldsymbol\mu-\boldsymbol\mu)\big\rangle,
+\qquad \mathbf S_F\ \text{from}\ \bar{\mathbf L}\ \text{as in SF-3}
+\tag{SF-5}
+$$
+
+$\bar{\mathbf L}$ is the cell's elastic stiffness. Every cluster's strain gains $\mathbf E\,\mathbf f$, which is linear
+in the eigenstrains as $\mathbf P\boldsymbol\mu$ is, so ER-4 and ER-21 gain it and its derivative.
+
+#### F.5 What stays the same for every method
+
+- **The condition:** SF-1, solved exactly inside each method's equation, so no method iterates on it separately.
+- **The stopping test:** the strain residual against the imposed strain, as before (section 8, LS-24). `check.py`
+  checks that every method's macro stress vanishes in $F$ and that all stop at the same accuracy.
+- **The clusters:** k-means features are the elastic strain concentration under imposed unit strains, whatever the
+  load path frees.
+- **One difference in what a tolerance means:** in uniaxial stress the stiff inclusion carries far less stress than
+  under imposed strain, so the same strain residual is a larger share of its stress.
+
+### G. The equations in the code
 
 | Equation | Code |
 |---|---|
@@ -1435,10 +1766,12 @@ with the same answers to the stopping accuracy.
 | FT-6, FT-7: Newton system, preconditioner | `fft_tfa_model.FFTTFASolver.get_newton_correction`, `get_own_strain_change` |
 | SC-1, SC-3, SC-4: SCA's residual, reference stiffness, Newton | `sca_model.SCASolver`, `fit_reference_scale` |
 | SC-2: SCA's interaction $\mathbf D$ | `sca_model.get_interaction` |
+| SF-1 to SF-3: stress-free components, free compliance, free strain | `newton.get_stress_free_components`, `get_free_compliance`, `get_free_strain` |
+| SF-4, SF-5: in Spectral LS, in TFA | `ls_model.SpectralLSSolver`, `tfa_model.TFASolver.get_freed_strain` |
 | Newton loop, line search, GMRES | `newton.Solver`, `newton.solve_by_gmres` |
 | Clusters | `cell.cluster_by_phase`, `cell.cluster_by_k_means`, `cell.get_clusters` |
 
-### G. Names in the code
+### H. Names in the code
 
 | Here | Code |
 |---|---|
@@ -1453,8 +1786,9 @@ with the same answers to the stopping accuracy.
 | $\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)$ | `correction_blocks` |
 | $\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$, its own blocks | `get_strain_change`, `own_strain_change` |
 | SCA's $\mathbf D$; $c$ of $\mathbf C_0=c\,\mathbf I$ | `D`; `reference_scale` |
+| $F$; $\mathbf S_F$; $\mathbf f$ | `stress_free`; `free_compliance`; `free_strain` |
 
-### H. Symbols
+### I. Symbols
 
 A capital subscript is a name, not an index: $M$ matrix, $I$ inclusion, $T$ tangent; $0$ marks the reference medium.
 
@@ -1471,6 +1805,8 @@ A capital subscript is a name, not an index: $M$ matrix, $I$ inclusion, $T$ tang
 | $\hat{\boldsymbol\Gamma}_{\text{far}},\ \hat{\boldsymbol\Gamma}_{\text{corr}},\ \hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$ | far field, corrections, FFT-TFA's interaction (FT-2 to FT-4) |
 | $\mathbf D$; $\mathbf I$ | SCA's interaction, $\hat{\boldsymbol\Gamma}(a\leftarrow b)$ for every pair of clusters (SC-2); the identity tensor |
 | $\chi_a(\alpha)$ | indicator of cluster $a$: 1 if element $\alpha$ lies in $a$, else 0 |
+| $\langle\mathbf u,\mathbf v\rangle$; $a(\boldsymbol\tau,\boldsymbol\omega)$; $W(\boldsymbol\tau)$ | inner product of element fields; the Hashin–Shtrikman form and functional (HS-1, HS-2) |
+| $V_h,\ V_N$ | polarizations uniform on each element; on each cluster (5.1) |
 | $\lvert a\rvert,\ \lvert A\rvert$ | number of elements of cluster $a$, of partition $A$ (the same for every partition) |
 | $v(a)$ | volume fraction of cluster $a$ in its partition, $\lvert a\rvert/\lvert A\rvert$ |
 | $\langle f\rangle_a$, $\langle f\rangle_A$ | average over cluster $a$'s elements, $\frac1{\lvert a\rvert}\sum_{\alpha\text{ in }a}f(\alpha)$; over partition $A$'s |
@@ -1479,5 +1815,6 @@ A capital subscript is a name, not an index: $M$ matrix, $I$ inclusion, $T$ tang
 | $m_i(a)$; $\boldsymbol\tau_i(B)$ | moment of cluster $a$ along $\psi_i$; moment of the polarization on partition $B$ |
 | $\mathbf K_{ji}(\mathbf D)$ | moment kernel between partitions at offset $\mathbf D=A-B$ (7.2) |
 | $k$; $d$ | elements per partition side; degree of the polynomials |
+| $F$; $\mathbf e$, $\mathbf f$; $\mathbf S_F$ | stress-free components; the cell's mean strain and its free part; free compliance (appendix F) |
 | A0–A4 | the assumptions (introduction) |
 | $N_{\text{elem}},\ N_{\text{part}},\ N_{\text{clust}},\ N_{\text{poly}}$ | numbers of elements, partitions, clusters, polynomials |
