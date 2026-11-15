@@ -21,7 +21,7 @@ def strain(e11=0, e22=0, e33=0, g12=0, g23=0, g13=0):
 
 # One name from each list in section 4, where you can add your own.
 geometry                    = "100 fibers, 35 %"   # the geometry's name, which sets its shape and size
-materials                   = "glass/PA"
+materials                   = "glass/PA, hot"
 load_path                   = "transverse to 1 %, then shear"  # turning points, each a strain; the first must not be zero
 # The directions the load path never strains: "fixed", their strain stays zero (strain-controlled, the cell cannot
 # contract sideways); "free", their stress stays zero instead (a path along one component is then uniaxial stress, a
@@ -43,9 +43,9 @@ steps_to_first_turning_point = 15      # the load path's other lines keep the sa
 clustered_mesh              = 512        # elements per side
 # How every method's k-means clusters are found: "plain", one k-means into all of a part's clusters; or "nested",
 # halving the cluster with the largest spread until there are enough, so clusters at a larger count split those at a
-# smaller one. Nested is far faster to compute (seconds against minutes for many clusters) and slightly less accurate
-# at equal count.
-k_means_method              = "nested"
+# smaller one. For clusters over the whole cell (SCA's), nested is far faster to compute (seconds against minutes for
+# many clusters) and about 15 % less accurate at equal count; for clusters inside small partitions it saves nothing.
+k_means_method              = "plain"
 
 # The element kernel Γ0 of every LS method: FFT-TFA, SCA, Spectral LS, the reference and the k-means features, so all
 # share one discretization. "Willot", the rotated staggered grid (Willot 2015): smaller errors at equal resolution and
@@ -93,7 +93,7 @@ reference   = dict(elements=1024, C0="midpoint")
 
 ## ======= 3. Results, Figures and Computer ======= ##
 
-results_name = "fibers35-1pct-uniaxial"   # names the results folder, nothing else
+results_name = "fibers35-1pct-uniaxial-hot"   # names the results folder, nothing else
 
 # The maps show the fields at this turning point of the load path: 1 is the first; "last" on a cyclic path is back at
 # zero strain, so residual stress. replot uses this section's figure settings on a saved run.
@@ -132,6 +132,13 @@ all_geometries = {
 all_materials = {
     "glass/PA": dict(matrix=dict(E=2.1 * GPa, poisson=0.3, yield_stress=29 * MPa, hardening=139 * MPa),
                      inclusion=dict(E=72 * GPa, poisson=0.22, yield_stress=never, hardening=0)),
+    # Provisional, to see the effect of contrast: glass/PA with the matrix softened as polyamide is when hot (above its
+    # glass transition) or moist, E about 0.8 GPa, so contrast 90 instead of 34. The matrix's E, yield stress and
+    # hardening are glass/PA's scaled by one factor, so its stress-strain curve keeps its shape and only the contrast
+    # changes. To be replaced by a cited hot or conditioned PA6 (Poisson's ratio then nearer 0.4).
+    "glass/PA, hot": dict(matrix=dict(E=0.8 * GPa, poisson=0.3, yield_stress=29 * MPa * 0.8 / 2.1,
+                                      hardening=139 * MPa * 0.8 / 2.1),
+                          inclusion=dict(E=72 * GPa, poisson=0.22, yield_stress=never, hardening=0)),
     "contrast 100": dict(matrix=dict(E=100 * MPa, poisson=0.19, yield_stress=1 * MPa, hardening=10 * MPa),
                          inclusion=dict(E=10 * GPa, poisson=0.3, yield_stress=never, hardening=0)),
 }

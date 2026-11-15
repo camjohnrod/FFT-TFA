@@ -54,7 +54,7 @@ before proposing a direction, and don't redo what it sets aside without a new re
 - **Clusters lie inside partitions:** k-means inside each partition's part in each phase, or those parts themselves,
   with no smoothing of the features. Cell-wide clusters fragment into many parts per partition, and FFT-TFA's cost
   grows with the parts (research log). SCA's clusters are cell-wide by definition: `run.get_entry_clusters` gives it
-  one partition. `k_means_method` applies to every method alike: `"plain"`, or `"nested"` (bisecting, far faster,
+  one partition. `k_means_method` applies to every method alike: `"plain"` (default), or `"nested"` (bisecting, faster for SCA,
   clusters nest under refinement); check.py pins `"plain"` and runs one problem nested.
 - **One element kernel for every LS method** (`element_kernel`: `"Willot"`, the default, or `"Moulinec-Suquet"`;
   `ls_model.get_element_kernel`, lecture appendix B.1): FFT-TFA, SCA, Spectral LS, the reference and the k-means

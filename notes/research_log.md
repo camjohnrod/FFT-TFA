@@ -77,7 +77,9 @@ refined. Cell-wide clusters for FFT-TFA were estimated and dropped: memory stays
 fragment into 41k–111k parts per partition lattice, and FFT-TFA's cost grows with the parts, 3–4× more than today's
 clusters for the same accuracy. Nested (bisecting) k-means against plain, for SCA with C0 = L_m on cell-wide
 clusters: about 15 % more error at equal count (7.03 → 8.22 % at 256, 4.99 → 5.71 % at 1024), the same rate, and
-clustering in 4.6 / 6.4 s instead of 65 / 915 s; added as `k_means_method`.
+clustering in 4.6 / 6.4 s instead of 65 / 915 s; added as `k_means_method`. Rerun of the 35 % case with nested clusters: FFT-TFA within 1–3 % of plain but no faster offline (its
+k-means runs per small part, and the elastic features dominate), SCA's offline about halved; the default stays
+"plain".
 
 **Tried and set aside** (not to redo without a new reason):
 - For FFT-TFA, one fiber part per fiber in each partition: stiffer and less accurate.
