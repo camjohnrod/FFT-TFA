@@ -31,7 +31,8 @@ of A0–A3, which is a Galerkin method with a bound and monotone convergence in 
 **Contents.** 1 The problem · 2 Three grids · 3 The Lippmann–Schwinger equation · 4 One state per cluster · 5 The
 clustered equation · 6 FFT-TFA at degree 0: each other partition by its mean · 7 Beyond the mean: polynomial moments ·
 8 Solving a load step · 9 The methods side by side · 10 Known limits · Appendix: A the material law, B Spectral LS, C
-TFA, D FFT-TFA's polynomials and tables, E SCA, F the equations in the code, G names in the code, H symbols
+TFA, D FFT-TFA's polynomials and tables, E SCA, F stress-free directions, G the equations in the code, H names in the
+code, I symbols
 
 **Where things live.** One letter at three scales: element $\alpha$ lies in cluster $a$, which lies in partition $A$
 (and $\beta$ in $b$ in $B$). So Greek $\alpha, \beta$ are **elements**, lowercase $a, b$ are **clusters**, and capital
@@ -1062,8 +1063,6 @@ TFA averages over the clusters too, but after solving at every point (Appendix C
   up to a degree, and clusters inside the cells with the exact interaction among a cell's own clusters.
 - **Zhang et al. (2019, §2.3):** cluster interactions on a uniform coarse grid too, by cell-to-cell integrals with the
   cross terms inside a cell set to zero, assembled into a dense matrix, with neither FFT nor corrections.
-- Whether polynomial moments on an FFT grid appear elsewhere, for instance in fast methods for integral equations, is
-  not yet checked.
 
 ---
 
@@ -1082,7 +1081,7 @@ Each limit comes from one assumption.
   any profile across 6 elements.
 - **Partitions should be smaller than the inclusions.** With partitions about an inclusion across, the field around an
   inclusion reaches past its partition, and only a high degree follows it. Partitions at most about half an inclusion
-  across work best (README, "Status and roadmap").
+  across work best.
 - **A floor far away.** Beyond two partitions, from degree 2 on, the far field's error levels off at a few
   thousandths of a percent instead of falling with the degree (figure 3). With Moulinec–Suquet's kernel the floor is
   ten times higher, a few hundredths: it comes from the element kernel's high-frequency content, which varies from
@@ -1764,7 +1763,7 @@ in the eigenstrains as $\mathbf P\boldsymbol\mu$ is, so ER-4 and ER-21 gain it a
 | FT-3: corrections | `fft_tfa_model.get_correction_blocks` |
 | FT-4: interaction | `fft_tfa_model.get_strain_change`, built by `get_interaction` |
 | FT-6, FT-7: Newton system, preconditioner | `fft_tfa_model.FFTTFASolver.get_newton_correction`, `get_own_strain_change` |
-| SC-1, SC-3, SC-4: SCA's residual, reference stiffness, Newton | `sca_model.SCASolver`, `fit_reference_scale` |
+| SC-1, SC-3, SC-4: SCA's residual, reference stiffness, Newton | `sca_model.SCASolver`, `fit_reference` |
 | SC-2: SCA's interaction $\mathbf D$ | `sca_model.get_interaction` |
 | SF-1 to SF-3: stress-free components, free compliance, free strain | `newton.get_stress_free_components`, `get_free_compliance`, `get_free_strain` |
 | SF-4, SF-5: in Spectral LS, in TFA | `ls_model.SpectralLSSolver`, `tfa_model.TFASolver.get_freed_strain` |
@@ -1785,7 +1784,7 @@ in the eigenstrains as $\mathbf P\boldsymbol\mu$ is, so ER-4 and ER-21 gain it a
 | $\mathbf K_{ji}(\mathbf D)$ | `kernels`; in Fourier space `moment_kernels` |
 | $\hat{\boldsymbol\Gamma}_{\text{corr}}(a\leftarrow b)$ | `correction_blocks` |
 | $\hat{\boldsymbol\Gamma}_{\text{FFT-TFA}}$, its own blocks | `get_strain_change`, `own_strain_change` |
-| SCA's $\mathbf D$; $c$ of $\mathbf C_0=c\,\mathbf I$ | `D`; `reference_scale` |
+| SCA's $\mathbf D$; the Lamé constants $(\lambda_0,\mu_0)$ of its $\mathbf C_0$ | `D`; `lame_lambda`, `mu` |
 | $F$; $\mathbf S_F$; $\mathbf f$ | `stress_free`; `free_compliance`; `free_strain` |
 
 ### I. Symbols

@@ -1,0 +1,197 @@
+# Research log
+
+The state of the research behind the code: what works, the goal (a paper), the findings so far and what is still
+open, with dates. Nothing here is needed to use or read the code; the README and `notes/fft_tfa_lecture.md` are.
+
+Working: FFT-TFA, SCA, Spectral LS and TFA on 2D and 3D cells, partitions holding both phases, k-means clusters inside
+partitions, and the checks.
+
+**The goal: a paper (CMAME or IJNME).** Its claim: an interaction for clustered models that is exact inside each
+partition and summarizes every other partition by polynomial moments carried by one FFT, converging with the degree to
+SCA's clustered equation with C0 = L_m, at a cost and memory that grow with the partitions × p², never with the clusters
+squared. TFA, SCA, Spectral LS and FFT-TFA become one family with three dials: the material states, the inclusion's
+polarization and the degree. Shown so far: convergence with the degree (the cut laminate is exact from degree 5), local
+fields about 2–3× faster than Spectral LS at equal error in 2D, less memory than TFA and SCA. Not yet: macroscopic
+stress beats Spectral LS only at moderate accuracy in 2D, and not on a single 3D sphere; the reference is Spectral LS
+itself; 3D with many inclusions, where FFT-TFA should win, has only a first small test (below).
+
+**Direction (2026-11-13).** The claim narrows to two points: *SCA at scale*, SCA's clustered equation with 10⁴–10⁵
+clusters, which dense SCA cannot store; and *no training*, each partition's phase parts as its clusters
+(`matrix_clusters = inclusion_clusters = 1`), with no k-means and no offline solves. The examples are 3D only (random
+spheres), 2D staying for checks and teaching. Proposed: the voxel image is the problem, and the reference is Spectral LS
+on that same image, exact for it, so every method's error is its model's alone. The baseline is SCA as published, with
+its self-consistent C0; SCA with C0 = L_m is FFT-TFA's own equation solved densely, not a competitor. First result
+(32³ image, 16 spheres at 25 %, glass/PA, tension then shear, rms σ̄11 against the same image): FFT-TFA with k-means at
+8³ partitions 1.5 % in 11 s online; with no training at 8³ 4.7 % in 6 s and 0.2 s offline; self-consistent SCA at
+512 + 512 clusters 5.6 % in 63 s online and 88 s offline; Spectral LS on a 16³ image 8.0 % in 6.5 s. At 32³ the exact
+solve takes only 59 s; 64³ is where the advantage has to show. In order:
+
+**Findings (2026-11-14): plasticity limits every clustered method.** On Schneider 2019's §5.3 setting (100 fibers at
+50 %, glass/PA, transverse to 2.5 %) under uniaxial stress (`unloaded_directions = "free"`, new that day), against a
+1024² Spectral LS reference, the σ̄11 error at the end of the path was 36 / 13.9 / 4.4 % for Spectral LS on 64² /
+128² / 256²; 9.1 % (32²) and 4.8 % (64²) for FFT-TFA with 16 k-means matrix clusters per partition, about level with
+Spectral LS at equal online time; 12.3 % for self-consistent SCA at 256 + 256 (Schneider reports 22.9 % at 32 + 32,
+ours 30 %). Without training (one cluster per phase part) FFT-TFA's elastic step is 20–100× more accurate than Spectral
+LS on the same grid (0.72 / 0.15 / 0.02 % at 64² / 128² / 256²), but at the end of the path it loses at equal time
+(21.5 / 12.3 / 5.9 %). The error is one plastic state per cluster: the plastic strain covers most of the matrix with
+steep gradients (90 % of it in 57 % of the matrix), so no placement of clusters gains much (allocating them by k-means
+misfit: under 0.4 points; SCA's cell-wide clusters on the same equation: about 2×, which is the cost of keeping clusters
+inside partitions). Under strain control the same runs looked far better, since the mostly elastic mean stress dilutes
+the plastic error. Rejected as directions (2026-11-15): FFT-TFA as a geometry-aware coarse FFT solver
+(composite-voxel framing), FFT-TFA as a preconditioner for the element-level solve, and richer (linear) plastic states
+per cluster (convoluted, and not specific to FFT-TFA). Wanted: a new solver. Open.
+
+**Findings (2026-11-15): FFT-TFA refined to 128² partitions, and SCA with C0 = L_m.** The same setting, on the 512²
+clustered mesh against the 1024² reference, tensor-norm error at the end of the path. FFT-TFA with 8 k-means matrix
+clusters per partition at degree 3: 31.6 / 24.2 / 15.6 / 11.9 / 7.2 / 2.7 % on 4² to 128² partitions, in 0.4 to 208 s
+online and 44 to 74 s offline; its online memory, 286 MB at 64² and 959 MB at 128² (the degree-3 moment kernels), is
+above Spectral LS 256²'s 183 MB. Spectral LS on 64² / 128² / 256²: 36.3 / 13.9 / 4.4 % in 3.8 / 17 / 82 s. SCA on 8 to
+512 clusters: self-consistent 42 → 12.3 % in 0.2 to 16 s; with C0 = L_m 37 → 17.1 % in 0.1 to 2.9 s. FFT-TFA leads
+Spectral LS at equal online time below about 30 s and ties it beyond; with the offline time counted, Spectral LS leads
+on a single load path. SCA with C0 = L_m is the fastest below 1 s and level with FFT-TFA near 3 s; at equal cluster
+count it is about 1.4× more accurate than FFT-TFA (cell-wide clusters against clusters inside partitions), but it
+converges slowly in its clusters (37 → 17 % for 64 times the clusters) while D grows with their square. Its error is
+soft over the first, elastic steps (−0.5 %, as the Hashin–Shtrikman bound with C0 = L_m predicts), then grows stiff in
+proportion to the plastic flow and passes the self-consistent C0's after about step 16 of 25: a C0 that follows the
+matrix's softening slows the stiff plastic error.
+
+**Tried and set aside** (not to redo without a new reason):
+- For FFT-TFA, one fiber part per fiber in each partition: stiffer and less accurate.
+- A per-partition block-Jacobi preconditioner: fewer GMRES iterations, slower overall.
+- Removing the exact corrections inside each partition: polynomials cannot follow the sharp near field, 14–68 % off at
+  practical partition sizes.
+- Polarization shapes from the elastic strain concentration, plus one polarization per cluster: needs offline
+  fine-mesh solves, and a near/far split of the interaction to be fast. Wanted instead: a richer polarization that
+  needs neither ("Inclusion polarization" below).
+- Building FFT-TFA's interaction by applying Γ0 to each cluster's or polynomial's unit polarization (as SCA's D is
+  built), 2026-11-12: 2–6× the time and memory in 3D of grouping element pairs by offset; it wins only past about 36
+  clusters in a partition, which is SCA's case.
+- A C0 stiffer than every phase, 2026-11-13 (lecture, section 4): every error part stiff, but 8–25 times less
+  accurate and 2–3 times slower; the setting was removed.
+- Cell-wide k-means for FFT-TFA and TFA: it fragments into many parts per partition, which breaks FFT-TFA's memory
+  advantage.
+- SCA's residual in total form with a self-consistent C0, 2026-11-12: C0 then moves the whole solution, the fit has no
+  root and the loop runs away; hence SC-1 in increments.
+- Removed in the cleanups (git tags `pre-cleanup`, `pre-cleanup-2`, `pre-cleanup-3`): fixed-point solvers,
+  FFT-preconditioned TFA, the FE kernel for P0, the coarse LS lattice, CP (the earlier method), the Fourier
+  preconditioner, softening, and FFT-TFA's truncation to neighbouring partitions (`reach`).
+
+1. **Literature.** The scheme is the precorrected-FFT idea (and kin of the fast multipole method and particle–mesh
+   Ewald) applied to clusters. Find and read, cover to cover, those methods' foundational papers and any use of them for
+   SCA, TFA or LS homogenization, before claiming anything new. The cheapest step, and it decides the paper's framing.
+   Read so far (2026-11-13, cover to cover):
+   - Zhang, Tang, Yu, Zhu & Liu, Comput. Mech. 64 (2019) 351–364: the closest prior art. SCA's interaction tensors
+     from a coarse grid of cells, the cell-averaged Green operator weighted by each cluster's share of a cell (FFT-TFA's
+     degree 0), but inside a cell only each voxel with itself (no exact near field), cell-wide clusters and a dense D
+     (only its offline build is faster). Coarser cells answered stiffer. FFT-TFA must cite it and state what it adds:
+     clusters inside partitions (no dense D, one FFT), exact corrections, moments converging to the exact equation.
+   - Ferreira, Andrade Pires & Bessa, CMAME 2022: adaptive SCA (split clusters where the plastic strain jumps,
+     during the solve). Nothing new on C0 (Liu's self-consistent fit). Updating D dominated their adaptivity's cost,
+     which FFT-TFA's partition-local interaction would avoid.
+   - Gierden, Waimann, Svendsen & Reese, CMAME 2021: reduced Fourier modes chosen from the phase map's spectrum; a
+     different reduction (the material law still at every voxel), to cite in an FFT framing.
+   No paper read gives a principled C0; Zhang et al. choose it arbitrarily, the others fit it self-consistently. To
+   read: Wulfinghoff, Cavaliere & Reese, CMAME 330 (2018), and Nie, Cheng et al., Comput. Mech. 64 (2019), the
+   variational (Hashin–Shtrikman, complementary energy) clustered methods.
+   - **The variational framework** (read 2026-11-13: Brisard & Dormieux 2010 and 2012, Schneider 2019 §2–4). The
+     clustered equation is the Galerkin discretization of the Hashin–Shtrikman weak form with the polarization
+     constant per cluster, the internal variables included (Schneider §2.2, §4): one state per cluster is the Galerkin
+     space, not a further approximation. It has a unique solution for any positive-definite C0 and converges on
+     cluster refinement, in plasticity with hardening too (Schneider eq. 3.9, a Céa-type bound). A *bound* on the
+     energy needs C0 on one side of every phase and the exactly averaged Green operator (Brisard); then refinement on
+     nested spaces is monotone. For FFT-TFA against Spectral LS on the same voxel grid that holds in elasticity with
+     C0 = L_m: the elastic step of every C0 = L_m entry of the 64³ spheres run is soft and monotone in partitions and
+     clusters, while self-consistent SCA and coarse Spectral LS are stiff. In plasticity C0 = L_m lies above the
+     matrix's plastic tangent, so the functional is no longer one-sided: convergent but unsigned, which is the stiff
+     matrix part the decomposition found. The far field at finite degree adds a consistency error on top (Strang),
+     exact at full degree. This is the theory the lecture should be written against; see the error decomposition
+     (step 5) and the "clusters and degree" question in the status.
+2. **Error measure.** Done 2026-11-13: the macroscopic error is the relative tensor norm ‖Σ − Σ_ref‖ / ‖Σ_ref‖
+   (shears counted twice), Schneider 2019's eq. (5.1) extended to the whole tensor, reported at the first (elastic)
+   step and at every turning point away from zero strain (at zero strain Σ_ref is only the residual stress); the
+   error-against-time plot draws one panel per such turning point. It replaced the per-component rms, which depends on
+   the axes and inflates small components; that stays in `summary.txt` and `macro_stress_error.png` to show where an
+   error comes from. The rms figures quoted elsewhere in this log predate it.
+3. **A modern element kernel.** Done 2026-11-12: `element_kernel` in `config.py` chooses Willot 2015's rotated
+   staggered grid (the default) or Moulinec–Suquet's, for every LS method and the reference alike. Willot's is the
+   standard alternative (Schneider 2021's review, §2.5) and equals trilinear hexahedra with one Gauss point (TFA's
+   have eight). On config.py's 100 fibers (glass/PA, biaxial cyclic), against the two kernels' common limit
+   (Richardson from 128², 256², 512²; the two limits agree to 0.03 %), Spectral LS's rms macroscopic error was 4.8,
+   1.6, 0.47, 0.13 % at 64², 128², 256², 512² with Willot's and 5.3, 1.9, 0.62, 0.21 % with Moulinec–Suquet's, at
+   the same iterations and time, with far less ringing near interfaces. FFT-TFA barely moved (1.11 against 1.14 % on
+   32² partitions): its error is the clustered model's. The old 512² Moulinec–Suquet reference is itself 0.2 % from
+   the limit, which a paper's error tables must not ignore. To do: the same comparison in 3D.
+4. **Gold-standard reference.** A full-field FE solution on a conforming (body-fitted) mesh with plasticity at the Gauss
+   points (a gmsh mesh, our own solver reusing `material.py`), in generalized plane strain for z-constant cells, since
+   their loads include ε33, with a convergence study showing its own error is well below the errors compared. Until
+   then the reference is Spectral LS on a fine voxel mesh, which shares every method's staircase geometry and kernel and
+   favours Spectral LS, which converges to it.
+5. **Error decomposition.** Derive the exact relation between TFA's P and the LS operator, and split FFT-TFA's error
+   into its parts: one eigenstrain per cluster (stiff, shared with TFA: TFA against the reference), the inclusion's
+   polarization uniform per cluster (soft: FFT-TFA at full degree against TFA), the far-field summary (FFT-TFA against
+   itself at full degree) and the element kernel against TFA's FE. The stiff and soft parts cancel in part, so a method
+   measured only against the reference can look better than its interaction is: the paper shows that. **Measured for
+   FFT-TFA** (lecture, section 10): with C0 = L_m the inclusion part errs soft, the matrix part and the far field stiff,
+   and they add up. A C0 stiffer than every phase makes every part err stiff, but was 8–25 times less accurate and
+   2–3 times slower (lecture, section 4), so C0 = L_m stays. For SCA: with C0 = L_m, SCA
+   and FFT-TFA err soft in elasticity and stiff once the matrix yields, and fewer fiber clusters look better only
+   after yield; with SCA's self-consistent C0 both parts are stiff and add up. Neither SCA paper (Liu–Bessa–Liu 2016,
+   Schneider 2019) separates the parts. Plan: SCA against TFA on the same cell-wide clusters (the soft part), TFA
+   against the reference (the stiff part), on the elastic step first (where the stiff part is absent) and then along
+   the path, for SCA and FFT-TFA alike; the kernel difference between TFA's FE and the LS kernel must be told apart
+   from the soft part.
+6. **Cost at equal accuracy, in 3D.** Online time against error for each method, in 2D and 3D, on many inclusions: the
+   `"random spheres"` shape (done), and `get_correction_blocks` built a chunk of partitions at a time ("Memory" below). Spectral LS
+   over a range of resolutions answers "why not a full-field solve?"; TFA and SCA (with C0 = L_m) on the same clusters
+   isolate the interaction. An FFT on n lattice points costs about n log n, with n the elements for Spectral LS and the
+   partitions for FFT-TFA, so Spectral LS on a mesh as coarse as FFT-TFA's partitions costs about as much per
+   iteration: the two differ in accuracy, FFT-TFA seeing the fine geometry through each partition's clusters and its
+   corrections. Also: offline cost reported apart, the number of load paths after which a method's offline cost pays
+   off, and load paths other than the one the clusters were built from. **Memory** (proposed): a short discussion with a table of what each method stores, by formula and counted for the examples (TFA and
+   SCA dense in the clusters, FFT-TFA partitions × p², Spectral LS a few fields per element with Γ̂0 evaluated on the
+   fly as production codes do), not a measured comparison: a measured one would have to count a leaner Spectral LS than
+   ours, which stores several 6 × 6 arrays per element.
+
+The paper's examples (before the 2026-11-13 direction above, which keeps only the 3D ones): the cut laminate (an exact
+solution, so the interaction's error alone), random fibers in 2D (error against cost, field maps), random spheres in 3D.
+SCA (`sca_model.py`, lecture appendix E), with C0 = L_m or self-consistent, is there to show where FFT-TFA is worth it. Open: on 2D transverse tension of config.py's 100 fibers,
+SCA with C0 = L_m matched FFT-TFA down to moderate accuracy, and both owe part of their accuracy to a soft error (the
+cluster-uniform polarization) cancelling a stiff one (one eigenstrain per cluster); steps 2 and 5 are how to judge
+methods without relying on that cancellation, and 3D is where FFT-TFA's case is expected.
+Undecided: whether the inclusion polarization below is fixed first or reported as a limitation (proposed: reported); the
+journal (CMAME
+would want an error estimate for the far field in the degree, which might also explain the floor far away, lecture
+section 10).
+
+Open for FFT-TFA (the lecture's section 10):
+
+- **Far field by polynomial moments:** the interaction converges with the degree to the exact clustered equation, so
+  refining the partitions pays off (100 fibers, 32² partitions: 1.25 % against 512² Spectral LS at degree 4), and the
+  cut laminate is exact once the degree spans a partition's elements in x. Partitions about an inclusion across need a
+  high degree, since the sharp near field then reaches past a partition. Open: the kernels' memory grows with the
+  square of the polynomials (in 3D, 10 at degree 2 and 20 at degree 3); halving it by their symmetry, or keeping only
+  pairs of total degree up to the degree, are untried.
+- **Inclusion polarization:** one polarization per inclusion cluster; σ33 along z-invariant fibers runs low. Splitting a
+  partition's fiber part by fiber makes FFT-TFA stiffer and less accurate, with the exact interaction too: with the
+  matrix as C0, a coarser fiber polarization errs soft (Brisard–Dormieux 2010's Hashin–Shtrikman bound), offsetting the
+  stiff error of one eigenstrain per matrix cluster, which dominates. To do: refine the matrix clusters until refining
+  the fiber helps, so that accuracy does not rest on the two cancelling. Wanted: a richer inclusion polarization that
+  works for any geometry, needs no offline solve and keeps one interaction operator.
+- **Material states:** how FFT-TFA's and TFA's accuracy and cost change with the number of clusters; with clusters of a
+  few elements the clustered model can have several solutions (TFA too).
+- **Memory:** online, FFT-TFA stores the moment kernels, (6p)² numbers per frequency of the partition lattice with p
+  the polynomials of its degree, and one 6 × 6 correction block per pair of clusters in the same partition, so its
+  memory grows with the partitions times p² and with the square of the clusters per partition, not with the elements.
+  Offline, `get_correction_blocks` cross-correlates every partition's clusters with one of its clusters at a time,
+  holding about 2³ × the elements × the most clusters in a partition numbers, which in 3D with k-means can still exceed
+  a Spectral LS solve of the whole load path. To do before any 3D study: also build them a chunk of partitions at a
+  time (a chunk size or memory budget in `config.py`). Every k-means setting also needs six elastic
+  Spectral LS solves on the elements, the floor of its offline memory.
+
+Later: a reference stiffness for FFT-TFA that follows plastic softening (needed for a perfectly plastic phase), and the
+consistent kernel (the exact partition average).
+
+Field errors against the reference are not computed yet (macroscopic errors are). A measure fair across meshes of
+different resolution is not settled: candidates are block averages at a scale every mesh resolves (on points chosen by
+the reference's phases alone), and element errors on the fine grid split into elements whose phase matches the
+reference's and elements whose phase does not.

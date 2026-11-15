@@ -20,15 +20,15 @@ def strain(e11=0, e22=0, e33=0, g12=0, g23=0, g13=0):
 ## ======= 1. The Problem ======= ##
 
 # One name from each list in section 4, where you can add your own.
-geometry                    = "100 fibers"  # the geometry's name, which sets its shape and size
+geometry                    = "10 fibers"   # the geometry's name, which sets its shape and size
 materials                   = "glass/PA"
-load_path                   = "transverse"  # turning points, each a strain; the first must not be zero
+load_path                   = "transverse, then shear"  # turning points, each a strain; the first must not be zero
 # The directions the load path never strains: "fixed", their strain stays zero (strain-controlled, the cell cannot
 # contract sideways); "free", their stress stays zero instead (a path along one component is then uniaxial stress, a
 # tensile test; lecture, appendix F).
-unloaded_directions         = "free"
+unloaded_directions         = "fixed"
 
-steps_to_first_turning_point = 25      # the load path's other lines keep the same step length
+steps_to_first_turning_point = 10      # the load path's other lines keep the same step length
 
 ## ======= 2. What to Compare ======= ##
 
@@ -40,7 +40,7 @@ steps_to_first_turning_point = 25      # the load path's other lines keep the sa
 
 # FFT-TFA, SCA and TFA all group the elements of one fine mesh, which resolves the geometry, into clusters. Spectral LS
 # and the reference set their own elements.
-clustered_mesh              = 512        # elements per side
+clustered_mesh              = 128        # elements per side
 
 # The element kernel Γ0 of every LS method: FFT-TFA, SCA, Spectral LS, the reference and the k-means features, so all
 # share one discretization. "Willot", the rotated staggered grid (Willot 2015): smaller errors at equal resolution and
@@ -57,7 +57,7 @@ element_kernel              = "Willot"
 #   inclusion_clusters  per partition's inclusion part, by k-means: more follow its polarization more closely
 #   degree              of the polynomials summarizing each partition: 0 its mean only; higher converges to the exact
 #                       interaction, "full" is exact. About 2–4 in 2D, 2 in 3D, where the kernels grow fast (preview)
-fft_tfa = [[dict(partitions=p, matrix_clusters=8, inclusion_clusters=1,  degree=3) for p in (4, 8, 16, 32, 64, 128)]]
+fft_tfa     = [dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=2) for p in (8, 16, 32)]
 
 # SCA, self-consistent clustering analysis (Liu, Bessa & Liu 2016; lecture, appendix E): the clustered equation FFT-TFA
 # approximates, solved exactly, on clusters over the whole cell. It stores (6 × clusters)² doubles, which preview
@@ -67,27 +67,26 @@ fft_tfa = [[dict(partitions=p, matrix_clusters=8, inclusion_clusters=1,  degree=
 #   C0                  its reference stiffness, which changes its answer: "matrix", which makes it FFT-TFA on one
 #                       partition; or "self-consistent", isotropic, its two Lamé constants refitted at every load
 #                       step (Liu, Bessa & Liu's Box II), which stores D in two (three) parts besides D itself
-sca         = [[dict(matrix_clusters=c, inclusion_clusters=c, C0="self-consistent") for c in (4, 8, 16, 32, 64, 128, 256)], 
-              [dict(matrix_clusters=c, inclusion_clusters=c, C0="matrix") for c in (4, 8, 16, 32, 64, 128, 256)]]
+sca         = [dict(matrix_clusters=c, inclusion_clusters=c, C0="self-consistent") for c in (8, 32, 128)]
 
 # Spectral LS, the standard method of Moulinec and Suquet, one cluster per element, on element_kernel.
 #   elements            per side: its own mesh, coarser or finer than clustered_mesh
 #   C0                  its reference stiffness, which does not change its answer: "midpoint" of the phases, or "matrix"
 #                       (about as fast at contrast 34, 17 % slower at contrast 100)
-spectral_ls = [dict(elements=e, C0="midpoint") for e in (64, 128, 256)]
+spectral_ls = [dict(elements=e, C0="midpoint") for e in (32, 64, 128)]
 
 # TFA, the baseline (lecture, appendix C): clusters interacting through FE influence functions, built once and
 # cached. Its settings mean the same as FFT-TFA's. It stores (6 × clusters)² doubles, which preview reports.
-tfa         = []
+tfa         = [dict(partitions=8, matrix_clusters=2, inclusion_clusters=1)]
 
 # The fine solution everything is compared with: Spectral LS, elements a multiple of clustered_mesh. Solved once and
 # cached, not timed, and solved again after any change of geometry, materials, load path or solver tolerance; a first
 # solve can take 30 min, so run it in the background. None: no reference.
-reference   = dict(elements=1024, C0="midpoint")
+reference   = dict(elements=256, C0="midpoint")
 
 ## ======= 3. Results, Figures and Computer ======= ##
 
-results_name = "schneider-transverse-512"   # names the results folder, nothing else
+results_name = "first-run"   # names the results folder, nothing else
 
 # The maps show the fields at this turning point of the load path: 1 is the first; "last" on a cyclic path is back at
 # zero strain, so residual stress. replot uses this section's figure settings on a saved run.
@@ -109,6 +108,7 @@ all_geometries = {
     # stays gap (a fraction of the cell's side) clear of the others across the periodic cell. That placing jams near
     # 55 % of the cell (fibers with half the gap around each); past it, all are pushed apart until none overlap, up to
     # about 80 %.
+    "10 fibers":     dict(shape="random fibers", count=10, volume_fraction=0.30, gap=2 / 128, seed=0),
     "100 fibers":    dict(shape="random fibers", count=100, volume_fraction=0.50, gap=2 / 256, seed=0),
     # Spheres placed alike, in 3D: random placing jams near 38 % of the cell (spheres with half the gap around each);
     # past it, all are pushed apart until none overlap.
