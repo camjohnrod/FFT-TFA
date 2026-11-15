@@ -31,6 +31,7 @@ def get_geometry():
     return config.all_geometries[config.geometry]
 
 def is_shape_constant_along_z():
+    """Whether the geometry config.py names does not vary along z, so one element layer resolves it."""
     return get_geometry()["shape"] in shapes_constant_along_z
 
 # The shapes of equal inclusions at random positions, and the dimension they are placed in: fibers by their (x, y)
@@ -179,9 +180,11 @@ def get_phase_properties(name):
     return config.all_materials[config.materials][name]
 
 def get_matrix_L():
+    """The matrix's elastic stiffness L_m, the reference medium of FFT-TFA."""
     return get_L(get_phase_properties("matrix")["E"], get_phase_properties("matrix")["poisson"])
 
 def get_inclusion_L():
+    """The inclusion's elastic stiffness."""
     return get_L(get_phase_properties("inclusion")["E"], get_phase_properties("inclusion")["poisson"])
 
 def get_value_per_phase(matrix_value, inclusion_value, phase):

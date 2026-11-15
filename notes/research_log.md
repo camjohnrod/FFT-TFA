@@ -55,6 +55,18 @@ soft over the first, elastic steps (−0.5 %, as the Hashin–Shtrikman bound wi
 proportion to the plastic flow and passes the self-consistent C0's after about step 16 of 25: a C0 that follows the
 matrix's softening slows the stiff plastic error.
 
+**Direction (2026-11-15).** The paper: FFT-TFA as SCA's clustered equation at scale (10⁴–10⁵ clusters, cost and
+memory in partitions × p², converging with the degree), with the error analysis as its second half (the
+Hashin–Shtrikman / Galerkin reading, the error split by assumption, and the cancellation behind clustered models'
+accuracy). The examples show where FFT-TFA's advantages matter, with the scope stated and Schneider's case as the
+stated limit, not hidden. 2D first: Schneider's glass/PA fibers in uniaxial stress at a lower fiber fraction (35 %;
+his §6 sees clustered methods suited to lower filler fractions), at 1 % and 2.5 % strain, the full map of fraction ×
+strain shown; FFT-TFA with k-means clusters and untrained (one cluster per phase part), both at degree 2. Then 3D
+random spheres. A self-consistent C0 for FFT-TFA was considered and not pursued: it would put the matrix under A2, need
+increments and repeated solves, and SCA's own numbers show no gain at equal time. Parked for a later paper: adaptive
+clustering (start untrained, split clusters where the plastic strain jumps, as Ferreira et al. 2022 do for SCA; for
+FFT-TFA a split changes only its partition's corrections, not the moment kernels).
+
 **Tried and set aside** (not to redo without a new reason):
 - For FFT-TFA, one fiber part per fiber in each partition: stiffer and less accurate.
 - A per-partition block-Jacobi preconditioner: fewer GMRES iterations, slower overall.

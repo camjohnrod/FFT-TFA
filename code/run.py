@@ -318,6 +318,7 @@ def run_load_path(label, solver, applied_macro_strain, field_steps):
 ## ------- One Entry at a Time, Each in its Own Process ------- ##
 
 def reset_peak_memory():
+    """Restarts the kernel's count of this process's peak memory (VmHWM), so the next peak is measured from now."""
     with open("/proc/self/clear_refs", "w") as clear_refs:
         clear_refs.write("5")
 

@@ -39,6 +39,7 @@ deviatoric_projector[:3, :3] = np.eye(3) - np.ones((3, 3)) / 3
 deviatoric_projector[3:, 3:] = np.eye(3)
 
 def get_deviatoric_stress(stress):
+    """Each stress less its mean (hydrostatic) part, rows of 6."""
     return stress @ deviatoric_projector.T
 
 def get_equivalent_stress(deviatoric_stress):
@@ -48,6 +49,7 @@ def get_equivalent_stress(deviatoric_stress):
                    + 3 * np.sum(deviatoric_stress[..., 3:]**2, axis=-1))
 
 def get_von_mises_stress(stress):
+    """The von Mises stress of each stress, rows of 6."""
     return get_equivalent_stress(get_deviatoric_stress(stress))
 
 def get_flow_stress(materials, accumulated_plastic_strain):

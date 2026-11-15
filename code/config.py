@@ -109,7 +109,9 @@ all_geometries = {
     # 55 % of the cell (fibers with half the gap around each); past it, all are pushed apart until none overlap, up to
     # about 80 %.
     "10 fibers":     dict(shape="random fibers", count=10, volume_fraction=0.30, gap=2 / 128, seed=0),
-    "100 fibers":    dict(shape="random fibers", count=100, volume_fraction=0.50, gap=2 / 256, seed=0),
+    "20 fibers":     dict(shape="random fibers", count=20, volume_fraction=0.30, gap=2 / 128, seed=0),
+    "100 fibers, 50 %": dict(shape="random fibers", count=100, volume_fraction=0.50, gap=2 / 256, seed=0),
+    "100 fibers, 35 %": dict(shape="random fibers", count=100, volume_fraction=0.35, gap=2 / 256, seed=0),
     # Spheres placed alike, in 3D: random placing jams near 38 % of the cell (spheres with half the gap around each);
     # past it, all are pushed apart until none overlap.
     "16 spheres":    dict(shape="random spheres", count=16, volume_fraction=0.25, gap=2 / 64, seed=0),
@@ -133,7 +135,8 @@ all_load_paths = {
     "biaxial cyclic":         [strain(e11=0.02, e22=0.02), strain(e11=-0.02, e22=-0.02), strain()],
     "transverse":             [strain(e11=0.025)],
     "along the fibers":       [strain(e33=0.05)],
-    "transverse, then shear": [strain(e11=0.025), strain(e11=0.025, g12=0.02)],
+    "transverse, then shear": [strain(e11=0.025), strain(e11=0.025, g12=0.015)],
+    "transverse to 1 %, then shear": [strain(e11=0.01), strain(e11=0.01, g12=0.01)],
 }
 
 ## ======= 5. Solver Details (rarely changed) ======= ##
