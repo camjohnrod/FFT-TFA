@@ -1,8 +1,8 @@
-"""Every figure run.py saves: the macroscopic stress-strain curves and stress errors, error against time, each entry's
+"""Every figure a run saves: the macroscopic stress-strain curves and stress errors, error against time, each entry's
 discretization of the cross-section, and a field's maps and profile.
 
 Every method is drawn the same way in every figure (method_styles). Only plot appearance is set here: this file imports
-no other file of the project, and run.py hands it plain arrays.
+no other file of the project, and report.py hands it plain arrays.
 """
 
 from typing import NamedTuple
