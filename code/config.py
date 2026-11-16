@@ -63,9 +63,7 @@ element_kernel              = "Willot"
 #   degree              of the polynomials summarizing each partition: 0 its mean only, which stalls as partitions
 #                       shrink; 1 or 2 is usually enough; higher converges to the exact interaction, "full" is exact.
 #                       The kernels grow fast with it, in 3D above all (preview)
-fft_tfa     = [[dict(partitions=p, matrix_clusters=1, inclusion_clusters=1, degree=0) for p in (16, 32, 64, 128, 256)],
-               [dict(partitions=p, matrix_clusters=1, inclusion_clusters=1, degree=1) for p in (16, 32, 64, 128, 256)],
-               [dict(partitions=p, matrix_clusters=1, inclusion_clusters=1, degree=2) for p in (16, 32, 64, 128, 256)]]
+fft_tfa     = [dict(partitions=p, matrix_clusters=1, inclusion_clusters=1, degree=2) for p in (16, 32, 64, 128, 256)]
 
 # SCA, self-consistent clustering analysis (Liu, Bessa & Liu 2016; lecture, appendix E): the clustered equation FFT-TFA
 # approximates, solved exactly, on clusters over the whole cell. It stores (6 × clusters)² doubles, which preview
