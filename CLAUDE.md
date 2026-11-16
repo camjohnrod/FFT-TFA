@@ -33,8 +33,9 @@ before proposing a direction, and don't redo what it sets aside without a new re
 - **All knobs live in `code/config.py`, and only there:** a new knob goes there with a comment, never as a literal
   elsewhere, solver internals and check tolerances included. Exceptions: plot appearance in `plots.py`, check problems
   in `check.py`. config.py's first screen is the problem (one name from each list in its section 4) and what to
-  compare; then results, the lists, solver details, checks. The committed config.py is a small, fast first run; the
-  working copy is often a local study configuration, so "default" means `git show HEAD:code/config.py`. Change it by
+  compare; then results, the lists, solver details, checks. The committed config.py is the README's example run (the
+  elastic 35 % fiber cell, about half an hour the first time); the working copy is often a local study configuration,
+  so "default" means `git show HEAD:code/config.py`. Change it by
   targeted edits, never by rewriting it from an earlier read: it may have been edited meanwhile.
 - **What runs is a list of entries per method** (`fft_tfa`, `sca`, `spectral_ls`, `tfa`), empty to switch a method
   off. Each entry holds that method's own settings, so nothing downstream reads a global partition or cluster count. A
@@ -180,6 +181,11 @@ be replotted.
 - **Half spectrum:** Fourier blocks (Spectral LS's `P0_transformed`, FFT-TFA's `moment_kernels`) hold only `rfftn`'s
   half (shape `(N_z, N, N//2 + 1, b, b)`), transformed back with `irfftn(..., s=(N_z, N, N))`; `apply_on_lattice`
   does both. Anything new reading them must do the same.
+- **Errors mix model and mesh unless the image is shared:** with a reference finer than `clustered_mesh`, a clustered
+  method's error holds its model's (soft in elasticity with C0 = L_m, HS-3) and its mesh's (a coarse voxel mesh is
+  stiff), which can cancel. A reference with `elements` equal to `clustered_mesh` isolates the model (README,
+  "Measuring errors"). A conforming FE reference would not remove this: every voxel method then carries its own
+  staircase error.
 - **Clusters have unequal volumes:** every cell average goes through `Clusters.average`. Every method reports stress
   and plastic state per cluster.
 - **A new shape** goes in `is_inside_inclusion`, `check_geometry`, the geometry cache parameters

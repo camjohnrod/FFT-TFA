@@ -52,14 +52,18 @@ python code/check.py                # check the code (under a minute)
 
 ### Your first run
 
-`code/config.py` comes set to a small problem: 10 glass fibers in a polyamide matrix, pulled across the fibers and
-then sheared, with three entries of each method and a reference on 256² elements. It runs in about two minutes, half of
-that solving the reference, which later runs load from the cache.
+`code/config.py` comes set to an elastic example: 100 glass fibers, 35 % of the cell, in a polyamide matrix softened
+by heat (contrast 90), pulled across the fibers to 1 % and then sheared, in uniaxial stress (the other directions
+free). It compares untrained FFT-TFA (one cluster per phase in each partition) at degrees 0, 1 and 2 with Spectral LS
+on coarser grids. The clustered mesh and the reference share one 1024² image, so every FFT-TFA error is its model's
+alone (see "Measuring errors" below). The first run takes about half an hour, most of it the reference, which later
+runs load from the cache; for a quick look, set `clustered_mesh` and the reference's `elements` to 256 and the
+partitions to at most 64, which takes a few minutes.
 
 1. `python code/run.py preview` prints each entry's cluster count and memory, and draws
    `code/output/preview_cross_section.png`: every method's elements, clusters and partitions on the cross-section.
 2. `python code/run.py` solves the reference (cached for later runs), then every entry with a progress bar, and saves
-   everything to `code/output/<date>_first-run/` (`code/output/latest` points at it).
+   everything to `code/output/<date>_<results_name>/` (`code/output/latest` points at it).
 3. Open the folder:
    - `summary.txt`: each entry's cost (offline time to build it, online time to solve the load path, iterations,
      peak memory) and its error against the reference.
@@ -67,8 +71,19 @@ that solving the reference, which later runs load from the cache.
    - `error_against_time.png`: error against online time, one line per method through its entries, coarse to fine.
      Lower and further left is better: this is the figure that compares methods.
    - `macro_stress_error.png`: each method's signed error along the path; above zero the method is too stiff.
-   - `plastic_strain.png` and `plastic_strain_profile.png`: where the matrix yields, as maps and along one line.
+   - `von_mises_stress.png`, and `plastic_strain.png` when the matrix yields: the fields as maps, and along one line
+     (`*_profile.png`).
    - `cross_section.png`: how each entry divided the cell.
+
+### Measuring errors
+
+A clustered method groups the elements of `clustered_mesh`, so its answer can be wrong in two ways: its model (the
+clusters, the far-field summary) and the mesh itself, which is only an approximation of the true geometry. With a
+reference finer than the clustered mesh, the error measured holds both, and in elasticity they have opposite signs:
+clustering makes FFT-TFA soft (lecture, 5.1), while a coarse voxel mesh is stiff, so the two can cancel and a coarse
+result can look better than its model is. Setting the reference's `elements` equal to `clustered_mesh` makes the
+reference the exact answer on the very image the clustered methods group, so their errors are their models' alone,
+while Spectral LS on coarser grids shows what coarsening the image costs.
 
 ### Changing what runs
 

@@ -102,7 +102,10 @@ def get_strain_change(D, polarization):
 def fit_reference(macro_strain_increment, macro_stress_increment, previous_lambda):
     """SC-3: the isotropic C0 closest to the load step's macroscopic response, Δσ̄ ≈ C0(λ, μ) Δε̄ in least squares in
     the tensor norm (Liu–Bessa–Liu, eqs. 41–44). C0 Δε̄ = λ tr(Δε̄) 1 + 2μ Δε̄ is linear in (λ, μ): two normal equations.
-    Under pure shear, tr(Δε̄) = 0, λ drops out and keeps its previous value, as in their §2.3.2."""
+    Only the volume change tr(Δε̄) informs λ. Under pure shear it is zero, λ drops out and keeps its previous value, as
+    in their §2.3.2. When the fit comes out indefinite, the volume change did not determine λ either (a random cell,
+    not exactly isotropic, contracts slightly under shear, and that contraction is no bulk response): λ then keeps its
+    previous value too, and μ is fitted alone."""
     trace_term = macro_strain_increment[:3].sum() * np.array([1, 1, 1, 0, 0, 0], dtype=float)
     shear_term = macro_strain_increment * np.array([2, 2, 2, 1, 1, 1])
     weighted = lambda u, v: np.sum(stress_norm_weights * u * v)
@@ -115,7 +118,10 @@ def fit_reference(macro_strain_increment, macro_stress_increment, previous_lambd
     right_hand_side = np.array([weighted(trace_term, macro_stress_increment),
                                 weighted(shear_term, macro_stress_increment)])
     lame_lambda, mu = np.linalg.solve(normal_matrix, right_hand_side)
-    return lame_lambda, mu
+    if mu > 0 and 3 * lame_lambda + 2 * mu > 0:
+        return lame_lambda, mu
+    stress_less_volumetric = macro_stress_increment - previous_lambda * trace_term
+    return previous_lambda, weighted(shear_term, stress_less_volumetric) / weighted(shear_term, shear_term)
 
 ## ------- Solver (SC-1, SC-4) ------- ##
 

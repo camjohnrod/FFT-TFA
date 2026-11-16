@@ -1029,7 +1029,10 @@ TFA averages over the clusters too, but after solving at every point (Appendix C
    against TFA);
 3. **A4,** the far field's polynomial fit (FFT-TFA against itself at full degree);
 4. **A0 against finite elements:** the element kernel against TFA's elements (with Willot's kernel, one Gauss point
-   against eight).
+   against eight);
+5. **The image:** the clustered mesh's own element solution against a finer one. It is no part of the model, but a
+   reference finer than the clustered mesh adds it to every clustered error; in elasticity it is stiff while parts 2
+   and 3 are soft, so the two can cancel. A reference on the clustered mesh itself leaves it out.
 
 **Relation to the literature.**
 
@@ -1064,7 +1067,9 @@ Each limit comes from one assumption.
 
 - **It converges with the degree, not with the partitions alone.** At degree 0 refining the partitions can stall: the
   far field's error between neighbours (8 % in figure 3) stays about the same whatever their size. Raising the degree
-  is what converges. **Structures that cut through partitions in a line** show it most, as `check.py`'s cut laminate
+  is what converges. Its error can even outweigh the clustering's: in elasticity, against a reference on the same
+  image, degree 0 can err stiff where degrees 1 and 2 err soft and monotone, as 5.1 expects. **Structures that cut
+  through partitions in a line** show it most, as `check.py`'s cut laminate
   does: the polarization steps across the cut partitions, which line up along the layer, so their errors add up
   instead of decaying. The error falls with the degree, and vanishes once the degree spans a partition's elements
   across the layer.
@@ -1576,7 +1581,9 @@ $$
 
 two linear normal equations, since $\mathbf C_0\Delta\bar{\boldsymbol\varepsilon}$ is linear in the constants. Under
 pure shear $\operatorname{tr}(\Delta\bar{\boldsymbol\varepsilon})=0$, $\lambda_0$ drops out and keeps its last value
-(their remark after eq. 44). As in their Box II, each step is solved, the constants refitted, and the step solved
+(their remark after eq. 44). The code keeps it too when the fit comes out indefinite, and fits $\mu_0$ alone: a
+random cell is not exactly isotropic and contracts slightly under shear, and that contraction, no bulk response, is
+all the fit would have to determine $\lambda_0$ from. As in their Box II, each step is solved, the constants refitted, and the step solved
 again from that solution, until both change by less than `sca_reference_tolerance` (0.1 %, theirs). They start at the
 matrix's constants (our choice; theirs is not stated). $\mathbf D$ depends on $\mathbf C_0$, but for an isotropic
 medium $\hat{\boldsymbol\Gamma}_0$ is a sum of fixed kernels times functions of the constants (their eq. 25),

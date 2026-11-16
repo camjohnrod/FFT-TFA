@@ -15,8 +15,9 @@ with other figure settings without solving it again (python code/run.py replot).
   error_against_time.png       with the reference on and several entries of a method: the relative error against
                                online time, one panel per turning point away from zero strain
   cross_section.png            each entry's elements, clusters and partitions
-  plastic_strain.png           the accumulated plastic strain at config.map_turning_point, one map per entry
-  plastic_strain_profile.png   the same along the middle element row, every entry on one plot
+  von_mises_stress.png         the von Mises stress at config.map_turning_point, one map per entry
+  plastic_strain.png           the accumulated plastic strain there, when there is any
+  *_profile.png                each of the two along the middle element row, every entry on one plot
 code/output/latest points at the last run. Every figure is drawn by plots.py, from the plain arrays this file hands it.
 """
 
@@ -30,6 +31,7 @@ import numpy as np
 
 import config
 import plots
+from material import get_von_mises_stress
 from newton import stress_norm_weights
 
 ## ------- Saving a Run ------- ##
@@ -183,11 +185,11 @@ class Field(NamedTuple):
     get_values: Callable        # its value at every element, from the maps of stress (Pa) and accumulated plastic strain
     range_setting: str          # the config.py setting that holds its colour range
 
-# The fields drawn. Another is one more line, for example the von Mises stress (material.get_von_mises_stress), with a
-# von_mises_range_MPa = (None, None) in config.py:
-#   Field("von_mises_stress", "von Mises stress (MPa)", lambda stress, _: get_von_mises_stress(stress) / 1e6,
-#         "von_mises_range_MPa")
-fields = [Field("plastic_strain", "Accumulated plastic strain (%)", lambda _, plastic_strain: 100 * plastic_strain,
+# The fields drawn, each a line: its name, label, values from the saved maps, and its colour range's setting in config.py.
+# A field that is zero everywhere (the plastic strain of an elastic run) is not drawn.
+fields = [Field("von_mises_stress", "von Mises stress (MPa)", lambda stress, _: get_von_mises_stress(stress) / 1e6,
+                "von_mises_range_MPa"),
+          Field("plastic_strain", "Accumulated plastic strain (%)", lambda _, plastic_strain: 100 * plastic_strain,
                 "plastic_strain_range_percent")]
 
 def get_scheme_indices(info):
@@ -320,6 +322,8 @@ def draw_field_figures(folder, info, arrays):
         if not field_maps:
             print(f"No entry reached turning point {turning_point + 1}, so no maps: see config.map_turning_point.")
             return
+        if all(np.nanmax(np.abs(field_map.values)) == 0 for field_map in field_maps):
+            continue
         shown_maps = get_matrix_only(field_maps, inclusion_maps)
         plots.plot_field_maps(shown_maps, field.label, title,
                               *get_color_limits(shown_maps, *getattr(config, field.range_setting)),

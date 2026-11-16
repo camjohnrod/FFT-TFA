@@ -21,7 +21,7 @@ def strain(e11=0, e22=0, e33=0, g12=0, g23=0, g13=0):
 
 # One name from each list in section 4, where you can add your own.
 geometry                    = "100 fibers, 35 %"   # the geometry's name, which sets its shape and size
-materials                   = "glass/PA, hot"
+materials                   = "glass/PA, hot, elastic"
 load_path                   = "transverse to 1 %, then shear"  # turning points, each a strain; the first must not be zero
 # The directions the load path never strains: "fixed", their strain stays zero (strain-controlled, the cell cannot
 # contract sideways); "free", their stress stays zero instead (a path along one component is then uniaxial stress, a
@@ -40,7 +40,7 @@ steps_to_first_turning_point = 15      # the load path's other lines keep the sa
 
 # FFT-TFA, SCA and TFA all group the elements of one fine mesh, which resolves the geometry, into clusters. Spectral LS
 # and the reference set their own elements.
-clustered_mesh              = 512        # elements per side
+clustered_mesh              = 1024        # elements per side
 # How every method's k-means clusters are found: "plain", one k-means into all of a part's clusters; or "nested",
 # halving the cluster with the largest spread until there are enough, so clusters at a larger count split those at a
 # smaller one. For clusters over the whole cell (SCA's), nested is far faster to compute (seconds against minutes for
@@ -60,10 +60,12 @@ element_kernel              = "Willot"
 #   matrix_clusters     per partition's matrix part, by k-means; 1 (with inclusion_clusters 1): each part is one
 #                       cluster, with no k-means and so no offline solves
 #   inclusion_clusters  per partition's inclusion part, by k-means: more follow its polarization more closely
-#   degree              of the polynomials summarizing each partition: 0 its mean only; higher converges to the exact
-#                       interaction, "full" is exact. About 2–4 in 2D, 2 in 3D, where the kernels grow fast (preview)
-fft_tfa     = [[dict(partitions=p, matrix_clusters=8, inclusion_clusters=1, degree=2) for p in (16, 32, 64)],
-               [dict(partitions=p, matrix_clusters=1, inclusion_clusters=1, degree=2) for p in (16, 32, 64, 128)]]
+#   degree              of the polynomials summarizing each partition: 0 its mean only, which stalls as partitions
+#                       shrink; 1 or 2 is usually enough; higher converges to the exact interaction, "full" is exact.
+#                       The kernels grow fast with it, in 3D above all (preview)
+fft_tfa     = [[dict(partitions=p, matrix_clusters=1, inclusion_clusters=1, degree=0) for p in (16, 32, 64, 128, 256)],
+               [dict(partitions=p, matrix_clusters=1, inclusion_clusters=1, degree=1) for p in (16, 32, 64, 128, 256)],
+               [dict(partitions=p, matrix_clusters=1, inclusion_clusters=1, degree=2) for p in (16, 32, 64, 128, 256)]]
 
 # SCA, self-consistent clustering analysis (Liu, Bessa & Liu 2016; lecture, appendix E): the clustered equation FFT-TFA
 # approximates, solved exactly, on clusters over the whole cell. It stores (6 × clusters)² doubles, which preview
@@ -73,8 +75,8 @@ fft_tfa     = [[dict(partitions=p, matrix_clusters=8, inclusion_clusters=1, degr
 #   C0                  its reference stiffness, which changes its answer: "matrix", which makes it FFT-TFA on one
 #                       partition; or "self-consistent", isotropic, its two Lamé constants refitted at every load
 #                       step (Liu, Bessa & Liu's Box II), which stores D in two (three) parts besides D itself
-sca         = [[dict(matrix_clusters=c, inclusion_clusters=c, C0="self-consistent") for c in (8, 32, 128)],
-               [dict(matrix_clusters=c, inclusion_clusters=c, C0="matrix")          for c in (8, 32, 128)]]
+# For example: sca = [dict(matrix_clusters=c, inclusion_clusters=c, C0="matrix") for c in (8, 32, 128)]
+sca         = []
 
 # Spectral LS, the standard method of Moulinec and Suquet, one cluster per element, on element_kernel.
 #   elements            per side: its own mesh, coarser or finer than clustered_mesh
@@ -84,22 +86,27 @@ spectral_ls = [dict(elements=e, C0="midpoint") for e in (64, 128, 256)]
 
 # TFA, the baseline (lecture, appendix C): clusters interacting through FE influence functions, built once and
 # cached. Its settings mean the same as FFT-TFA's. It stores (6 × clusters)² doubles, which preview reports.
-tfa         = [] #[dict(partitions=8, matrix_clusters=2, inclusion_clusters=1)]
+# For example: tfa = [dict(partitions=8, matrix_clusters=2, inclusion_clusters=1)]
+tfa         = []
 
-# The fine solution everything is compared with: Spectral LS, elements a multiple of clustered_mesh. Solved once and
-# cached, not timed, and solved again after any change of geometry, materials, load path or solver tolerance; a first
-# solve can take 30 min, so run it in the background. None: no reference.
+# The fine solution everything is compared with: Spectral LS, elements a multiple of clustered_mesh. Equal to it, the
+# reference is the exact answer on the very image the clustered methods group, so their errors are their models' alone;
+# finer, their errors also hold their mesh's own (in elasticity it is stiff while clustering is soft, and the two can
+# cancel). Solved once and cached, not timed, and solved again after any change of geometry, materials, load path or
+# solver tolerance; a first solve can take 30 min, so run it in the background. None: no reference.
 reference   = dict(elements=1024, C0="midpoint")
 
 ## ======= 3. Results, Figures and Computer ======= ##
 
-results_name = "fibers35-1pct-uniaxial-hot"   # names the results folder, nothing else
+results_name = "fibers35-elastic"   # names the results folder, nothing else
 
 # The maps show the fields at this turning point of the load path: 1 is the first; "last" on a cyclic path is back at
 # zero strain, so residual stress. replot uses this section's figure settings on a saved run.
 map_turning_point           = "last"
 field_maps_matrix_only      = True     # grey out the inclusion, so the matrix's values set the colour scale
-# Colour scale (min, max), to share one across runs. None: from the finest field (the reference, else Spectral LS).
+# Each map's colour scale (min, max), to share one across runs. None: from the finest field (the reference, else
+# Spectral LS).
+von_mises_range_MPa         = (None, None)
 plastic_strain_range_percent = (None, None)
 # The per-component stress errors (summary.txt's second error table, macro_stress_error.png) cover each component
 # whose reference value reaches this fraction of the largest one.
@@ -139,6 +146,10 @@ all_materials = {
     "glass/PA, hot": dict(matrix=dict(E=0.8 * GPa, poisson=0.3, yield_stress=29 * MPa * 0.8 / 2.1,
                                       hardening=139 * MPa * 0.8 / 2.1),
                           inclusion=dict(E=72 * GPa, poisson=0.22, yield_stress=never, hardening=0)),
+    # The same with the matrix kept elastic: every method's error is then its model's elastic error.
+    "glass/PA, hot, elastic": dict(matrix=dict(E=0.8 * GPa, poisson=0.3, yield_stress=never, hardening=0),
+                                  inclusion=dict(E=72 * GPa, poisson=0.22, yield_stress=never, hardening=0)),
+    # Synthetic, for numerical tests only: contrast 100 with a Poisson's ratio no polymer has.
     "contrast 100": dict(matrix=dict(E=100 * MPa, poisson=0.19, yield_stress=1 * MPa, hardening=10 * MPa),
                          inclusion=dict(E=10 * GPa, poisson=0.3, yield_stress=never, hardening=0)),
 }
@@ -344,8 +355,9 @@ def check_inputs():
     if map_turning_point != "last" and not 1 <= map_turning_point <= len(all_load_paths[load_path]):
         raise ValueError(f"map_turning_point must be \"last\" or from 1 to {len(all_load_paths[load_path])}, this load "
                          f"path's turning points. Got {map_turning_point!r}.")
-    minimum, maximum = plastic_strain_range_percent
-    if minimum is not None and maximum is not None and minimum >= maximum:
-        raise ValueError("plastic_strain_range_percent: the minimum must be below the maximum.")
+    for name in ("von_mises_range_MPa", "plastic_strain_range_percent"):
+        minimum, maximum = globals()[name]
+        if minimum is not None and maximum is not None and minimum >= maximum:
+            raise ValueError(f"{name}: the minimum must be below the maximum.")
 
 check_inputs()

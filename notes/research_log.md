@@ -95,6 +95,26 @@ partition frequency; the kernels' symmetry could halve that, but an optimization
 optimized Spectral LS). 3D, where Spectral LS's cost grows fastest, remains the most likely place for a clear time
 result.
 
+**Findings (2026-11-16): elasticity, and measuring errors without cancellation.** Elastic hot glass/PA (contrast 90),
+35 % fibers, 1 % then γ12 1 %, uniaxial stress. Against a 1024² reference, untrained FFT-TFA on a 256² clustered mesh
+went −1.9, −0.7, +0.003, +0.4 % at 16² to 128² partitions: against its own mesh (Spectral LS 256²) it was soft and
+monotone (−3.5 → −1.2 %), as HS-3 says, while that mesh was +1.7 % stiff against the reference; the near-zero at 64²
+was the two cancelling. With the clustered mesh equal to the reference (1024², the image is the problem), errors are
+the model's alone: degrees 1 and 2 soft and monotone in tension and shear (degree 1 at 64²: −0.55 / −0.98 % in 7.5 s,
+against Spectral LS 256²'s +1.69 / +1.53 % in 50 s); degree 1 as accurate as degree 2 at half the cost; degree 0 errs
+stiff in tension (+0.8 %) from 32² on, its far field outweighing the clustering, and −7 % in shear at 16². Errors level
+off near −0.3 % (tension) and −0.5 % (shear) from 128² to 256² partitions at degrees 1 and 2, cause not yet confirmed
+(likely one polarization per inclusion part). k-means and untrained FFT-TFA give identical elastic answers (the
+matrix carries no polarization). A conforming FE reference would not remove the cancellation (every voxel method then
+carries a staircase error); it answers a different question (absolute accuracy). Self-consistent SCA's fit gave an
+indefinite C0 at the elastic shear step: the cell's volume change there was 0.4 % of the shear, from the random cell's
+anisotropy, too little to fit λ to but above the round-off threshold. A relative threshold (0.05) was tried and
+dropped: under uniaxial stress the plastically flowing cell is nearly incompressible, so its volume change is just as
+small while λ still reflects a bulk response, and the threshold changed SCA there. Instead, only when the fit comes
+out indefinite, λ keeps its last value and μ is fitted alone (as under pure shear); everywhere else SC-3 is unchanged. C0 at the midpoint for FFT-TFA was considered: SCA's two C0 already show it
+(between the phases: +4.4 → +1.5 % stiff; C0 = L_m: −2.6 → −1.0 % soft), so a midpoint would lose the sign and the
+monotone convergence and put the matrix under A2.
+
 **Tried and set aside** (not to redo without a new reason):
 - For FFT-TFA, one fiber part per fiber in each partition: stiffer and less accurate.
 - A per-partition block-Jacobi preconditioner: fewer GMRES iterations, slower overall.

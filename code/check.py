@@ -375,15 +375,23 @@ def to_tensor(voigt, shear_factor):
 def get_reference_fit_error():
     """SC-3 against its definition, for random macroscopic increments: fit_reference's (λ, μ) against those of
     Δσ ≈ λ tr(Δε) I + 2μ Δε solved by least squares on the 3 × 3 tensors themselves, where every component counts once
-    and no Voigt weight enters. The largest relative difference."""
+    and no Voigt weight enters. Where that fit is indefinite, fit_reference must keep the previous λ and fit μ alone, by
+    least squares on the same tensors. The largest relative difference, over draws of both kinds."""
     rng = np.random.default_rng(0)
+    previous_lambda = 0.5
     errors = []
-    for _ in range(10):
+    for _ in range(20):
         strain_increment, stress_increment = rng.standard_normal(6), rng.standard_normal(6)
         strain_tensor, stress_tensor = to_tensor(strain_increment, 0.5), to_tensor(stress_increment, 1.0)
-        columns = np.column_stack([(np.trace(strain_tensor) * np.eye(3)).ravel(), 2 * strain_tensor.ravel()])
+        volumetric = (np.trace(strain_tensor) * np.eye(3)).ravel()
+        columns = np.column_stack([volumetric, 2 * strain_tensor.ravel()])
         exact, *_ = np.linalg.lstsq(columns, stress_tensor.reshape(-1), rcond=None)
-        fitted = np.array(sca_model.fit_reference(strain_increment, stress_increment, previous_lambda=0.0))
+        lame_lambda, mu = exact
+        if not (mu > 0 and 3 * lame_lambda + 2 * mu > 0):
+            (mu,), *_ = np.linalg.lstsq(columns[:, 1:], stress_tensor.reshape(-1) - previous_lambda * volumetric,
+                                        rcond=None)
+            exact = np.array([previous_lambda, mu])
+        fitted = np.array(sca_model.fit_reference(strain_increment, stress_increment, previous_lambda))
         errors.append(np.abs(fitted - exact).max() / np.abs(exact).max())
     return max(errors)
 
