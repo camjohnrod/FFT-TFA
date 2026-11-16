@@ -81,6 +81,20 @@ clustering in 4.6 / 6.4 s instead of 65 / 915 s; added as `k_means_method`. Reru
 k-means runs per small part, and the elastic features dominate), SCA's offline about halved; the default stays
 "plain".
 
+**Findings (2026-11-15, evening): the 2D fiber example, and contrast.** 35 % fibers, 1 % then γ12 1 %, uniaxial
+stress, plain k-means, 1024² references. Contrast 34 (glass/PA) against 90 (a provisional hot glass/PA: the matrix's
+E, yield stress and hardening scaled by 0.8 / 2.1, so only the contrast changes): Spectral LS's errors after yield
+grew 5–7 % (its elastic error 20 %) and its online time 25–30 % (CG iterations +56 %); FFT-TFA's errors grew 7 % and
+its time 0–4 %. At equal online time FFT-TFA with k-means leads by about 1.8× at 1 % with contrast 34 and 2.2× with
+contrast 90, and is about level with Spectral LS after the shear at both; untrained FFT-TFA trails both. Contrast is
+a weak lever: it slows Spectral LS, but FFT-TFA's plastic error grows as much. Conclusion for the paper's 2D fiber
+example: report it as it is, about 2× online at moderate plasticity and level under strong plastic flow, offline
+amortized over load paths, explained by the error against material states. Open: whether FFT-TFA's online cost per
+material state can be cut in a way that stays fair to every method (each iteration multiplies 6p × 6p blocks per
+partition frequency; the kernels' symmetry could halve that, but an optimization only FFT-TFA gets invites an equally
+optimized Spectral LS). 3D, where Spectral LS's cost grows fastest, remains the most likely place for a clear time
+result.
+
 **Tried and set aside** (not to redo without a new reason):
 - For FFT-TFA, one fiber part per fiber in each partition: stiffer and less accurate.
 - A per-partition block-Jacobi preconditioner: fewer GMRES iterations, slower overall.
