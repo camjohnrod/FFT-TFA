@@ -115,9 +115,30 @@ out indefinite, λ keeps its last value and μ is fitted alone (as under pure sh
 (between the phases: +4.4 → +1.5 % stiff; C0 = L_m: −2.6 → −1.0 % soft), so a midpoint would lose the sign and the
 monotone convergence and put the matrix under A2.
 
+**Findings (2026-11-17): in elasticity the error is A2, not the far field.** Tried: a degree-free FFT-TFA whose
+residual uses the exact clustered interaction (each cluster's polarization on its elements, Γ0 by one FFT on the
+element grid, averaged over each cluster: FFT-TFA at full degree, or SCA with C0 = L_m on clusters inside partitions),
+while the Newton correction uses today's partition operator, so the degree sets only the speed. A prototype outside the
+repository: on check.py's problems with an elastic matrix (contrast 100) it converges to FFT-TFA at full degree and to
+SCA with C0 = L_m (1e-9), and to the cut laminate's exact solution. As a fixed point (exact residual, cheap Jacobian)
+it contracts only 0.69 per iteration at degree 0 and 0.38 at degree 1; as flexible GMRES on the exact Jacobian,
+preconditioned by a loose solve (1e-1) with today's degree-1 operator, it takes 12–18 element-grid FFT pairs per step.
+On a 256² image of the 35 % fibers (uniaxial stress, untrained, 16² to 128² partitions, contrast 34 and 90) Spectral LS
+on the same image took 53–86, rising with contrast, while this stayed flat. But the far field (A4: today's degree 1
+against the exact clustered answer) was only 0.0–0.7 % of a 1–5 % error (degree 2: at most 0.15 %), and it often
+offsets part of A2, so today's degree 1 is usually closer to the image's answer than the exact clustered one. A2 (one
+polarization per inclusion part) is nearly all of the elastic error and converges slowly as the partitions halve
+(3.1 → 2.1 → 1.45 → 1.0 %, contrast 34, tension). This confirms 2026-11-16's "likely" cause, on a 256² image. The
+exact-residual solver stays useful as a diagnostic, since it isolates A2; the lever for elastic accuracy is a richer
+inclusion polarization.
+
 **Tried and set aside** (not to redo without a new reason):
 - For FFT-TFA, one fiber part per fiber in each partition: stiffer and less accurate.
 - A per-partition block-Jacobi preconditioner: fewer GMRES iterations, slower overall.
+- A degree-free FFT-TFA, its residual by the exact clustered interaction on the element grid and its correction by
+  today's operator, 2026-11-17 (findings above): correct and fast against Spectral LS, but it removes only the far
+  field's error, a small share of the elastic error, at 5–20× today's cost on coarse partitions and with fields on the
+  element grid.
 - Removing the exact corrections inside each partition: polynomials cannot follow the sharp near field, 14–68 % off at
   practical partition sizes.
 - Polarization shapes from the elastic strain concentration, plus one polarization per cluster: needs offline
