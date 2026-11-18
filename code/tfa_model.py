@@ -223,6 +223,8 @@ class TFASolver(Solver):
     def __init__(self, clusters):
         super().__init__(clusters, clusters.cluster_count)
         self.E, self.P, self.offline_from_cache = get_E_and_P(clusters)
+        # P's 6 × 6 block from each cluster to itself, P_aa, for the preconditioner (get_newton_correction).
+        self.own_P = np.array([self.P[6 * a:6 * a + 6, 6 * a:6 * a + 6] for a in range(clusters.cluster_count)])
         # SF-5's free compliance: that of the cell's elastic stiffness, the average of L E over the clusters.
         elastic_stiffness = clusters.average(clusters.materials.L @ self.E.reshape(-1, 6, 6))
         self.free_compliance = get_free_compliance(elastic_stiffness, self.stress_free)
@@ -287,7 +289,8 @@ class TFASolver(Solver):
     def get_newton_correction(self, current, plastic_history):
         """Solves J δε = -r (TFA-4) by GMRES, with the matrix-free product J v = v - P (H_μ v) of TFA-5, less the
         freed strain's change (SF-5). H_μ is zero outside the yielding clusters, so each product reads only their
-        columns of P."""
+        columns of P. GMRES runs with J's diagonal blocks I − P_aa H_a inverted (block-Jacobi) on the right, as
+        FFT-TFA's (FT-7) and SCA's do."""
         materials, average = self.clusters.materials, self.clusters.average
         sensitivity = get_eigenstrain_sensitivity(current.strain, materials, plastic_history)
         yielding_clusters = np.any(sensitivity != 0, axis=(1, 2))
@@ -299,4 +302,12 @@ class TFASolver(Solver):
             freed_change = (self.E @ (-self.free_compliance @ average(held_stress_change))).reshape(-1, 6)
             return vector - induced_change - freed_change
 
-        return solve_by_gmres(apply_jacobian, current.residual)
+        # J_aa = I − P_aa H_a, less the freed strain's change from a's own eigenstrain: E_a (−S_F) times a's share of
+        # the cell times L_a (P_aa − I) H_a.
+        cell_share = (self.clusters.share / self.clusters.partition_count)[:, None, None]
+        own_blocks = (np.eye(6) - self.own_P @ sensitivity
+                      + cell_share * self.E.reshape(-1, 6, 6) @ self.free_compliance @ materials.L
+                      @ (self.own_P - np.eye(6)) @ sensitivity)
+        inverse_blocks = np.linalg.inv(own_blocks)
+        return solve_by_gmres(apply_jacobian, current.residual,
+                              apply_preconditioner=lambda vector: apply_blocks(inverse_blocks, vector))

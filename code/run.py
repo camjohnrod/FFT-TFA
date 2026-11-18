@@ -112,13 +112,19 @@ def describe_storage(entry, clusters):
     block = mesh.partition_size
     polynomials = get_polynomial_basis(block, resolve_degree(entry.settings["degree"], mesh)).shape[-1]
     counts = np.bincount(clusters.cluster_partition, minlength=clusters.partition_count)
-    # Offline, the largest arrays: the kernels in real space before their transform, and get_correction_blocks' pair
-    # counts over twice a partition, for every pair of slots in every partition.
+    # Offline, the largest arrays: the kernels in real space before their transform; one column of Γ on the elements
+    # (get_element_Gamma_columns: with B(n) and (Bᵀ C0 B)⁻¹ at every frequency, about 34 numbers per element); and
+    # one batch of get_correction_blocks' pair counts, about 6 numbers per element of the windows twice a partition
+    # across, one window per slot of each partition in the batch.
     kernels_built_MB = polynomials**2 * 36 * 8 * clusters.partition_count / 1024**2
-    pair_counts_MB = clusters.partition_count * counts.max()**2 * 8 * np.prod(2 * block) / 1024**2
+    Gamma_column_MB = 34 * 8 * mesh.element_count / 1024**2
+    window_elements = counts.max() * np.prod(2 * block)
+    batch_elements = min(max(1, config.fft_tfa_pair_count_elements // window_elements),
+                         clusters.partition_count) * window_elements
+    pair_counts_MB = 6 * 8 * batch_elements / 1024**2
     return (f"kernels {polynomials**2 * kernel_MB:.0f} MB ({polynomials} polynomials), corrections "
             f"{np.sum(counts**2) * 36 * 8 / 1024**2:.0f} MB; offline needs more than "
-            f"{max(kernels_built_MB, 2 * pair_counts_MB):.0f} MB")
+            f"{max(kernels_built_MB, Gamma_column_MB, pair_counts_MB):.0f} MB")
 
 def list_cache():
     """Lists the files in code/cache/: E and P, references."""
@@ -155,20 +161,23 @@ class Entry(NamedTuple):
     scheme_index: int
     point: str
 
-def format_setting(name, value):
-    """How a setting shows in an entry's label: partitions or elements per side as 8² or 8³, m=, i=, degree, C0."""
+def format_setting(method, name, value):
+    """How a setting shows in an entry's label: partitions or elements per side as 8² or 8³ (a clustered method's
+    elements as mesh 8², apart from its partitions), m=, i=, degree, C0."""
     if name in ("partitions", "elements"):
-        return f"{value}{'²' if is_shape_constant_along_z() else '³'}"
+        per_side = f"{value}{'²' if is_shape_constant_along_z() else '³'}"
+        return f"mesh {per_side}" if name == "elements" and method != "Spectral LS" else per_side
     return {"matrix_clusters": f"m={value}", "inclusion_clusters": f"i={value}", "degree": f"degree {value}",
             "C0": f"C0 {value}"}[name]
 
-def describe_settings(settings):
-    """Settings as a label shows them, for example "8² m=4 i=1"."""
-    return " ".join(format_setting(name, value) for name, value in settings.items())
+def describe_settings(method, settings):
+    """A method's settings as a label shows them, for example "8² m=4 i=1"."""
+    return " ".join(format_setting(method, name, value) for name, value in settings.items())
 
 def get_shared_settings(scheme):
     """The settings every entry of a scheme has in common."""
-    return {name: value for name, value in scheme[0].items() if all(entry[name] == value for entry in scheme)}
+    return {name: value for name, value in scheme[0].items()
+            if all(name in entry and entry[name] == value for entry in scheme)}
 
 def get_scheme_names(method, shared_per_scheme):
     """Each scheme's name: the method, then those of the scheme's shared settings that tell it from the method's other
@@ -177,7 +186,7 @@ def get_scheme_names(method, shared_per_scheme):
     for shared in shared_per_scheme:
         distinct = {name: value for name, value in shared.items()
                     if any(other.get(name) != value for other in shared_per_scheme)}
-        names.append(" ".join([method, describe_settings(distinct)]) if distinct else method)
+        names.append(" ".join([method, describe_settings(method, distinct)]) if distinct else method)
     if len(set(names)) < len(names):
         names = [f"{name} ({index + 1})" for index, name in enumerate(names)]
     return names
@@ -193,8 +202,8 @@ def get_entries():
         names = get_scheme_names(method, shared_per_scheme)
         for index, (scheme, shared, name) in enumerate(zip(schemes, shared_per_scheme, names)):
             for settings in scheme:
-                point = describe_settings({setting: value for setting, value in settings.items()
-                                           if setting not in shared})
+                point = describe_settings(method, {setting: value for setting, value in settings.items()
+                                                   if setting not in shared})
                 if not point:
                     label = name
                 elif name == method:
@@ -216,8 +225,9 @@ def get_element_cluster(mesh, settings):
                               settings["inclusion_clusters"])
 
 def get_partition_clusters(settings):
-    """The clusters of an FFT-TFA or TFA entry's settings, on the shared clustered mesh, inside its partitions."""
-    mesh = get_mesh(config.clustered_mesh, settings["partitions"])
+    """The clusters of an FFT-TFA or TFA entry's settings, on its mesh (config.get_clustered_elements), inside its
+    partitions."""
+    mesh = get_mesh(config.get_clustered_elements(settings), settings["partitions"])
     return get_clusters(mesh, get_element_cluster(mesh, settings))
 
 def get_entry_clusters(entry):
@@ -401,7 +411,7 @@ def solve_all(load_path, field_steps=None):
 # cached (cell.get_cached) under every input that changes its answer, like E and P.
 
 # Increase whenever a code change alters the reference, so caches made by the old code are recomputed.
-reference_cache_version = 4
+reference_cache_version = 5
 
 def get_lattice_label(lattice_shape):
     """A lattice of shape [z, y, x] as "N×N" when its cells are columns through the thickness, "N×N×N_z" otherwise."""

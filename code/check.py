@@ -34,6 +34,8 @@ Each check prints PASS or FAIL with the number it judged. The problems are in ch
   other, for TFA too.)
 - On the fiber, the reference, solved at the working resolution, must equal Spectral LS bit for bit, and load back
   from its cache unchanged.
+- On the coarse laminate, entries setting their own elements must give, bit for bit, what clustered_mesh set to those
+  elements gives.
 Every problem runs on Willot's element kernel, and the laminate and the fiber once more on Moulinec–Suquet's.
 So a change meant to leave the results alone (a cleanup) must pass, and one meant to change them must not: check its
 results, then save them anew. They are in code/check_saved_results.npz, and hold bit for bit only at the
@@ -71,13 +73,14 @@ saved_results_path = pathlib.Path(__file__).parent / "check_saved_results.npz"
 check_materials = dict(matrix=dict(E=100e6, poisson=0.19, yield_stress=1.0e6, hardening=10e6),
                        inclusion=dict(E=10e9, poisson=0.3, yield_stress=np.inf, hardening=0))
 
-def get_check_entries(partitions, spectral_elements, matrix_clusters=1, degree=1):
-    """One entry of each method."""
+def get_check_entries(partitions, spectral_elements, matrix_clusters=1, degree=1, own_elements=None):
+    """One entry of each method; with own_elements, FFT-TFA, SCA and TFA on that mesh instead of clustered_mesh."""
+    own_mesh = {} if own_elements is None else {"elements": own_elements}
     return {"fft_tfa": [dict(partitions=partitions, matrix_clusters=matrix_clusters, inclusion_clusters=1,
-                             degree=degree)],
-            "sca": [dict(matrix_clusters=matrix_clusters, inclusion_clusters=1, C0="self-consistent")],
+                             degree=degree, **own_mesh)],
+            "sca": [dict(matrix_clusters=matrix_clusters, inclusion_clusters=1, C0="self-consistent", **own_mesh)],
             "spectral_ls": [dict(elements=spectral_elements, C0="midpoint")],
-            "tfa": [dict(partitions=partitions, matrix_clusters=matrix_clusters, inclusion_clusters=1)]}
+            "tfa": [dict(partitions=partitions, matrix_clusters=matrix_clusters, inclusion_clusters=1, **own_mesh)]}
 
 def get_cyclic_load(max_strain):
     """Out to the given strain, to its opposite and back to zero: unloading, reverse yielding and zero imposed strain.
@@ -114,6 +117,8 @@ pinned_inputs = {
     "divergence_limit": 1e3, "tfa_divergence_limit": 1.0, "tfa_columns_per_solve": 100,
     "sca_reference_tolerance": 1e-3, "sca_max_reference_updates": 10, "sca_pure_shear_tolerance": 1e-12,
     "sca_kernel_parts_tolerance": 1e-10, "sca_assembly_rows": 600,
+    # Small, so FFT-TFA's pair counts come in several batches of partitions on every problem.
+    "fft_tfa_pair_count_elements": 2000,
     "tfa_factorization_ordering": "MMD_AT_PLUS_A",
     "line_search_sufficient_decrease": 1e-4, "line_search_step_reduction": 0.5, "line_search_max_reductions": 10,
     "k_means_method": "plain", "k_means_iterations": 50, "k_means_seed": 0, "k_means_start": "++",
@@ -128,6 +133,14 @@ check_problems = {
     # side, the layer 3 of them thick: the only test of Spectral LS coarser than the mesh.
     "laminate": {"geometry": "laminate", **get_cyclic_load(strain(e11=0.015, e22=0.020, g12=0.03, g13=0.01)),
                  **get_check_entries(partitions=9, spectral_elements=9)},
+    # The laminate on a 9 × 9 mesh, set once by clustered_mesh and once by the entries' own elements, over a
+    # clustered_mesh of 27: the two must agree bit for bit (same_problems), the only test of an entry's own mesh.
+    "coarse laminate": {"geometry": "laminate", "clustered_mesh": 9,
+                        **get_cyclic_load(strain(e11=0.015, e22=0.020, g12=0.03, g13=0.01)),
+                        **get_check_entries(partitions=3, spectral_elements=9)},
+    "coarse laminate, own mesh": {"geometry": "laminate",
+                                  **get_cyclic_load(strain(e11=0.015, e22=0.020, g12=0.03, g13=0.01)),
+                                  **get_check_entries(partitions=3, spectral_elements=9, own_elements=9)},
     # A layer 7 elements thick, so each interface cuts a partition (2/3 inclusion): partitions there hold both phases.
     # In transverse shear γ12 both phases carry the same stress. FFT-TFA represents the exact polarization, but at degree 1
     # its far field cannot follow the polarization's step across a cut partition (degree 2 can, on 3 elements), and the
@@ -186,6 +199,9 @@ check_problems = {
 # the reference against Spectral LS.
 for name in ("laminate", "fiber"):
     check_problems[f"{name}, Moulinec-Suquet"] = {**check_problems[name], "element_kernel": "Moulinec-Suquet"}
+
+# Pairs of problems that set the same problem in two ways, so every result of one must equal the other's bit for bit.
+same_problems = [("coarse laminate", "coarse laminate, own mesh")]
 
 # The methods whose model is not exact on a problem: compared with the exact solution, but not judged by it.
 inexact_methods = {"cut laminate": ("FFT-TFA",)}
@@ -567,6 +583,17 @@ def check_problem(problem_name, problem_inputs, saved_results, cache_folder):
                              + "".join(f"\n       differs: {name}" for name in changed))
     return all_passed, arrays
 
+def check_same_problem(problem_name, other_name, result_arrays):
+    """Every result of two problems set in two ways (same_problems) must be identical, method by method."""
+    prefix, other_prefix = f"{problem_name}/", f"{other_name}/"
+    names = [name[len(prefix):] for name in result_arrays if name.startswith(prefix)]
+    other_names = [name[len(other_prefix):] for name in result_arrays if name.startswith(other_prefix)]
+    changed = [name for name in names
+               if not np.array_equal(result_arrays[prefix + name], result_arrays.get(other_prefix + name))]
+    return report(sorted(names) == sorted(other_names) and not changed,
+                  f"{other_name}: identical to {problem_name}"
+                  + "".join(f"\n       differs: {name}" for name in changed))
+
 def main():
     """Runs every check (python code/check.py), and with save, saves the results if all pass."""
     mode = sys.argv[1] if len(sys.argv) > 1 else "check"
@@ -586,6 +613,8 @@ def main():
             passed, arrays = check_problem(problem_name, problem_inputs, saved_results, pathlib.Path(cache_folder))
             all_passed &= passed
             result_arrays.update(arrays)
+    for problem_name, other_name in same_problems:
+        all_passed &= check_same_problem(problem_name, other_name, result_arrays)
 
     if saved_results is None and mode == "check":
         print("No results saved yet: run python code/check.py save to save them.")

@@ -1414,7 +1414,8 @@ $$
 $$
 
 GMRES solves it with this product, never forming $\mathbf J$; $\mathbf H_\mu$ is zero outside the yielding clusters, so
-each product reads only their columns of $\mathbf P$. Each step starts from the exact elastic predictor
+each product reads only their columns of $\mathbf P$. It is preconditioned as FFT-TFA's and SCA's are, by each cluster's
+own block $\mathbf I-\mathbf P_{aa}\mathbf H_\mu(a)$ inverted (block-Jacobi). Each step starts from the exact elastic predictor
 $\mathbf E\bar{\boldsymbol\varepsilon}+\mathbf P\boldsymbol\mu_n$, the strain if no cluster yields further, and every
 evaluation sets each elastic cluster's strain so that its residual is zero (`TFASolver.evaluate`).
 
@@ -1488,7 +1489,9 @@ $$
 
 for every offset $\mathbf D$ at once (`get_moment_kernels`), then transformed to Fourier space. The weights
 $w_{ji}(\boldsymbol\delta)$ for every $\boldsymbol\delta$ at once are the cross-correlation of $\psi_j$ and $\psi_i$, one
-FFT padded to twice the partition, and the sum over $\boldsymbol\delta$ is then a matrix product.
+FFT padded to twice the partition, and the sum over $\boldsymbol\delta$ is then a matrix product. $\boldsymbol\Gamma_0$
+itself, 36 numbers per element offset, is never held whole: it is built one column at a time, each column added to the
+moment kernels and to the corrections' offsets (below) before the next (`get_element_Gamma_columns`).
 
 **The corrections.** Inside one partition ($\mathbf D=\mathbf 0$), group the element pairs of section 5, step 2, the
 same way:
@@ -1500,7 +1503,7 @@ $$
 
 $n_{ab}(\boldsymbol\delta)$ counts the element pairs of $a$ and $b$ with offset $\boldsymbol\delta$; for every offset at
 once, that is the cross-correlation of the two clusters' indicators, one FFT padded to twice the partition.
-Subtracting FT-4's share gives FT-2 (`get_correction_blocks`).
+Subtracting FT-4's share gives FT-2 (`get_correction_blocks`, a batch of partitions at a time).
 
 #### D.4 The preconditioner
 
@@ -1559,7 +1562,8 @@ $$
 \tag{SC-2}
 $$
 
-That is $37$ FFTs of the element grid per cluster offline (one forward, 36 back), and $(6N_{\text{clust}})^2$ numbers
+That is $37$ FFTs of the element grid per cluster offline (one forward, 36 back, done one polarization component, six
+of them, at a time, so the strain field held is 6 numbers per element, not 36), and $(6N_{\text{clust}})^2$ numbers
 stored. $\hat{\boldsymbol\Gamma}_0$ is zero at frequency zero, so every column of $\mathbf D$ averages to zero over the
 cell and the mean strain stays the imposed one: what FT-3 does for FFT-TFA comes free.
 
@@ -1772,7 +1776,7 @@ in the eigenstrains as $\mathbf P\boldsymbol\mu$ is, so TFA-3 and TFA-5 gain it 
 | $\mathbf C_0$, $\mathbf L_M$, $\mathbf L_T$ | `C0`, `matrix_L`, `get_algorithmic_stiffness` |
 | $\boldsymbol\mu$; $\mathbf z_n$ | `plastic_strain`; `plastic_history` |
 | $v(a)$ | `Clusters.share` |
-| $\boldsymbol\Gamma_0(\alpha\leftarrow\beta)$, $\hat{\boldsymbol\Gamma}(A\leftarrow B)$ | `element_Gamma`; the degree-0 moment kernel |
+| $\boldsymbol\Gamma_0(\alpha\leftarrow\beta)$, $\hat{\boldsymbol\Gamma}(A\leftarrow B)$ | `Gamma_column`, `near_Gamma`; the degree-0 moment kernel |
 | $\hat{\mathbf P}_0$, $\hat{\mathbf M}_M^{-1}$ | `P0_transformed`; `get_matrix_units_operator` |
 | $\psi_i$; $N_{\text{poly}}$ | columns of `basis`; `p` |
 | $m_i(a)$; $\boldsymbol\tau_i(B)$ | `moments`; `partition_moments` |

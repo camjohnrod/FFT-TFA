@@ -227,13 +227,15 @@ def get_cell_map(entry, arrays):
     if entry["method"] == "Spectral LS":
         return plots.CellMap(label, f"{settings['elements']} voxels per side, C0: {settings['C0']}",
                              {"voxel": cluster_ids}, element_phase)
+    # A clustered method's own mesh, when it sets one (config.get_clustered_elements).
+    mesh = f"mesh {settings['elements']} per side, " if "elements" in settings else ""
     if entry["method"] == "SCA":
-        return plots.CellMap(label, f"over the whole cell, C0: {settings['C0']}\n{clusters_line}",
+        return plots.CellMap(label, f"{mesh}over the whole cell, C0: {settings['C0']}\n{clusters_line}",
                              {"cluster": cluster_ids}, element_phase, fill)
     if entry["method"] == "TFA":
-        return plots.CellMap(label, f"{settings['partitions']} partitions per side\n{clusters_line}",
+        return plots.CellMap(label, f"{mesh}{settings['partitions']} partitions per side\n{clusters_line}",
                              {"cluster": cluster_ids}, element_phase, fill)
-    return plots.CellMap(label, f"{settings['partitions']} partitions per side, degree {settings['degree']}\n"
+    return plots.CellMap(label, f"{mesh}{settings['partitions']} partitions per side, degree {settings['degree']}\n"
                                 f"{clusters_line}",
                          {"cluster": cluster_ids, "partition": arrays[f"{label}/element_partition"]},
                          element_phase, fill)

@@ -38,8 +38,8 @@ steps_to_first_turning_point = 15      # the load path's other lines keep the sa
 #   fft_tfa = [[dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=2) for p in (4, 8, 16)],
 #              [dict(partitions=p, matrix_clusters=4, inclusion_clusters=1, degree=3) for p in (4, 8, 16)]]
 
-# FFT-TFA, SCA and TFA all group the elements of one fine mesh, which resolves the geometry, into clusters. Spectral LS
-# and the reference set their own elements.
+# FFT-TFA, SCA and TFA group the elements of a fine mesh, which resolves the geometry, into clusters: this one, unless
+# an entry sets its own elements. Spectral LS and the reference set their own elements.
 clustered_mesh              = 1024        # elements per side
 # How every method's k-means clusters are found: "plain", one k-means into all of a part's clusters; or "nested",
 # halving the cluster with the largest spread until there are enough, so clusters at a larger count split those at a
@@ -55,15 +55,18 @@ element_kernel              = "Willot"
 
 # FFT-TFA, the method under development (notes/fft_tfa_lecture.md): clusters interacting exactly inside each
 # partition, and through an FFT on the partitions beyond, each partition summarized by polynomial moments.
-#   partitions          per side: the blocks of elements its FFT runs on; must divide clustered_mesh. Best at most about
-#                       half an inclusion across
+#   partitions          per side: the blocks of elements its FFT runs on; must divide its mesh's elements. Best at most
+#                       about half an inclusion across
 #   matrix_clusters     per partition's matrix part, by k-means; 1 (with inclusion_clusters 1): each part is one
 #                       cluster, with no k-means and so no offline solves
 #   inclusion_clusters  per partition's inclusion part, by k-means: more follow its polarization more closely
 #   degree              of the polynomials summarizing each partition: 0 its mean only, which stalls as partitions
 #                       shrink; 1 or 2 is usually enough; higher converges to the exact interaction, "full" is exact.
 #                       The kernels grow fast with it, in 3D above all (preview)
-fft_tfa     = [dict(partitions=p, matrix_clusters=1, inclusion_clusters=1, degree=2) for p in (16, 32, 64, 128, 256)]
+#   elements            optional, per side: the mesh its clusters group, instead of clustered_mesh. On a Spectral LS
+#                       entry's elements, both solve the same image. For example, one scheme per mesh:
+#                       [[dict(elements=e, partitions=p, ...) for p in (8, 16)] for e in (64, 128)]
+fft_tfa = [dict(elements=clustered_mesh, partitions=p, matrix_clusters=1, inclusion_clusters=1, degree=1) for p in (16, 32, 64,  128, 256)]
 
 # SCA, self-consistent clustering analysis (Liu, Bessa & Liu 2016; lecture, appendix E): the clustered equation FFT-TFA
 # approximates, solved exactly, on clusters over the whole cell. It stores (6 × clusters)² doubles, which preview
@@ -73,6 +76,7 @@ fft_tfa     = [dict(partitions=p, matrix_clusters=1, inclusion_clusters=1, degre
 #   C0                  its reference stiffness, which changes its answer: "matrix", which makes it FFT-TFA on one
 #                       partition; or "self-consistent", isotropic, its two Lamé constants refitted at every load
 #                       step (Liu, Bessa & Liu's Box II), which stores D in two (three) parts besides D itself
+#   elements            optional, as for FFT-TFA
 # For example: sca = [dict(matrix_clusters=c, inclusion_clusters=c, C0="matrix") for c in (8, 32, 128)]
 sca         = []
 
@@ -205,6 +209,10 @@ sca_pure_shear_tolerance    = 1e-12
 sca_kernel_parts_tolerance  = 1e-10
 sca_assembly_rows           = 600
 
+# FFT-TFA's corrections (FT-2) count each partition's pairs of elements by offset, on a window twice the partition
+# across, for this many window elements at a time (memory against speed: 2²⁰ needs about 50 MB).
+fft_tfa_pair_count_elements = 2**20
+
 # k-means (each k-means of k_means_method): Lloyd iterations from a seeded start (scipy's minit), on features from six
 # elastic Spectral LS solves with this reference stiffness.
 k_means_iterations          = 50
@@ -265,14 +273,21 @@ def get_all_entries(listed):
     """Every entry of a method's schemes."""
     return [entry for scheme in get_schemes(listed) for entry in scheme]
 
-def check_entries(name, listed, needed_settings):
-    """Every entry of a method must hold exactly that method's settings, and no scheme may list one entry twice."""
+def get_clustered_elements(entry):
+    """The elements per side of the mesh an FFT-TFA, SCA or TFA entry's clusters group: its own, or clustered_mesh."""
+    return entry.get("elements", clustered_mesh)
+
+def check_entries(name, listed, needed_settings, optional_settings=()):
+    """Every entry of a method must hold that method's settings, and no others but its optional ones, and no scheme may
+    list one entry twice."""
     for scheme in get_schemes(listed):
         if any(scheme.count(entry) > 1 for entry in scheme):
             raise ValueError(f"A scheme of {name} lists an entry twice: {scheme}.")
     for entry in get_all_entries(listed):
-        if set(entry) != set(needed_settings):
-            raise ValueError(f"Each entry of {name} needs exactly {', '.join(needed_settings)}. Got {entry}.")
+        if not set(needed_settings) <= set(entry) <= set(needed_settings) | set(optional_settings):
+            raise ValueError(f"Each entry of {name} needs exactly {', '.join(needed_settings)}"
+                             + (f", and may hold {', '.join(optional_settings)}" if optional_settings else "")
+                             + f". Got {entry}.")
 
 def check_geometry():
     """The geometry config.py names must exist, and its sizes must fit in the cell."""
@@ -326,13 +341,14 @@ def check_inputs():
         raise ValueError(f"k_means_method must be \"plain\" or \"nested\". Got {k_means_method!r}.")
     if element_kernel not in ("Willot", "Moulinec-Suquet"):
         raise ValueError(f"element_kernel must be \"Willot\" or \"Moulinec-Suquet\". Got {element_kernel!r}.")
-    check_entries("fft_tfa", fft_tfa, ("partitions", "matrix_clusters", "inclusion_clusters", "degree"))
-    check_entries("sca", sca, ("matrix_clusters", "inclusion_clusters", "C0"))
+    check_entries("fft_tfa", fft_tfa, ("partitions", "matrix_clusters", "inclusion_clusters", "degree"), ("elements",))
+    check_entries("sca", sca, ("matrix_clusters", "inclusion_clusters", "C0"), ("elements",))
     check_entries("spectral_ls", spectral_ls, ("elements", "C0"))
-    check_entries("tfa", tfa, ("partitions", "matrix_clusters", "inclusion_clusters"))
+    check_entries("tfa", tfa, ("partitions", "matrix_clusters", "inclusion_clusters"), ("elements",))
     for entry in get_all_entries(fft_tfa) + get_all_entries(tfa):
-        if clustered_mesh % entry["partitions"] != 0:
-            raise ValueError(f"partitions={entry['partitions']} must divide clustered_mesh={clustered_mesh}.")
+        if get_clustered_elements(entry) % entry["partitions"] != 0:
+            raise ValueError(f"partitions={entry['partitions']} must divide the mesh's "
+                             f"{get_clustered_elements(entry)} elements per side. Got {entry}.")
     for entry in get_all_entries(fft_tfa) + get_all_entries(sca) + get_all_entries(tfa):
         if min(entry["matrix_clusters"], entry["inclusion_clusters"]) < 1:
             raise ValueError(f"The cluster counts must be at least 1. Got {entry}.")

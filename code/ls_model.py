@@ -54,8 +54,8 @@ def to_fourier_blocks(offset_blocks, lattice_shape):
     return np.fft.rfftn(offset_blocks.reshape(*lattice_shape, block, block), axes=(0, 1, 2))
 
 def to_offset_blocks(transformed):
-    """The inverse of to_fourier_blocks: an operator's blocks by frequency to its blocks by lattice offset, stacked as
-    rows of 6 (offsets × 6, 6)."""
+    """The inverse of to_fourier_blocks for one column of an operator: its 6 values at every frequency (rfftn's half)
+    to its 6 values at every lattice offset (offsets × 6)."""
     lattice_shape = (transformed.shape[0], transformed.shape[1], transformed.shape[1])
     return np.fft.irfftn(transformed, s=lattice_shape, axes=(0, 1, 2)).reshape(-1, 6)
 
@@ -68,8 +68,8 @@ def get_direction_strain_matrix(directions):
     return np.stack([np.stack(row, axis=-1) for row in rows], axis=-2)
 
 def get_element_kernel(lattice_shape, C0):
-    """The element kernel P0 = Γ0 C0 on a lattice of the given shape [z, y, x] over the cubic cell, as offset blocks,
-    discretized as config.element_kernel says. Both discretizations take the continuum form at every frequency ξ,
+    """The element kernel P̂0 = Γ̂0 C0 on a lattice of the given shape [z, y, x] over the cubic cell, one real 6 × 6
+    block per frequency (rfftn's half), discretized as config.element_kernel says. Both discretizations take the continuum form at every frequency ξ,
     P̂0 = Γ̂0 C0 (LS-4) with Γ̂0 = B (Bᵀ C0 B)⁻¹ Bᵀ and B = B(n), and P̂0(0) = 0 (LS-5). They differ in the direction n
     and at a few of the highest frequencies, with q = 2π ξ / N the frequency per element along each axis:
 
@@ -82,6 +82,18 @@ def get_element_kernel(lattice_shape, C0):
       equal π, w = 0 and P̂0 = 0 (his eq. 41).
 
     The cell is a cube, so frequencies in units of 2π / side compare across axes whatever each axis's count."""
+    B, is_zero, is_highest = get_kernel_directions(lattice_shape)
+    B_transposed = np.swapaxes(B, -1, -2)
+    P0_transformed = B @ np.linalg.inv(B_transposed @ C0 @ B) @ B_transposed @ C0
+    P0_transformed[is_zero] = 0
+    if config.element_kernel == "Moulinec-Suquet":
+        P0_transformed[is_highest] = np.eye(6)
+    return P0_transformed
+
+def get_kernel_directions(lattice_shape):
+    """What get_element_kernel needs at every frequency ξ of a lattice (rfftn's half), as config.element_kernel
+    discretizes it: B(n) for its direction n, where the kernel is zero, and where a component of ξ is the highest
+    (Moulinec–Suquet's kernel is the identity there)."""
     frequencies = [np.fft.fftfreq(count, 1 / count) for count in lattice_shape[:2]]
     frequencies.append(np.fft.rfftfreq(lattice_shape[2], 1 / lattice_shape[2]))
     frequency_z, frequency_y, frequency_x = np.meshgrid(*frequencies, indexing="ij")
@@ -99,16 +111,27 @@ def get_element_kernel(lattice_shape, C0):
     is_zero = norms[..., 0] == 0     # ξ = 0, and for Willot where two or more components are the highest
     directions = np.where(is_zero[..., None], [1.0, 0.0, 0.0], directions)   # any direction: set to zero below
     B = get_direction_strain_matrix(directions / np.where(is_zero[..., None], 1.0, norms))
-    B_transposed = np.swapaxes(B, -1, -2)
-    P0_transformed = B @ np.linalg.inv(B_transposed @ C0 @ B) @ B_transposed @ C0
-    P0_transformed[is_zero] = 0
-    if config.element_kernel == "Moulinec-Suquet":
-        P0_transformed[highest[0] | highest[1] | highest[2]] = np.eye(6)
-    return to_offset_blocks(P0_transformed)
+    return B, is_zero, highest[0] | highest[1] | highest[2]
+
+def get_element_Gamma_columns(lattice_shape, C0):
+    """Γ0 = P0 C0⁻¹, the element-level strain per unit polarization, one column at a time: yields each of its 6 columns
+    by lattice offset (offsets × 6), so only a sixth of it is ever held. Γ̂0 = B (Bᵀ C0 B)⁻¹ Bᵀ is symmetric, so its
+    column j is B (Bᵀ C0 B)⁻¹ times row j of B; it is zero where get_element_kernel's P̂0 is, and C0⁻¹ where P̂0 is the
+    identity (Moulinec–Suquet)."""
+    B, is_zero, is_highest = get_kernel_directions(lattice_shape)
+    inverse = np.linalg.inv(np.swapaxes(B, -1, -2) @ C0 @ B)
+    for column in range(6):
+        Gamma_transformed = (B @ (inverse @ B[..., column, :, None]))[..., 0]
+        Gamma_transformed[is_zero] = 0
+        if config.element_kernel == "Moulinec-Suquet":
+            Gamma_transformed[is_highest] = np.linalg.inv(C0)[:, column]
+        yield to_offset_blocks(Gamma_transformed)
 
 def get_P0_transformed(lattice_shape, C0):
-    """P̂0 at every frequency of a lattice of the given shape: the element kernel, as Spectral LS applies it."""
-    return to_fourier_blocks(get_element_kernel(lattice_shape, C0), lattice_shape)
+    """P̂0 at every frequency of a lattice of the given shape: the element kernel, as Spectral LS applies it. It is
+    real (B(n) is), but stored as complex numbers, at twice the memory: numpy multiplies a complex kernel into the
+    complex transformed field faster than a real one, which matters at every CG iteration."""
+    return get_element_kernel(lattice_shape, C0).astype(complex)
 
 ## ------- Residual in Matrix Units (LS-10) ------- ##
 

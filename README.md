@@ -83,7 +83,9 @@ reference finer than the clustered mesh, the error measured holds both, and in e
 clustering makes FFT-TFA soft (lecture, 5.1), while a coarse voxel mesh is stiff, so the two can cancel and a coarse
 result can look better than its model is. Setting the reference's `elements` equal to `clustered_mesh` makes the
 reference the exact answer on the very image the clustered methods group, so their errors are their models' alone,
-while Spectral LS on coarser grids shows what coarsening the image costs.
+while Spectral LS on coarser grids shows what coarsening the image costs. An FFT-TFA, SCA or TFA entry may also set
+its own `elements` instead of `clustered_mesh`: on a Spectral LS entry's elements, both carry the same mesh error, and
+what separates them is the clustered method's model (one scheme per mesh draws one line each).
 
 ### Changing what runs
 

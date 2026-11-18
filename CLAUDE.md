@@ -42,8 +42,8 @@ before proposing a direction, and don't redo what it sets aside without a new re
   list of lists splits a method into schemes (`config.get_schemes`; names from the settings, `run.get_entries`): the
   error-against-time plot draws one line per scheme in the order listed, the other line figures each scheme's last
   (finest) entry only; a scheme's colour is a shade of its method's (`plots.scheme_shades`). An entry listed in two
-  schemes is solved once. `clustered_mesh` is one fine mesh shared by FFT-TFA, SCA and TFA; Spectral LS's elements
-  are its own.
+  schemes is solved once. `clustered_mesh` is the fine mesh FFT-TFA, SCA and TFA group, unless an entry sets its own
+  `elements` (`config.get_clustered_elements`; labelled "mesh 64²"); Spectral LS's elements are its own.
 - **Every method is a `newton.Solver`** built from its clusters and its own settings (`FFTTFASolver(clusters,
   degree)`, `SCASolver(clusters, C0)`, `SpectralLSSolver(clusters, C0)`, `TFASolver(clusters)`); keep new methods and
   features to that shape.
@@ -98,8 +98,8 @@ There is no pytest suite and no way to run one check problem alone; check.py's d
 check compares every result with `code/check_saved_results.npz` (untracked) bit for bit, at the `thread_count` it was
 saved with, and is skipped if none is saved. For a refactor: `check.py save` on a clean tree before, `check.py` after.
 
-Not covered by `check.py`, so recheck by hand after touching them: FFT-TFA's block-Jacobi preconditioner must leave
-answers alone (compare with it on and off), FFT-TFA's Newton product must match finite differences of its residual
+Not covered by `check.py`, so recheck by hand after touching them: the block-Jacobi preconditioners (FFT-TFA's, SCA's,
+TFA's) must leave answers alone (compare with them on and off), FFT-TFA's Newton product must match finite differences of its residual
 (FT-6), its assembled diagonal blocks (FT-7) those of the Jacobian probed column by column, stopping accuracy on the
 default problem (against a solve at tolerance 1e-11), and `run.py`'s commands, saving and figures (`check.py` draws
 nothing).

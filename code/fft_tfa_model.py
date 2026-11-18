@@ -25,8 +25,9 @@ from typing import NamedTuple
 import numpy as np
 import scipy.sparse
 
+import config
 from cell import Clusters, get_matrix_L
-from ls_model import apply_on_lattice, get_element_kernel, to_fourier_blocks
+from ls_model import apply_on_lattice, get_element_Gamma_columns, to_fourier_blocks
 from material import get_algorithmic_stiffness, radial_return
 from newton import (Evaluation, Solver, apply_blocks, apply_sparse, assemble_blocks, get_block_indices,
                     get_free_compliance, get_free_strain, solve_by_gmres)
@@ -85,9 +86,10 @@ def get_cluster_moments(clusters, basis):
 
 ## ------- Far Field: Moment Kernels (FT-4) ------- ##
 
-def get_moment_kernels(element_Gamma, mesh, basis):
-    """How each partition's moments act on every other's, at every partition offset D = A − B, shape
-    (partition lattice, p, 6, p, 6): the strain in A's polynomial j per unit polarization in B's polynomial i,
+def get_moment_kernels(Gamma_column, mesh, basis):
+    """How each partition's moments act on every other's, for one column of Γ (one polarization component, given by
+    element offset, shape (element lattice, 6)), at every partition offset D = A − B, shape (partition lattice, p, p,
+    6): the strain in A's polynomial j per unit polarization in B's polynomial i,
       K_ji(D) = Σ_{α in A, β in B} ψ_j(α) Γ(α←β) ψ_i(β) = Σ_d w_ji(d) Γ(k D + d),   w_ji(d) = Σ_r ψ_j(r) ψ_i(r − d),
     with d the offset between the two elements' positions inside their partitions: the pairs of elements grouped by
     their offset, as get_correction_blocks groups them."""
@@ -103,15 +105,22 @@ def get_moment_kernels(element_Gamma, mesh, basis):
     offsets = [np.where(index < size, index, index - 2 * size) for index, size in zip(indices, block)]
     weights = weights[np.ix_(range(p), range(p), *indices)].reshape(p * p, -1)
     # Step 2: for every partition offset D, K_ji(D) = Σ_d w_ji(d) Γ(k D + d), a product of the weights (polynomial
-    # pairs × offsets d) and Γ at those offsets (offsets d × its 36 components).
-    kernels = np.zeros((*partition_shape, p, p, 36))
+    # pairs × offsets d) and the column of Γ at those offsets (offsets d × its 6 strain components).
+    kernels = np.zeros((*partition_shape, p, p, 6))
     for D in np.ndindex(*partition_shape):
-        Gamma = element_Gamma[np.ix_(*[(block[axis] * D[axis] + offsets[axis]) % element_shape[axis]
-                                       for axis in range(3)])]
-        kernels[D] = (weights @ Gamma.reshape(-1, 36)).reshape(p, p, 36)
-    return kernels.reshape(*partition_shape, p, p, 6, 6).transpose(0, 1, 2, 3, 5, 4, 6)
+        Gamma = Gamma_column[np.ix_(*[(block[axis] * D[axis] + offsets[axis]) % element_shape[axis]
+                                      for axis in range(3)])]
+        kernels[D] = (weights @ Gamma.reshape(-1, 6)).reshape(p, p, 6)
+    return kernels
 
 ## ------- Near Field: Corrections inside each Partition (FT-2) ------- ##
+
+def get_padded_offsets(size):
+    """The element offsets δ a transform padded to twice a partition's `size` elements holds along an axis, index by
+    index: i below size, i − 2 size from size on. Every offset inside a partition, |δ| < size, is held without
+    wrapping."""
+    indices = np.arange(2 * size)
+    return np.where(indices < size, indices, indices - 2 * size)
 
 class PartitionSlots(NamedTuple):
     """The clusters laid out partition by partition, so that every partition can be handled at once: a partition's
@@ -141,36 +150,37 @@ def get_partition_slots(clusters):
     element_count = np.maximum(indicators.sum(axis=(2, 3, 4)), 1)
     return PartitionSlots(first_cluster, occupied, indicators, element_count, cluster_slot)
 
-def get_correction_blocks(clusters, element_Gamma, moments, self_kernels):
+def get_correction_blocks(clusters, near_Gamma, moments, self_kernels):
     """FT-2's corrections C, for every pair of clusters a, b in the same partition, as sparse 6 × 6 blocks, clusters ×
-    clusters: the exact interaction Γ(a←b) minus the far field's share of it.
+    clusters: the exact interaction Γ(a←b) minus the far field's share of it. near_Gamma is Γ at the offsets inside a
+    partition, laid out as get_padded_offsets says, 6 × 6 at each.
 
     Γ(a←b) averages the element kernel over every pair of their elements. Grouped by the elements' offset δ inside the
     partition, which n_ab(δ) pairs share (the cross-correlation of the two clusters' indicators, by FFT),
       Γ(a←b) = (1 / n_a) Σ_δ n_ab(δ) Γ(δ),
     while the far field gives Σ_ji (m_j(a) / n_a) K_ji(0) m_i(b), with m the clusters' moments."""
-    block_shape, element_shape = clusters.mesh.partition_size, clusters.mesh.element_shape
+    block_shape = clusters.mesh.partition_size
     partition_count = clusters.partition_count
     slots = get_partition_slots(clusters)
     slot_count = slots.occupied.shape[1]
 
-    # Step 1: the pair counts n_ab(δ) of every partition, by cross-correlation. Padded to twice the partition, it holds
-    # every offset |δ| < k without wrapping; index i holds δ = i below k, i − 2k from k on.
+    # The pair counts n_ab(δ) of every partition, by cross-correlation, padded to twice the partition
+    # (get_padded_offsets), then the exact interaction of every pair of slots. A batch of partitions at a time, and in
+    # each batch one source slot at a time, which bounds the pair counts' memory (config.fft_tfa_pair_count_elements).
     padded_shape = tuple(2 * block_shape)
-    transformed = np.fft.rfftn(slots.indicators, s=padded_shape, axes=(2, 3, 4))
-    pair_offsets = [np.where(np.arange(2 * size) < size, np.arange(2 * size), np.arange(2 * size) - 2 * size)
-                    for size in block_shape]
-    kernel = element_Gamma[np.ix_(*[pair_offsets[axis] % element_shape[axis] for axis in range(3)])]
-    # Step 2: the exact interaction of every pair of slots, one source slot at a time, which bounds the pair counts'
-    # memory.
+    padded_size = int(np.prod(padded_shape))
+    batch_size = max(1, config.fft_tfa_pair_count_elements // (slot_count * padded_size))
     exact = np.empty((partition_count, slot_count, slot_count, 6, 6))
-    for source in range(slot_count):
-        pair_counts = np.rint(np.fft.irfftn(transformed * np.conj(transformed[:, source:source + 1]), s=padded_shape,
-                                            axes=(2, 3, 4)))
-        exact[:, :, source] = (pair_counts.reshape(partition_count * slot_count, -1) @ kernel.reshape(-1, 36)).reshape(
-            partition_count, slot_count, 6, 6)
+    for start in range(0, partition_count, batch_size):
+        batch = slice(start, start + batch_size)
+        transformed = np.fft.rfftn(slots.indicators[batch], s=padded_shape, axes=(2, 3, 4))
+        for source in range(slot_count):
+            pair_counts = np.rint(np.fft.irfftn(transformed * np.conj(transformed[:, source:source + 1]),
+                                                s=padded_shape, axes=(2, 3, 4)))
+            exact[batch, :, source] = (pair_counts.reshape(-1, padded_size) @ near_Gamma.reshape(-1, 36)).reshape(
+                -1, slot_count, 6, 6)
     exact /= slots.element_count[:, :, None, None, None]
-    # Step 3: the far field's share of every pair, from the clusters' moments.
+    # The far field's share of every pair, from the clusters' moments.
     slot_moments = np.zeros((partition_count, slot_count, moments.shape[1]))
     slot_moments[clusters.cluster_partition, slots.cluster_slot] = moments
     far = np.einsum('Aaj,Abi,jxiy->Aabxy', slot_moments / slots.element_count[:, :, None], slot_moments, self_kernels)
@@ -219,13 +229,22 @@ def get_interaction(clusters, degree):
     to `degree` (a number, or "full")."""
     mesh = clusters.mesh
     matrix_L = get_matrix_L()
-    element_shape = mesh.element_shape
-    # Γ = P0 C0⁻¹: the element-level strain per unit polarization.
-    element_Gamma = (get_element_kernel(element_shape, matrix_L).reshape(*element_shape, 6, 6)
-                     @ np.linalg.inv(matrix_L))
-    basis = get_polynomial_basis(mesh.partition_size, resolve_degree(degree, mesh))
+    element_shape, block = mesh.element_shape, mesh.partition_size
+    basis = get_polynomial_basis(block, resolve_degree(degree, mesh))
     p = basis.shape[-1]
-    kernels = get_moment_kernels(element_Gamma, mesh, basis)
+    # Γ = P0 C0⁻¹, the element-level strain per unit polarization, is needed at every element offset for the moment
+    # kernels, but only at the offsets inside a partition for the corrections. Whole, it would be 36 numbers per
+    # element, more than anything else FFT-TFA builds, so it comes one column (one polarization component) at a time,
+    # each used up before the next.
+    kernels = np.zeros((*mesh.partition_shape, p, p, 6, 6))
+    near_Gamma = np.zeros((*(2 * block), 6, 6))
+    near_offsets = np.ix_(*[get_padded_offsets(size) % count for size, count in zip(block, element_shape)])
+    for column, Gamma_column in enumerate(get_element_Gamma_columns(element_shape, matrix_L)):
+        Gamma_column = Gamma_column.reshape(*element_shape, 6)
+        kernels[..., column] = get_moment_kernels(Gamma_column, mesh, basis)
+        near_Gamma[..., column] = Gamma_column[near_offsets]
+    # Ordered (partition lattice, p, 6, p, 6): the receiving polynomial and strain, the source's and its polarization.
+    kernels = kernels.transpose(0, 1, 2, 3, 5, 4, 6)
     self_kernels = kernels[0, 0, 0]
     moment_kernels = to_fourier_blocks(kernels.reshape(-1, 6 * p), mesh.partition_shape)
 
@@ -241,7 +260,7 @@ def get_interaction(clusters, degree):
 
     # The corrections are applied at every residual and Jacobian product; stored as dense 6 × 6 blocks (BSR), a product
     # reads one column index per block instead of one per entry.
-    correction_blocks = get_correction_blocks(clusters, element_Gamma, moments, self_kernels).tobsr(blocksize=(6, 6))
+    correction_blocks = get_correction_blocks(clusters, near_Gamma, moments, self_kernels).tobsr(blocksize=(6, 6))
     return Interaction(clusters, matrix_L, to_moments, from_moments, moment_kernels, correction_blocks,
                        get_own_strain_change(clusters, moments, self_kernels, correction_blocks))
 

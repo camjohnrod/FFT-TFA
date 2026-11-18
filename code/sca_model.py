@@ -23,7 +23,7 @@ import scipy.sparse
 
 import config
 from cell import get_matrix_L
-from ls_model import get_P0_transformed
+from ls_model import get_element_kernel
 from material import get_algorithmic_stiffness, radial_return
 from newton import (Evaluation, Solver, SolverDidNotConverge, apply_blocks, get_free_compliance, get_free_strain,
                     solve_by_gmres, stress_norm_weights)
@@ -52,13 +52,13 @@ def get_kernel_parts(lattice_shape):
     the three kernels solved for, then checked on a fourth medium. Parts that are zero everywhere are left out."""
     samples = [(0.0, 1.0), (1.0, 1.0), (1.0, 2.0)]
     coefficients = np.array([get_kernel_coefficients(*sample) for sample in samples])
-    kernels = np.array([get_P0_transformed(lattice_shape, C0) @ np.linalg.inv(C0)
+    kernels = np.array([get_element_kernel(lattice_shape, C0) @ np.linalg.inv(C0)
                         for C0 in map(lambda sample: get_isotropic_stiffness(*sample), samples)])
     parts = np.einsum('ks,s...->k...', np.linalg.inv(coefficients), kernels)
     check_lambda, check_mu = 2.0, 0.5
     C0 = get_isotropic_stiffness(check_lambda, check_mu)
     reconstructed = np.einsum('k,k...->...', get_kernel_coefficients(check_lambda, check_mu), parts)
-    exact = get_P0_transformed(lattice_shape, C0) @ np.linalg.inv(C0)
+    exact = get_element_kernel(lattice_shape, C0) @ np.linalg.inv(C0)
     if np.abs(reconstructed - exact).max() > config.sca_kernel_parts_tolerance * np.abs(exact).max():
         raise ValueError("the element kernel is not a combination of the three isotropic kernels SCA assumes")
     return [(k, part) for k, part in enumerate(parts) if np.abs(part).max() > 0]
@@ -75,8 +75,9 @@ def get_stored_matrix_count(C0):
 def get_interaction(clusters, Gamma_transformed):
     """SC-2, Liu–Bessa–Liu's eq. 27: D, the strain averaged over every cluster a per unit polarization on every
     cluster b (Γ̂(a←b) of the lecture's section 5), as a dense (6 × clusters)² matrix, a's six rows by b's six
-    columns, for the kernel Γ̂0 given per frequency. One source cluster at a time: Γ0 applied to its indicator by FFT on
-    the elements, which gives a 6 × 6 field (column j: a unit polarization along j), then averaged over every cluster.
+    columns, for the kernel Γ̂0 given per frequency (real 6 × 6 blocks). One source cluster and one polarization
+    component j at a time: column j of Γ0 applied to the cluster's indicator by FFT on the elements, which gives a
+    strain field (6 numbers per element) per unit polarization along j, then averaged over every cluster.
     Γ̂0 is zero at frequency zero, so each column of D averages to zero over the cell: the mean strain stays the imposed
     one."""
     mesh, cluster_count = clusters.mesh, clusters.cluster_count
@@ -90,9 +91,10 @@ def get_interaction(clusters, Gamma_transformed):
     for source in range(cluster_count):
         indicator = (clusters.element_cluster == source).reshape(shape).astype(float)
         indicator_transformed = scipy.fft.rfftn(indicator, axes=axes, workers=config.thread_count)
-        strain = scipy.fft.irfftn(Gamma_transformed * indicator_transformed[..., None, None],
-                                  s=[shape[axis] for axis in axes], axes=axes, workers=config.thread_count)
-        D[:, :, source, :] = (to_cluster_averages @ strain.reshape(-1, 36)).reshape(cluster_count, 6, 6)
+        for column in range(6):
+            strain = scipy.fft.irfftn(Gamma_transformed[..., :, column] * indicator_transformed[..., None],
+                                      s=[shape[axis] for axis in axes], axes=axes, workers=config.thread_count)
+            D[:, :, source, column] = to_cluster_averages @ strain.reshape(-1, 6)
     return D.reshape(6 * cluster_count, 6 * cluster_count)
 
 def get_strain_change(D, polarization):
@@ -145,7 +147,7 @@ class SCASolver(Solver):
         else:
             self.C0 = get_matrix_L()
             self.free_compliance = get_free_compliance(self.C0, self.stress_free)
-            self.D = get_interaction(clusters, get_P0_transformed(clusters.mesh.element_shape, self.C0)
+            self.D = get_interaction(clusters, get_element_kernel(clusters.mesh.element_shape, self.C0)
                                      @ np.linalg.inv(self.C0))
         self.previous_stress = np.zeros((clusters.cluster_count, 6))
         self.step_start = None                        # set by solve_step

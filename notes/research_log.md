@@ -223,7 +223,8 @@ inclusion polarization.
    the path, for SCA and FFT-TFA alike; the kernel difference between TFA's FE and the LS kernel must be told apart
    from the soft part.
 6. **Cost at equal accuracy, in 3D.** Online time against error for each method, in 2D and 3D, on many inclusions: the
-   `"random spheres"` shape (done), and `get_correction_blocks` built a chunk of partitions at a time ("Memory" below). Spectral LS
+   `"random spheres"` shape (done), and `get_correction_blocks` built a batch of partitions at a time (done, "Memory"
+   below). Spectral LS
    over a range of resolutions answers "why not a full-field solve?"; TFA and SCA (with C0 = L_m) on the same clusters
    isolate the interaction. An FFT on n lattice points costs about n log n, with n the elements for Spectral LS and the
    partitions for FFT-TFA, so Spectral LS on a mesh as coarse as FFT-TFA's partitions costs about as much per
@@ -266,8 +267,20 @@ Open for FFT-TFA (the lecture's section 10):
   memory grows with the partitions times p² and with the square of the clusters per partition, not with the elements.
   Offline, `get_correction_blocks` cross-correlates every partition's clusters with one of its clusters at a time,
   holding about 2³ × the elements × the most clusters in a partition numbers, which in 3D with k-means can still exceed
-  a Spectral LS solve of the whole load path. To do before any 3D study: also build them a chunk of partitions at a
-  time (a chunk size or memory budget in `config.py`). Every k-means setting also needs six elastic
+  a Spectral LS solve of the whole load path. Done 2026-11-17: they are built a batch of partitions at a time
+  (`fft_tfa_pair_count_elements`), and the element kernel Γ0, which held whole was the largest offline array (36
+  numbers per element, about 1 GB at 1024²), one column at a time; tracemalloc peaks of `get_interaction` at 512²
+  (degree 1, one cluster per phase part) fell from 244 / 278 MB to 72 / 86 MB at 16² / 64² partitions, and the
+  operators agree with the old ones to 1e-15. The same two ideas, for fairness, in the other methods: SCA assembles
+  D one polarization column at a time from a real Γ̂0 (512², C0 = L_m: 296 → 91 MB; self-consistent 687 → 361 MB;
+  about 7 % more offline time at 128 clusters, as FFT-TFA's columns cost it 14–42 %); Spectral LS builds P̂0 directly
+  in Fourier space instead of through the 36-number real-space field (offline 0.73 → 0.44 s, peak unchanged at
+  229 MB, set by LS-10's operator beside the P̂0 it keeps). P̂0 stays complex, although real: a real kernel times the
+  complex field is about 35 % slower in numpy, which would cost Spectral LS online time. A fairness pass the same
+  day found TFA alone without the block-Jacobi preconditioner FFT-TFA and SCA have; with it (I − P_aa H_a), on 100
+  fibers at 35 %, glass/PA, 128², 576 clusters, GMRES iterations fell 10 % and the online time stayed within 1 %.
+  Left as they are, by design: TFA's elastic predictor and stricter divergence limit, the Spectral LS reference,
+  online time alone on the error-against-time plot, Spectral LS's complex kernels. Every k-means setting also needs six elastic
   Spectral LS solves on the elements, the floor of its offline memory.
 
 Later: a reference stiffness for FFT-TFA that follows plastic softening (needed for a perfectly plastic phase), and the
